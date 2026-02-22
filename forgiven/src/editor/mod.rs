@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use crate::buffer::Buffer;
 use crate::keymap::{Action, KeyHandler, Mode};
+use crate::lsp::{LspManager, DiagnosticInfo};
 use crate::ui::UI;
+use lsp_types::Diagnostic;
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
 pub struct Editor {
@@ -50,6 +52,12 @@ pub struct Editor {
     
     /// List of files for file picker
     file_list: Vec<PathBuf>,
+    
+    /// LSP manager for language server protocol support
+    lsp_manager: LspManager,
+    
+    /// Diagnostics for the current buffer
+    current_diagnostics: Vec<Diagnostic>,
 }
 
 impl Editor {
@@ -73,6 +81,8 @@ impl Editor {
             buffer_picker_idx: 0,
             file_picker_idx: 0,
             file_list: Vec::new(),
+            lsp_manager: LspManager::new(),
+            current_diagnostics: Vec::new(),
         })
     }
 
@@ -82,6 +92,19 @@ impl Editor {
         self.buffers.push(buffer);
         self.current_buffer_idx = self.buffers.len() - 1;
         self.set_status(format!("Opened {}", path.display()));
+        
+        // Notify LSP about opened document if we have a language server for this file type
+        let language = LspManager::language_from_path(path);
+        let text = self.current_buffer()
+            .map(|b| b.lines().join("\n"))
+            .unwrap_or_default();
+        
+        if let Ok(uri) = LspManager::path_to_uri(path) {
+            if let Some(client) = self.lsp_manager.get_client(&language) {
+                let _ = client.did_open(uri, language.clone(), text);
+            }
+        }
+        
         Ok(())
     }
 
@@ -105,6 +128,18 @@ impl Editor {
     /// Main event loop
     pub async fn run(&mut self) -> Result<()> {
         loop {
+            // Process LSP messages
+            let _ = self.lsp_manager.process_messages().await;
+            
+            // Update diagnostics for current buffer
+            if let Some(buf) = self.current_buffer() {
+                if let Some(path) = &buf.file_path {
+                    if let Ok(uri) = LspManager::path_to_uri(path) {
+                        self.current_diagnostics = self.lsp_manager.get_diagnostics(&uri).await;
+                    }
+                }
+            }
+            
             // Render the UI
             self.render()?;
 
@@ -356,9 +391,24 @@ impl Editor {
                 }
             }
             Action::FileSave => {
-                if let Some(buf) = self.current_buffer_mut() {
+                // Get file path and text before doing LSP operations
+                let (file_path, text) = if let Some(buf) = self.current_buffer_mut() {
                     buf.save()?;
-                    self.set_status("File saved".to_string());
+                    (buf.file_path.clone(), buf.lines().join("\n"))
+                } else {
+                    (None, String::new())
+                };
+                
+                self.set_status("File saved".to_string());
+                
+                // Notify LSP about saved document
+                if let Some(path) = file_path {
+                    let language = LspManager::language_from_path(&path);
+                    if let Ok(uri) = LspManager::path_to_uri(&path) {
+                        if let Some(client) = self.lsp_manager.get_client(&language) {
+                            let _ = client.did_save(uri, Some(text));
+                        }
+                    }
                 }
             }
             Action::Quit => {

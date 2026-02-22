@@ -183,8 +183,8 @@ impl KeyHandler {
 
     /// Handle a key in Normal mode, returning an action
     pub fn handle_normal(&mut self, key: KeyEvent) -> Action {
-        // If we're building a leader sequence
-        if !self.sequence.is_empty() {
+        // If we're building a leader sequence (sequence_start is set)
+        if self.sequence_start.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 self.sequence.push(ch);
                 self.show_which_key = false; // Hide while typing

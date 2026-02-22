@@ -39,5 +39,10 @@ notify = "7"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 
+# LSP support
+lsp-types = "0.97"
+lsp-server = "0.7"
+url = "2"
+
 [dev-dependencies]
 pretty_assertions = "1"

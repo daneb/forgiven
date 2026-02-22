@@ -6,6 +6,7 @@ mod buffer;
 mod config;
 mod editor;
 mod keymap;
+mod lsp;
 mod ui;
 
 use crate::editor::Editor;
