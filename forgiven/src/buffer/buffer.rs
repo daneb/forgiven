@@ -48,6 +48,9 @@ pub struct Buffer {
     /// Whether the buffer has unsaved changes
     pub is_modified: bool,
 
+    /// LSP document version (incremented on each change)
+    pub lsp_version: i32,
+
     /// Edit history for undo/redo
     history: EditHistory,
 
@@ -68,6 +71,7 @@ impl Buffer {
             cursor: Cursor::default(),
             selection: None,
             is_modified: false,
+            lsp_version: 0,
             history: EditHistory::new(),
             scroll_col: 0,
             scroll_row: 0,
@@ -110,6 +114,7 @@ impl Buffer {
             lines,
             cursor: Cursor::default(),
             selection: None,
+            lsp_version: 0,
             is_modified: false,
             history: EditHistory::new(),
             scroll_col: 0,
@@ -152,6 +157,132 @@ impl Buffer {
     // Text insertion / deletion
     // -------------------------------------------------------------------------
 
+    /// Mark buffer as modified and increment LSP version
+    fn mark_modified(&mut self) {
+        self.is_modified = true;
+        self.lsp_version += 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // Normal-mode edit operations (delete, yank, paste, goto)
+    // -------------------------------------------------------------------------
+
+    /// Delete the character at the cursor position (Normal-mode `x`).
+    pub fn delete_char_at_cursor(&mut self) {
+        self.delete_char_at();
+    }
+
+    /// Delete the entire current line and return it (Normal-mode `dd`).
+    /// Cursor stays on the same row (or the last row if the last line was deleted).
+    pub fn delete_current_line(&mut self) -> String {
+        let row = self.cursor.row;
+        let deleted = self.lines.remove(row);
+
+        // Ensure at least one line always exists.
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+
+        // Clamp cursor row.
+        self.cursor.row = row.min(self.lines.len() - 1);
+        self.clamp_cursor_col();
+        self.mark_modified();
+        deleted
+    }
+
+    /// Delete from cursor to end of line and return the deleted text (Normal-mode `D`).
+    pub fn delete_to_line_end(&mut self) -> String {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let byte_idx = char_to_byte_idx(&self.lines[row], col);
+        let deleted = self.lines[row].split_off(byte_idx);
+        self.mark_modified();
+        deleted
+    }
+
+    /// Return the content of the current line without modifying the buffer (Normal-mode `yy`).
+    pub fn yank_current_line(&self) -> String {
+        self.lines[self.cursor.row].clone()
+    }
+
+    /// Insert `text` as a new line BELOW the cursor row (Normal-mode `p`).
+    pub fn paste_after_cursor(&mut self, text: &str) {
+        let row = self.cursor.row;
+        self.lines.insert(row + 1, text.to_string());
+        self.cursor.row = row + 1;
+        self.cursor.col = 0;
+        self.mark_modified();
+    }
+
+    /// Insert `text` as a new line ABOVE the cursor row (Normal-mode `P`).
+    pub fn paste_before_cursor(&mut self, text: &str) {
+        let row = self.cursor.row;
+        self.lines.insert(row, text.to_string());
+        // cursor row stays the same (now points at the pasted line).
+        self.cursor.col = 0;
+        self.mark_modified();
+    }
+
+    /// Move cursor to the first line of the buffer (Normal-mode `gg`).
+    pub fn goto_first_line(&mut self) {
+        self.cursor.row = 0;
+        self.cursor.col = 0;
+        self.scroll_row = 0;
+    }
+
+    /// Move cursor to the last line of the buffer (Normal-mode `G`).
+    pub fn goto_last_line(&mut self) {
+        self.cursor.row = self.lines.len().saturating_sub(1);
+        self.clamp_cursor_col();
+    }
+
+    /// Insert a multi-line block of text at the current cursor position.
+    ///
+    /// - The first line of `text` is appended to the current line at the cursor column.
+    /// - Subsequent lines are inserted as new lines below.
+    /// - The cursor ends up at the last inserted column.
+    pub fn insert_text_block(&mut self, text: &str) {
+        let input_lines: Vec<&str> = text.lines().collect();
+        if input_lines.is_empty() {
+            return;
+        }
+
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+
+        // Split the current line at the cursor.
+        let byte_idx = char_to_byte_idx(&self.lines[row], col);
+        let tail = self.lines[row].split_off(byte_idx);
+
+        // Append the first input line to the current line.
+        self.lines[row].push_str(input_lines[0]);
+
+        if input_lines.len() == 1 {
+            // Single-line insertion: re-attach the tail.
+            let new_col = col + input_lines[0].chars().count();
+            self.lines[row].push_str(&tail);
+            self.cursor.col = new_col;
+        } else {
+            // Multi-line: insert all middle lines and then the last + tail.
+            let last_input = input_lines[input_lines.len() - 1];
+            let last_col = last_input.chars().count();
+            let mut last_line = last_input.to_string();
+            last_line.push_str(&tail);
+
+            // Insert middle lines (indices 1..len-1).
+            for (i, &line) in input_lines[1..input_lines.len() - 1].iter().enumerate() {
+                self.lines.insert(row + 1 + i, line.to_string());
+            }
+            // Insert the last line.
+            self.lines.insert(row + input_lines.len() - 1, last_line);
+
+            self.cursor.row = row + input_lines.len() - 1;
+            self.cursor.col = last_col;
+        }
+
+        self.mark_modified();
+    }
+
     /// Insert a single character at the current cursor position
     pub fn insert_char(&mut self, ch: char) {
         let row = self.cursor.row;
@@ -168,7 +299,7 @@ impl Buffer {
         line.insert(byte_idx, ch);
 
         self.cursor.col += 1;
-        self.is_modified = true;
+        self.mark_modified();
 
         self.history.record(EditOp::InsertChar { row, col, ch });
     }
@@ -184,7 +315,7 @@ impl Buffer {
 
         self.cursor.row += 1;
         self.cursor.col = 0;
-        self.is_modified = true;
+        self.mark_modified();
 
         self.history.record(EditOp::InsertNewline { row, col });
     }
@@ -217,7 +348,7 @@ impl Buffer {
             self.cursor.col -= 1;
         }
 
-        self.is_modified = true;
+        self.mark_modified();
         self.history.record(EditOp::DeleteCharBefore { row, col });
     }
 
@@ -240,7 +371,7 @@ impl Buffer {
             line.remove(byte_idx);
         }
 
-        self.is_modified = true;
+        self.mark_modified();
         self.history.record(EditOp::DeleteCharAt { row, col });
     }
 
@@ -287,6 +418,28 @@ impl Buffer {
 
     pub fn move_cursor_line_end(&mut self) {
         self.cursor.col = self.current_line_len();
+    }
+
+    /// Move cursor to last character on the line (Normal-mode `$`).
+    /// Stays on the last character rather than moving past it.
+    pub fn move_cursor_line_end_normal(&mut self) {
+        let len = self.current_line_len();
+        self.cursor.col = if len == 0 { 0 } else { len - 1 };
+    }
+
+    /// Move cursor left without wrapping to the previous line (vim `h`).
+    pub fn move_cursor_left_clamp(&mut self) {
+        if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        }
+    }
+
+    /// Move cursor right without wrapping to the next line (vim `l`).
+    pub fn move_cursor_right_clamp(&mut self) {
+        let max = self.current_line_len().saturating_sub(1);
+        if self.cursor.col < max {
+            self.cursor.col += 1;
+        }
     }
 
     pub fn move_cursor_word_forward(&mut self) {
@@ -369,6 +522,13 @@ impl Buffer {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    /// Ensure cursor is visible with default viewport size
+    /// This is a convenience method for when exact viewport size is unknown
+    pub fn ensure_cursor_visible(&mut self) {
+        // Use reasonable defaults (can be improved later with actual terminal size)
+        self.scroll_to_cursor(30, 80);
     }
 
     // -------------------------------------------------------------------------

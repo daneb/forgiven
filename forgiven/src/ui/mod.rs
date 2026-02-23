@@ -2,11 +2,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use std::path::PathBuf;
+use lsp_types::Diagnostic;
 
+use crate::agent::{AgentPanel, Role};
 use crate::buffer::{Cursor, Selection};
 use crate::keymap::Mode;
 
@@ -22,6 +24,7 @@ pub struct UI;
 
 impl UI {
     /// Render the entire UI
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         frame: &mut Frame,
         buffer_data: Option<&BufferData>,
@@ -32,6 +35,11 @@ impl UI {
         key_sequence: &str,
         buffer_list: Option<&BufferList>,
         file_list: Option<&FileList>,
+        diagnostics: &[Diagnostic],
+        // Ghost text suggestion: (text, buffer_row, buffer_col)
+        ghost_text: Option<(&str, usize, usize)>,
+        // Agent panel (None = hidden)
+        agent_panel: Option<&AgentPanel>,
     ) {
         let size = frame.area();
 
@@ -47,7 +55,18 @@ impl UI {
             return;
         }
 
-        // Calculate layout constraints based on which-key visibility
+        // ── Horizontal split when agent panel is visible ──────────────────────
+        let (editor_area, agent_area) = if agent_panel.map(|p| p.visible).unwrap_or(false) {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(size);
+            (cols[0], Some(cols[1]))
+        } else {
+            (size, None)
+        };
+
+        // ── Vertical layout (buffer + status) inside editor_area ─────────────
         let constraints = if which_key_options.is_some() {
             vec![
                 Constraint::Min(1),         // Main buffer area
@@ -64,7 +83,7 @@ impl UI {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
-            .split(size);
+            .split(editor_area);
 
         let main_area = chunks[0];
         let status_area = if which_key_options.is_some() {
@@ -76,14 +95,151 @@ impl UI {
         };
 
         // Render buffer content
-        Self::render_buffer(frame, buffer_data, mode, main_area);
+        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text);
 
         // Render status line
-        Self::render_status_line(frame, buffer_data, mode, status_message, command_buffer, key_sequence, status_area);
+        Self::render_status_line(frame, buffer_data, mode, status_message, command_buffer, key_sequence, status_area, diagnostics);
+
+        // Render agent panel if visible
+        if let (Some(panel), Some(area)) = (agent_panel, agent_area) {
+            Self::render_agent_panel(frame, panel, mode, area);
+        }
+    }
+
+    /// Render the Copilot Chat / agent panel on the right side.
+    fn render_agent_panel(frame: &mut Frame, panel: &AgentPanel, mode: Mode, area: Rect) {
+        let focused = mode == Mode::Agent;
+        let border_style = if focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        // Split area vertically: history (top) + input (bottom 3 lines).
+        let vchunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .split(area);
+
+        let history_area = vchunks[0];
+        let input_area = vchunks[1];
+
+        // ── Chat history ──────────────────────────────────────────────────────
+        let mut lines: Vec<Line> = Vec::new();
+        for msg in &panel.messages {
+            let (label, color) = match msg.role {
+                Role::User => ("You", Color::Green),
+                Role::Assistant => ("Copilot", Color::Cyan),
+                Role::System => ("System", Color::DarkGray),
+            };
+            // Role header.
+            lines.push(Line::from(vec![
+                Span::styled(format!("╔ {} ", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            ]));
+            // Content — wrap manually by splitting on newlines.
+            let content_width = history_area.width.saturating_sub(4) as usize;
+            for content_line in msg.content.lines() {
+                // Word-wrap each source line to fit the panel.
+                let words = content_line.split_whitespace().collect::<Vec<_>>();
+                let mut cur = String::new();
+                for word in words {
+                    if cur.is_empty() {
+                        cur = word.to_string();
+                    } else if cur.len() + 1 + word.len() <= content_width {
+                        cur.push(' ');
+                        cur.push_str(word);
+                    } else {
+                        lines.push(Line::from(Span::styled(format!("  {}", cur), Style::default().fg(Color::White))));
+                        cur = word.to_string();
+                    }
+                }
+                if !cur.is_empty() || content_line.trim().is_empty() {
+                    lines.push(Line::from(Span::styled(format!("  {}", cur), Style::default().fg(Color::White))));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+
+        // Show in-progress streaming reply.
+        if let Some(ref partial) = panel.streaming_reply {
+            lines.push(Line::from(vec![
+                Span::styled("╔ Copilot ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("▋", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            ]));
+            for content_line in partial.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", content_line),
+                    Style::default().fg(Color::White),
+                )));
+            }
+        }
+
+        // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
+        let visible_height = history_area.height.saturating_sub(2) as usize; // account for border
+        let total = lines.len();
+
+        // Cap scroll so we never scroll past the top.
+        let max_scroll = total.saturating_sub(visible_height);
+        let scroll = panel.scroll.min(max_scroll);
+
+        // Compute the slice: count back from the bottom, then offset by scroll.
+        let end = total.saturating_sub(scroll);
+        let start = end.saturating_sub(visible_height);
+        let visible_lines = lines[start..end].to_vec();
+
+        // Build a title that shows scroll position when not at bottom.
+        let history_title = if scroll > 0 {
+            let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
+            format!(" Copilot Chat  ↑ scrolled ({}%)  ↑/↓ to navigate ", pct)
+        } else if total > visible_height {
+            " Copilot Chat  (↑ to scroll up) ".to_string()
+        } else {
+            " Copilot Chat ".to_string()
+        };
+
+        let history_block = Block::default()
+            .title(history_title)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let history_para = Paragraph::new(visible_lines)
+            .block(history_block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(history_para, history_area);
+
+        // ── Input box ─────────────────────────────────────────────────────────
+        let input_text = if focused {
+            format!("{}_", panel.input)  // trailing cursor block
+        } else {
+            panel.input.clone()
+        };
+        // Show [a] apply hint when the latest reply contains a code block.
+        let hint = if panel.messages.is_empty() {
+            " Ask Copilot… (Tab=back, Enter=send, Esc=close) ".to_string()
+        } else if panel.has_code_to_apply() && panel.input.is_empty() {
+            " Message Copilot… | [a] apply code to buffer ".to_string()
+        } else {
+            " Message Copilot… ".to_string()
+        };
+        let hint = hint.as_str();
+        let input_block = Block::default()
+            .title(hint)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let input_para = Paragraph::new(input_text)
+            .block(input_block)
+            .style(Style::default().fg(Color::White));
+        frame.render_widget(input_para, input_area);
     }
 
     /// Render the buffer content
-    fn render_buffer(frame: &mut Frame, buffer_data: Option<&BufferData>, mode: Mode, area: Rect) {
+    fn render_buffer(
+        frame: &mut Frame,
+        buffer_data: Option<&BufferData>,
+        mode: Mode,
+        area: Rect,
+        diagnostics: &[Diagnostic],
+        ghost_text: Option<(&str, usize, usize)>,
+    ) {
         if let Some((_, _, cursor, scroll_row, scroll_col, lines, selection)) = buffer_data {
             let viewport_height = area.height as usize;
             let viewport_width = area.width as usize;
@@ -96,7 +252,18 @@ impl UI {
             let mut visible_lines = Vec::new();
             for row in start_line..end_line {
                 if let Some(line_text) = lines.get(row) {
-                    let line = Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row);
+                    // Check if this line has any diagnostics
+                    let has_diagnostic = diagnostics.iter().any(|d| d.range.start.line as usize == row);
+                    // Only inject ghost text on the row/col it was requested for.
+                    let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
+                        if row == ghost_row && cursor.col == ghost_col {
+                            // Show only the first line of a multi-line suggestion.
+                            Some(text.lines().next().unwrap_or(text))
+                        } else {
+                            None
+                        }
+                    });
+                    let line = Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row, has_diagnostic, row_ghost);
                     visible_lines.push(line);
                 } else {
                     visible_lines.push(Line::from("~"));
@@ -111,14 +278,17 @@ impl UI {
             let paragraph = Paragraph::new(visible_lines);
             frame.render_widget(paragraph, area);
 
-            // Render cursor (only in Normal, Insert modes)
+            // Render cursor (only in Normal, Insert modes).
+            // GUTTER_WIDTH accounts for the 2-char diagnostic marker ("  " / "● ")
+            // prepended to every rendered line — the cursor must be offset by the same amount.
+            const GUTTER_WIDTH: u16 = 2;
             if mode != Mode::PickBuffer {
                 let cursor_row = cursor.row.saturating_sub(*scroll_row);
                 let cursor_col = cursor.col.saturating_sub(*scroll_col);
 
                 if cursor_row < viewport_height && cursor_col < viewport_width {
                     frame.set_cursor_position((
-                        area.x + cursor_col as u16,
+                        area.x + GUTTER_WIDTH + cursor_col as u16,
                         area.y + cursor_row as u16,
                     ));
                 }
@@ -131,7 +301,7 @@ impl UI {
         }
     }
 
-    /// Render a single line with optional selection highlighting
+    /// Render a single line with optional selection highlighting and ghost text.
     fn render_line(
         line_text: &str,
         scroll_col: usize,
@@ -139,8 +309,20 @@ impl UI {
         row: usize,
         selection: &Option<Selection>,
         _scroll_row: usize,
+        has_diagnostic: bool,
+        // First line of inline completion ghost text, shown dimmed after cursor.
+        ghost: Option<&str>,
     ) -> Line<'static> {
         let chars: Vec<char> = line_text.chars().collect();
+
+        // Prepare diagnostic marker if present
+        let diag_marker = if has_diagnostic {
+            vec![
+                Span::styled("● ", Style::default().fg(Color::Red)),
+            ]
+        } else {
+            vec![Span::raw("  ")]
+        };
 
         // If there's a selection, highlight the selected portion
         if let Some(sel) = selection {
@@ -175,15 +357,32 @@ impl UI {
                 spans.push(Span::styled(ch.to_string(), style));
             }
 
-            Line::from(spans)
+            let mut line_spans = diag_marker;
+            line_spans.extend(spans);
+            if let Some(g) = ghost {
+                line_spans.push(Span::styled(
+                    g.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(line_spans)
         } else {
             // No selection, just render normally
             let visible_text: String = chars
                 .iter()
                 .skip(scroll_col)
-                .take(viewport_width)
+                .take(viewport_width.saturating_sub(2)) // Reserve space for diagnostic marker
                 .collect();
-            Line::from(visible_text)
+
+            let mut line_spans = diag_marker;
+            line_spans.push(Span::raw(visible_text));
+            if let Some(g) = ghost {
+                line_spans.push(Span::styled(
+                    g.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(line_spans)
         }
     }
 
@@ -354,6 +553,7 @@ impl UI {
         command_buffer: Option<&str>,
         key_sequence: &str,
         area: Rect,
+        diagnostics: &[Diagnostic],
     ) {
         let mode_str = match mode {
             Mode::Normal => "NORMAL",
@@ -362,6 +562,8 @@ impl UI {
             Mode::Visual => "VISUAL",
             Mode::PickBuffer => "PICK",
             Mode::PickFile => "FIND",
+            Mode::Agent => "AGENT",
+            Mode::Explorer => "EXPLORE",
         };
 
         let mode_color = match mode {
@@ -371,6 +573,8 @@ impl UI {
             Mode::Visual => Color::Magenta,
             Mode::PickBuffer => Color::Cyan,
             Mode::PickFile => Color::LightCyan,
+            Mode::Agent => Color::Cyan,
+            Mode::Explorer => Color::LightGreen,
         };
 
         let mut spans = vec![
@@ -404,6 +608,31 @@ impl UI {
                 format!("{}:{}", cursor.row + 1, cursor.col + 1),
                 Style::default().fg(Color::Gray),
             ));
+        }
+
+        // Diagnostic count
+        if !diagnostics.is_empty() {
+            let error_count = diagnostics.iter().filter(|d| {
+                matches!(d.severity, Some(lsp_types::DiagnosticSeverity::ERROR))
+            }).count();
+            let warning_count = diagnostics.iter().filter(|d| {
+                matches!(d.severity, Some(lsp_types::DiagnosticSeverity::WARNING))
+            }).count();
+            
+            spans.push(Span::raw(" "));
+            if error_count > 0 {
+                spans.push(Span::styled(
+                    format!("● {}", error_count),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            if warning_count > 0 {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("⚠ {}", warning_count),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
         }
 
         // Status message or command buffer

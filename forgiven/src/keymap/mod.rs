@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,8 @@ pub enum Mode {
     Visual,
     PickBuffer,  // For buffer selection UI
     PickFile,    // For file finder UI
+    Agent,       // Copilot Chat / agent panel focused
+    Explorer,    // File explorer tree focused
 }
 
 /// An editor action to be executed
@@ -23,16 +25,29 @@ pub enum Action {
     InsertLineEnd,
     InsertNewlineBelow,
     InsertNewlineAbove,
+    // Normal-mode movement (no line-wrap for h/l)
     MoveLeft,
     MoveRight,
     MoveUp,
     MoveDown,
     MoveLineStart,
-    MoveLineEnd,
+    MoveLineEnd,        // A / InsertLineEnd motion (past last char)
+    MoveLineEndNormal,  // $ in Normal mode (lands ON last char)
     MoveWordForward,
     MoveWordBackward,
+    // Navigation
+    GotoFileTop,        // gg
+    GotoFileBottom,     // G
     Command,
     Visual,
+    // Edit operations
+    DeleteChar,         // x — delete char at cursor
+    DeleteLine,         // dd — delete current line into clipboard
+    DeleteToLineEnd,    // D  — delete from cursor to EOL
+    YankLine,           // yy
+    PasteAfter,         // p
+    PasteBefore,        // P
+    Undo,               // u
     // Leader key actions
     BufferList,
     BufferNext,
@@ -41,6 +56,20 @@ pub enum Action {
     FileFind,
     FileSave,
     Quit,
+    // LSP actions
+    LspHover,
+    LspGoToDefinition,
+    LspReferences,
+    LspRename,
+    LspDocumentSymbols,
+    LspNextDiagnostic,
+    LspPrevDiagnostic,
+    // Agent panel
+    AgentToggle,
+    AgentFocus,
+    // Explorer panel
+    ExplorerToggle,
+    ExplorerFocus,
 }
 
 /// Represents a keybinding tree node
@@ -71,7 +100,7 @@ impl KeyNode {
 
 /// Handles key events and maps them to editor actions with leader key support
 pub struct KeyHandler {
-    /// Current key sequence being built (for leader keys)
+    /// Current leader key sequence being built (SPC …)
     sequence: Vec<char>,
     /// When the sequence started (for which-key timeout)
     sequence_start: Option<Instant>,
@@ -79,6 +108,8 @@ pub struct KeyHandler {
     leader_tree: HashMap<char, KeyNode>,
     /// Which-key popup should be shown
     show_which_key: bool,
+    /// Pending prefix key for two-key Normal-mode commands (d, g, y, c …)
+    pending_key: Option<char>,
 }
 
 impl KeyHandler {
@@ -89,6 +120,7 @@ impl KeyHandler {
             sequence_start: None,
             leader_tree,
             show_which_key: false,
+            pending_key: None,
         }
     }
 
@@ -115,11 +147,35 @@ impl KeyHandler {
         quit_node.children.insert('q', KeyNode::leaf("quit", Action::Quit));
         tree.insert('q', quit_node);
 
+        // SPC l - LSP commands
+        let mut lsp_node = KeyNode::new("lsp");
+        lsp_node.children.insert('h', KeyNode::leaf("hover", Action::LspHover));
+        lsp_node.children.insert('d', KeyNode::leaf("definition", Action::LspGoToDefinition));
+        lsp_node.children.insert('r', KeyNode::leaf("rename", Action::LspRename));
+        lsp_node.children.insert('f', KeyNode::leaf("references", Action::LspReferences));
+        lsp_node.children.insert('s', KeyNode::leaf("symbols", Action::LspDocumentSymbols));
+        tree.insert('l', lsp_node);
+
+        // SPC a - Agent / Copilot Chat panel
+        let mut agent_node = KeyNode::new("agent");
+        agent_node.children.insert('a', KeyNode::leaf("toggle agent panel", Action::AgentToggle));
+        agent_node.children.insert('f', KeyNode::leaf("focus agent panel", Action::AgentFocus));
+        tree.insert('a', agent_node);
+
+        // SPC e - Explorer / file tree
+        let mut explorer_node = KeyNode::new("explorer");
+        explorer_node.children.insert('e', KeyNode::leaf("toggle file explorer", Action::ExplorerToggle));
+        explorer_node.children.insert('f', KeyNode::leaf("focus file explorer", Action::ExplorerFocus));
+        tree.insert('e', explorer_node);
+
         tree
     }
 
     /// Get the current key sequence (for display in status line)
     pub fn sequence(&self) -> String {
+        if let Some(pk) = self.pending_key {
+            return format!("{}", pk);
+        }
         if self.sequence.is_empty() {
             String::new()
         } else {
@@ -183,13 +239,25 @@ impl KeyHandler {
 
     /// Handle a key in Normal mode, returning an action
     pub fn handle_normal(&mut self, key: KeyEvent) -> Action {
-        // If we're building a leader sequence (sequence_start is set)
+        // ── Resolve pending double-key prefixes (dd, gg, yy) ─────────────────
+        if let Some(pk) = self.pending_key.take() {
+            if let KeyCode::Char(ch) = key.code {
+                return match (pk, ch) {
+                    ('d', 'd') => Action::DeleteLine,
+                    ('g', 'g') => Action::GotoFileTop,
+                    ('y', 'y') => Action::YankLine,
+                    _ => Action::Noop, // unknown combo — discard
+                };
+            }
+            // Non-char key after a prefix — cancel
+            return Action::Noop;
+        }
+
+        // ── Leader key sequence (SPC …) ───────────────────────────────────────
         if self.sequence_start.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 self.sequence.push(ch);
-                self.show_which_key = false; // Hide while typing
-
-                // Try to resolve the sequence
+                self.show_which_key = false;
                 return self.resolve_leader_sequence();
             } else if key.code == KeyCode::Esc {
                 self.clear_sequence();
@@ -205,7 +273,7 @@ impl KeyHandler {
             return Action::Noop;
         }
 
-        // Basic vim-like bindings
+        // ── Direct Normal-mode key bindings ───────────────────────────────────
         match key.code {
             // Insert mode entry
             KeyCode::Char('i') => Action::Insert,
@@ -215,15 +283,41 @@ impl KeyHandler {
             KeyCode::Char('o') => Action::InsertNewlineBelow,
             KeyCode::Char('O') => Action::InsertNewlineAbove,
 
-            // Movement
-            KeyCode::Char('h') | KeyCode::Left => Action::MoveLeft,
-            KeyCode::Char('l') | KeyCode::Right => Action::MoveRight,
-            KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
+            // Movement — h/l do NOT wrap across lines (vim behaviour)
+            KeyCode::Char('h') => Action::MoveLeft,
+            KeyCode::Char('l') => Action::MoveRight,
+            KeyCode::Left      => Action::MoveLeft,
+            KeyCode::Right     => Action::MoveRight,
+            KeyCode::Char('k') | KeyCode::Up   => Action::MoveUp,
             KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
             KeyCode::Char('0') | KeyCode::Home => Action::MoveLineStart,
-            KeyCode::Char('$') | KeyCode::End => Action::MoveLineEnd,
+            // $ lands ON the last character in Normal mode
+            KeyCode::Char('$') | KeyCode::End  => Action::MoveLineEndNormal,
             KeyCode::Char('w') => Action::MoveWordForward,
             KeyCode::Char('b') => Action::MoveWordBackward,
+            KeyCode::Char('G') => Action::GotoFileBottom,
+
+            // Delete / edit
+            KeyCode::Char('x') => Action::DeleteChar,
+            KeyCode::Char('D') => Action::DeleteToLineEnd,
+            KeyCode::Char('u') => Action::Undo,
+
+            // Yank / paste
+            KeyCode::Char('p') => Action::PasteAfter,
+            KeyCode::Char('P') => Action::PasteBefore,
+
+            // Double-key prefixes: store first key, resolve on next keypress
+            KeyCode::Char('d') | KeyCode::Char('g') | KeyCode::Char('y') => {
+                if let KeyCode::Char(ch) = key.code {
+                    self.pending_key = Some(ch);
+                }
+                Action::Noop
+            }
+
+            // Ctrl+R — redo (not implemented yet, reserved)
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::Noop
+            }
 
             // Visual mode
             KeyCode::Char('v') => Action::Visual,
