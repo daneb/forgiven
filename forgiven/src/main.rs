@@ -6,6 +6,7 @@ mod agent;
 mod buffer;
 mod config;
 mod editor;
+mod explorer;
 mod highlight;
 mod keymap;
 mod lsp;

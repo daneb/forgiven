@@ -10,6 +10,7 @@ use lsp_types::Diagnostic;
 
 use crate::agent::{AgentPanel, Role};
 use crate::buffer::{Cursor, Selection};
+use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
@@ -40,6 +41,11 @@ impl UI {
         ghost_text: Option<(&str, usize, usize)>,
         // Agent panel (None = hidden)
         agent_panel: Option<&AgentPanel>,
+        // Pre-computed syntax-highlighted spans for the visible viewport.
+        // Each element is the span list for one visible line (index 0 = scroll_row).
+        highlighted_lines: Option<&[Vec<Span<'static>>]>,
+        // File explorer panel (None = hidden)
+        file_explorer: Option<&FileExplorer>,
     ) {
         let size = frame.area();
 
@@ -55,16 +61,35 @@ impl UI {
             return;
         }
 
-        // ── Horizontal split when agent panel is visible ──────────────────────
-        let (editor_area, agent_area) = if agent_panel.map(|p| p.visible).unwrap_or(false) {
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(size);
-            (cols[0], Some(cols[1]))
-        } else {
-            (size, None)
+        // ── Horizontal splits: [explorer?] | [editor] | [agent?] ─────────────
+        let explorer_visible = file_explorer.map(|e| e.visible).unwrap_or(false);
+        let agent_visible = agent_panel.map(|p| p.visible).unwrap_or(false);
+
+        let (explorer_area, content_area, agent_area) = match (explorer_visible, agent_visible) {
+            (true, true) => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(25), Constraint::Min(1), Constraint::Percentage(35)])
+                    .split(size);
+                (Some(cols[0]), cols[1], Some(cols[2]))
+            }
+            (true, false) => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(25), Constraint::Min(1)])
+                    .split(size);
+                (Some(cols[0]), cols[1], None)
+            }
+            (false, true) => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(size);
+                (None, cols[0], Some(cols[1]))
+            }
+            (false, false) => (None, size, None),
         };
+        let editor_area = content_area;
 
         // ── Vertical layout (buffer + status) inside editor_area ─────────────
         let constraints = if which_key_options.is_some() {
@@ -95,7 +120,7 @@ impl UI {
         };
 
         // Render buffer content
-        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text);
+        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text, highlighted_lines);
 
         // Render status line
         Self::render_status_line(frame, buffer_data, mode, status_message, command_buffer, key_sequence, status_area, diagnostics);
@@ -103,6 +128,11 @@ impl UI {
         // Render agent panel if visible
         if let (Some(panel), Some(area)) = (agent_panel, agent_area) {
             Self::render_agent_panel(frame, panel, mode, area);
+        }
+
+        // Render file explorer if visible
+        if let (Some(explorer), Some(area)) = (file_explorer, explorer_area) {
+            Self::render_file_explorer(frame, explorer, mode, area);
         }
     }
 
@@ -126,37 +156,78 @@ impl UI {
 
         // ── Chat history ──────────────────────────────────────────────────────
         let mut lines: Vec<Line> = Vec::new();
+        let content_width = history_area.width.saturating_sub(4) as usize;
+
+        // Render message content, visually separating tool-call lines from prose.
+        // Lines starting with ⚙ are tool operations — shown dim.
+        // The first prose line after a block of tool lines gets a faint separator.
+        let render_content = |content: &str, lines: &mut Vec<Line>| {
+            let mut prev_was_tool = false;
+            for content_line in content.lines() {
+                let trimmed = content_line.trim_start();
+                let is_tool = trimmed.starts_with('⚙');
+
+                if trimmed.is_empty() {
+                    // Only emit blank lines in the prose section
+                    if !prev_was_tool {
+                        lines.push(Line::from(""));
+                    }
+                    continue;
+                }
+
+                // Thin separator when transitioning from tools → final answer
+                if prev_was_tool && !is_tool {
+                    lines.push(Line::from(Span::styled(
+                        "  ────────────────────",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                if is_tool {
+                    // Tool line: dim, no word-wrap (already compact)
+                    lines.push(Line::from(Span::styled(
+                        format!("  {trimmed}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    // Prose: word-wrap in white
+                    let words = content_line.split_whitespace().collect::<Vec<_>>();
+                    let mut cur = String::new();
+                    for word in &words {
+                        if cur.is_empty() {
+                            cur = word.to_string();
+                        } else if cur.len() + 1 + word.len() <= content_width {
+                            cur.push(' ');
+                            cur.push_str(word);
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {cur}"),
+                                Style::default().fg(Color::White),
+                            )));
+                            cur = word.to_string();
+                        }
+                    }
+                    if !cur.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {cur}"),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                }
+                prev_was_tool = is_tool;
+            }
+        };
+
         for msg in &panel.messages {
             let (label, color) = match msg.role {
                 Role::User => ("You", Color::Green),
                 Role::Assistant => ("Copilot", Color::Cyan),
                 Role::System => ("System", Color::DarkGray),
             };
-            // Role header.
             lines.push(Line::from(vec![
-                Span::styled(format!("╔ {} ", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("╔ {label} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
             ]));
-            // Content — wrap manually by splitting on newlines.
-            let content_width = history_area.width.saturating_sub(4) as usize;
-            for content_line in msg.content.lines() {
-                // Word-wrap each source line to fit the panel.
-                let words = content_line.split_whitespace().collect::<Vec<_>>();
-                let mut cur = String::new();
-                for word in words {
-                    if cur.is_empty() {
-                        cur = word.to_string();
-                    } else if cur.len() + 1 + word.len() <= content_width {
-                        cur.push(' ');
-                        cur.push_str(word);
-                    } else {
-                        lines.push(Line::from(Span::styled(format!("  {}", cur), Style::default().fg(Color::White))));
-                        cur = word.to_string();
-                    }
-                }
-                if !cur.is_empty() || content_line.trim().is_empty() {
-                    lines.push(Line::from(Span::styled(format!("  {}", cur), Style::default().fg(Color::White))));
-                }
-            }
+            render_content(&msg.content, &mut lines);
             lines.push(Line::from(""));
         }
 
@@ -166,12 +237,7 @@ impl UI {
                 Span::styled("╔ Copilot ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::styled("▋", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
             ]));
-            for content_line in partial.lines() {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", content_line),
-                    Style::default().fg(Color::White),
-                )));
-            }
+            render_content(partial, &mut lines);
         }
 
         // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
@@ -231,6 +297,68 @@ impl UI {
         frame.render_widget(input_para, input_area);
     }
 
+    /// Render the file explorer tree on the left side.
+    fn render_file_explorer(frame: &mut Frame, explorer: &FileExplorer, mode: Mode, area: Rect) {
+        let focused = mode == Mode::Explorer;
+        let border_style = if focused {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let flat = explorer.flat_visible();
+        let visible_height = area.height.saturating_sub(2) as usize; // account for border
+
+        // Scroll so the cursor is always visible.
+        let cursor = explorer.cursor_idx;
+        let scroll = if cursor >= visible_height {
+            cursor - visible_height + 1
+        } else {
+            0
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, node) in flat.iter().enumerate().skip(scroll).take(visible_height) {
+            let is_selected = i == cursor;
+
+            let indent = "  ".repeat(node.depth);
+            let icon = if node.is_dir {
+                if node.is_expanded { "▼ " } else { "▶ " }
+            } else {
+                "  "
+            };
+            let label = format!("{}{}{}", indent, icon, node.name);
+
+            let style = if is_selected {
+                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+            } else if node.is_dir {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            lines.push(Line::from(Span::styled(label, style)));
+        }
+
+        // Fill remaining rows with blanks so the block looks solid
+        while lines.len() < visible_height {
+            lines.push(Line::from(""));
+        }
+
+        let root_name = explorer.root_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+
+        let block = Block::default()
+            .title(format!(" {} ", root_name))
+            .borders(Borders::ALL)
+            .border_style(border_style);
+
+        let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, area);
+    }
+
     /// Render the buffer content
     fn render_buffer(
         frame: &mut Frame,
@@ -239,6 +367,7 @@ impl UI {
         area: Rect,
         diagnostics: &[Diagnostic],
         ghost_text: Option<(&str, usize, usize)>,
+        highlighted_lines: Option<&[Vec<Span<'static>>]>,
     ) {
         if let Some((_, _, cursor, scroll_row, scroll_col, lines, selection)) = buffer_data {
             let viewport_height = area.height as usize;
@@ -257,13 +386,18 @@ impl UI {
                     // Only inject ghost text on the row/col it was requested for.
                     let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
                         if row == ghost_row && cursor.col == ghost_col {
-                            // Show only the first line of a multi-line suggestion.
                             Some(text.lines().next().unwrap_or(text))
                         } else {
                             None
                         }
                     });
-                    let line = Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row, has_diagnostic, row_ghost);
+                    // Use pre-highlighted spans when available, fall back to plain text.
+                    let line_idx = row - start_line;
+                    let line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
+                        Self::render_highlighted_line(spans, *scroll_col, viewport_width, has_diagnostic, row_ghost)
+                    } else {
+                        Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row, has_diagnostic, row_ghost)
+                    };
                     visible_lines.push(line);
                 } else {
                     visible_lines.push(Line::from("~"));
@@ -299,6 +433,62 @@ impl UI {
             let paragraph = Paragraph::new(text);
             frame.render_widget(paragraph, area);
         }
+    }
+
+    /// Render a pre-highlighted line (from syntect) with gutter marker and ghost text.
+    /// `spans` is the syntect-coloured token list for this line.
+    /// We truncate tokens to fit within `viewport_width` (minus the 2-char gutter).
+    fn render_highlighted_line(
+        spans: &[Span<'static>],
+        scroll_col: usize,
+        viewport_width: usize,
+        has_diagnostic: bool,
+        ghost: Option<&str>,
+    ) -> Line<'static> {
+        let diag_marker = if has_diagnostic {
+            Span::styled("● ", Style::default().fg(Color::Red))
+        } else {
+            Span::raw("  ")
+        };
+
+        // Available columns for actual text (gutter uses 2).
+        let text_width = viewport_width.saturating_sub(2);
+
+        // Concatenate span text, apply horizontal scroll, then re-split into spans.
+        // Build a plain-string slice first, then overlay original styles.
+        let mut out_spans: Vec<Span<'static>> = vec![diag_marker];
+        let mut col_budget = text_width;
+        let mut skipped = 0usize; // columns already consumed by scroll_col skipping
+
+        for span in spans {
+            if col_budget == 0 {
+                break;
+            }
+            let span_chars: Vec<char> = span.content.chars().collect();
+            let span_len = span_chars.len();
+
+            if skipped < scroll_col {
+                // Need to skip some columns in this span
+                let skip_here = (scroll_col - skipped).min(span_len);
+                skipped += skip_here;
+                let rest: String = span_chars[skip_here..].iter().collect();
+                if !rest.is_empty() {
+                    let take: String = rest.chars().take(col_budget).collect();
+                    col_budget = col_budget.saturating_sub(take.chars().count());
+                    out_spans.push(Span::styled(take, span.style));
+                }
+            } else {
+                let take: String = span_chars.iter().take(col_budget).collect();
+                col_budget = col_budget.saturating_sub(take.chars().count());
+                out_spans.push(Span::styled(take, span.style));
+            }
+        }
+
+        if let Some(g) = ghost {
+            out_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
+        }
+
+        Line::from(out_spans)
     }
 
     /// Render a single line with optional selection highlighting and ghost text.

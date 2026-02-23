@@ -122,6 +122,37 @@ impl Buffer {
         })
     }
 
+    /// Reload this buffer's content from disk, preserving cursor position (clamped).
+    /// Does nothing (returns Ok) if the buffer has no associated file path.
+    pub fn reload_from_disk(&mut self) -> anyhow::Result<()> {
+        let path = match self.file_path.clone() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let content = std::fs::read_to_string(&path)?;
+        let new_lines: Vec<String> = if content.is_empty() {
+            vec![String::new()]
+        } else {
+            let normalised = content.replace("\r\n", "\n");
+            let mut v: Vec<String> = normalised.split('\n').map(|l| l.to_string()).collect();
+            // Drop the phantom empty line that split() appends when file ends with \n
+            if v.last().map(|l| l.is_empty()).unwrap_or(false) {
+                v.pop();
+            }
+            if v.is_empty() { vec![String::new()] } else { v }
+        };
+        self.lines = new_lines;
+        self.is_modified = false;
+        // Clamp cursor so it stays in bounds after a potential line-count change
+        self.cursor.row = self.cursor.row.min(self.lines.len().saturating_sub(1));
+        let row = self.cursor.row;
+        self.cursor.col = self.cursor.col.min(
+            self.lines[row].len().saturating_sub(1)
+        );
+        tracing::info!("Reloaded buffer '{}' from disk", self.name);
+        Ok(())
+    }
+
     /// Save the buffer back to its associated file
     pub fn save(&mut self) -> anyhow::Result<()> {
         let path = self

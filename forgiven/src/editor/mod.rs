@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 use crate::agent::AgentPanel;
 use crate::buffer::Buffer;
 use crate::config::Config;
+use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{LspManager, parse_first_inline_completion};
@@ -94,6 +95,9 @@ pub struct Editor {
     // ── Syntax highlighter ────────────────────────────────────────────────────
     /// Loaded once at startup; highlight_line() is called per visible line each frame.
     highlighter: Highlighter,
+
+    // ── File explorer ─────────────────────────────────────────────────────────
+    file_explorer: FileExplorer,
 }
 
 impl Editor {
@@ -127,6 +131,9 @@ impl Editor {
             agent_panel: AgentPanel::new(),
             clipboard: None,
             highlighter: Highlighter::new(),
+            file_explorer: FileExplorer::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            ),
         })
     }
 
@@ -306,6 +313,43 @@ impl Editor {
 
             // ── Agent panel stream polling ─────────────────────────────────────
             self.agent_panel.poll_stream();
+
+            // Reload any buffers the agent modified on disk this tick.
+            let reloads: Vec<String> = std::mem::take(&mut self.agent_panel.pending_reloads);
+            for rel_path in reloads {
+                let cwd = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let abs_path = cwd.join(&rel_path);
+                // Canonicalize once — resolves symlinks, cleans ".." etc.
+                // Falls back to the plain joined path if the file somehow can't be stat'd.
+                let canonical = abs_path.canonicalize().unwrap_or_else(|_| abs_path.clone());
+
+                let mut reloaded = false;
+                for buf in &mut self.buffers {
+                    let matches = buf.file_path.as_ref().map(|fp| {
+                        // Case 1: buffer stored an absolute path (opened from explorer)
+                        // — compare both canonicalized so symlinks don't fool us.
+                        let fp_canon = fp.canonicalize().unwrap_or_else(|_| fp.clone());
+                        if fp_canon == canonical {
+                            return true;
+                        }
+                        // Case 2: buffer stored a relative path (opened from CLI)
+                        // — compare component-wise suffix of the file_path against rel_path.
+                        fp.ends_with(std::path::Path::new(&rel_path))
+                    }).unwrap_or(false);
+
+                    if matches {
+                        if let Err(e) = buf.reload_from_disk() {
+                            tracing::warn!("Failed to reload {rel_path}: {e}");
+                        } else {
+                            reloaded = true;
+                        }
+                    }
+                }
+                if reloaded {
+                    self.set_status(format!("↺ reloaded {rel_path}"));
+                }
+            }
             // ──────────────────────────────────────────────────────────────────
 
             // ── Inline completion debounce + poll ──────────────────────────────
@@ -369,12 +413,16 @@ impl Editor {
     /// Render the UI
     fn render(&mut self) -> Result<()> {
         let mode = self.mode;
-        let status = self.status_message.as_deref();
-        let command_buffer = if self.mode == Mode::Command {
-            Some(self.command_buffer.as_str())
+        // Clone into owned Strings so these don't hold borrows on `self`
+        // while we need a mutable borrow below to call scroll_to_cursor().
+        let status_owned = self.status_message.clone();
+        let status = status_owned.as_deref();
+        let command_buffer_owned = if self.mode == Mode::Command {
+            Some(self.command_buffer.clone())
         } else {
             None
         };
+        let command_buffer = command_buffer_owned.as_deref();
 
         // Check if we should show which-key
         let show_which_key = self.key_handler.should_show_which_key();
@@ -386,6 +434,21 @@ impl Editor {
 
         // Get key sequence for display
         let key_sequence = self.key_handler.sequence();
+
+        // ── Scroll to keep cursor in view ─────────────────────────────────────
+        // Must happen before the buffer snapshot so scroll_row/col are current.
+        // viewport_height accounts for: status line (1 row) + which-key popup
+        // (10 rows) when visible.  viewport_width is the full terminal width as
+        // a conservative approximation; the actual text area may be narrower when
+        // the explorer or agent panel are open, but the horizontal scroll logic
+        // still keeps the cursor reachable.
+        let size = self.terminal.size().unwrap_or_default();
+        let viewport_height = (size.height as usize)
+            .saturating_sub(if show_which_key { 11 } else { 1 });
+        let viewport_width = size.width as usize;
+        if let Some(buf) = self.current_buffer_mut() {
+            buf.scroll_to_cursor(viewport_height, viewport_width);
+        }
 
         // Get buffer data before drawing to avoid borrow issues
         let buffer_data = self.current_buffer().map(|buf| {
@@ -399,6 +462,23 @@ impl Editor {
                 buf.selection.clone(),
             )
         });
+
+        // Compute syntax-highlighted spans for the visible viewport only.
+        // Reuse the already-computed viewport_height (terminal height minus UI chrome).
+        let term_height = viewport_height;
+
+        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> =
+            self.current_buffer().map(|buf| {
+                let ext = buf.file_path.as_deref()
+                    .map(Highlighter::extension_for)
+                    .unwrap_or_default();
+                let start = buf.scroll_row;
+                let end = (start + term_height).min(buf.lines().len());
+                buf.lines()[start..end]
+                    .iter()
+                    .map(|line| self.highlighter.highlight_line(line, &ext))
+                    .collect()
+            });
 
         // Buffer list for PickBuffer mode
         let buffer_list = if self.mode == Mode::PickBuffer {
@@ -421,6 +501,8 @@ impl Editor {
             .map(|(text, row, col)| (text.as_str(), *row, *col));
 
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
+        let explorer_ref = if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
+        let hl_ref = highlighted_lines.as_deref();
         self.terminal.draw(|frame| {
             UI::render(
                 frame,
@@ -435,6 +517,8 @@ impl Editor {
                 &self.current_diagnostics,
                 ghost,
                 agent_ref,
+                hl_ref,
+                explorer_ref,
             );
         })?;
 
@@ -460,7 +544,7 @@ impl Editor {
             Mode::PickBuffer => self.handle_pick_buffer_mode(key)?,
             Mode::PickFile => self.handle_pick_file_mode(key)?,
             Mode::Agent => self.handle_agent_mode(key)?,
-            Mode::Explorer => self.handle_normal_mode(key)?, // placeholder until explorer is built
+            Mode::Explorer => self.handle_explorer_mode(key)?,
         }
 
         Ok(())
@@ -691,10 +775,16 @@ impl Editor {
                 self.mode = Mode::Agent;
             }
             Action::ExplorerToggle => {
-                self.set_status("Explorer not yet implemented".to_string());
+                self.file_explorer.toggle_visible();
+                if self.file_explorer.visible {
+                    self.mode = Mode::Explorer;
+                } else {
+                    self.mode = Mode::Normal;
+                }
             }
             Action::ExplorerFocus => {
-                self.set_status("Explorer not yet implemented".to_string());
+                self.file_explorer.focus();
+                self.mode = Mode::Explorer;
             }
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
@@ -859,14 +949,24 @@ impl Editor {
             }
             // Enter — submit the input.
             KeyCode::Enter => {
-                // Snapshot current buffer content as context.
-                let context = self.current_buffer().map(|buf| buf.lines().join("\n"));
+                // Snapshot current buffer content as context, including its path
+                // so the model knows which file is open and can reference it directly.
+                let context = self.current_buffer().map(|buf| {
+                    let path_header = buf.file_path
+                        .as_deref()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or(&buf.name);
+                    format!("File: {path_header}\n\n{}", buf.lines().join("\n"))
+                });
+                // Project root for tool sandboxing.
+                let project_root = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
                 // Submit is async; spawn a task and let the stream_rx handle tokens.
                 let panel = &mut self.agent_panel;
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
-                let fut = panel.submit(context);
+                let fut = panel.submit(context, project_root);
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process
                 // in the async run() loop.  For now use tokio::task::block_in_place.
@@ -906,6 +1006,40 @@ impl Editor {
                     }
                 } else {
                     self.agent_panel.input_char(ch);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Explorer mode key handling ─────────────────────────────────────────────
+
+    fn handle_explorer_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => {
+                // Blur explorer, return to editor (keep panel visible)
+                self.file_explorer.blur();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.file_explorer.move_up();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.file_explorer.move_down();
+            }
+            KeyCode::Enter | KeyCode::Char('l') => {
+                let idx = self.file_explorer.cursor_idx;
+                let selected = self.file_explorer.selected_path();
+                if let Some(path) = selected {
+                    if path.is_dir() {
+                        self.file_explorer.toggle_node_at(idx);
+                    } else {
+                        // Open the file and return focus to editor
+                        self.file_explorer.blur();
+                        self.mode = Mode::Normal;
+                        self.open_file(&path)?;
+                    }
                 }
             }
             _ => {}

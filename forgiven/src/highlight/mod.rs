@@ -12,7 +12,6 @@ use syntect::{
     easy::HighlightLines,
     highlighting::{Color as SColor, FontStyle, ThemeSet},
     parsing::SyntaxSet,
-    util::LinesWithEndings,
 };
 
 /// Stateful highlighter. Holds the compiled grammar and theme data.

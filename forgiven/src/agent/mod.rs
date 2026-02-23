@@ -1,17 +1,24 @@
-//! Copilot Chat / agent panel.
+//! Copilot Chat / agent panel — with agentic tool-calling loop.
 //!
 //! Auth flow:
 //!   1. Read the GitHub OAuth token from ~/.config/github-copilot/apps.json
 //!   2. Exchange it for a short-lived Copilot API token via the GitHub API
 //!   3. Stream chat completions from api.githubcopilot.com (OpenAI-compatible SSE)
 //!
-//! The panel state (messages, input, visibility) lives here.  Streaming tokens
-//! are sent over a tokio mpsc channel so the editor event-loop can poll them
-//! non-blocking each frame.
+//! Tool-calling loop:
+//!   The model may respond with `tool_calls` instead of (or before) text.
+//!   The agentic_loop task executes those tools, appends results to the message
+//!   list, and re-submits until the model produces a plain text reply.
+//!
+//!   All file operations are sandboxed to the project root (no `..` traversal).
+
+pub mod tools;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -19,7 +26,6 @@ use tracing::{debug, info, warn};
 // Data types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A single message in the chat history.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: Role,
@@ -48,46 +54,34 @@ impl Role {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AgentPanel {
-    /// Whether the panel is visible on screen.
     pub visible: bool,
-
-    /// Whether keyboard focus is inside the panel (vs the editor).
     pub focused: bool,
-
-    /// Chat history shown in the panel.
     pub messages: Vec<ChatMessage>,
-
-    /// Current user input being composed.
     pub input: String,
-
-    /// Scroll offset: number of rendered lines to show above the bottom.
-    /// 0 = pinned to bottom (newest content); higher = scrolled up toward older content.
     pub scroll: usize,
-
-    /// Cached Copilot API token (short-lived; refreshed on expiry).
     token: Option<CopilotApiToken>,
-
-    /// Current assistant reply being built from streaming chunks.
     pub streaming_reply: Option<String>,
-
-    /// Receiver for streaming tokens from an in-flight request.
     pub stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    /// Paths (project-relative) of files modified by the agent this frame.
+    /// The editor drains this each tick to reload open buffers.
+    pub pending_reloads: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// A text token to append to the current reply.
     Token(String),
-    /// The stream finished successfully.
+    ToolStart { name: String, args_summary: String },
+    ToolDone { result_summary: String },
+    /// A file was successfully written or edited by a tool.
+    /// The path is project-relative (as passed to the tool).
+    FileModified { path: String },
     Done,
-    /// An error occurred.
     Error(String),
 }
 
 #[derive(Debug, Clone)]
 struct CopilotApiToken {
     token: String,
-    /// Unix timestamp when the token expires.
     expires_at: u64,
 }
 
@@ -97,7 +91,6 @@ impl CopilotApiToken {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Refresh 60 s before expiry to avoid races.
         now + 60 >= self.expires_at
     }
 }
@@ -113,60 +106,85 @@ impl AgentPanel {
             token: None,
             streaming_reply: None,
             stream_rx: None,
+            pending_reloads: Vec::new(),
         }
     }
 
     pub fn toggle_visible(&mut self) {
         self.visible = !self.visible;
-        if self.visible {
-            self.focused = true;
-        } else {
-            self.focused = false;
-        }
+        self.focused = self.visible;
     }
 
-    pub fn focus(&mut self) {
-        self.focused = true;
-    }
+    pub fn focus(&mut self) { self.focused = true; }
+    pub fn blur(&mut self)  { self.focused = false; }
+    pub fn input_char(&mut self, ch: char) { self.input.push(ch); }
+    pub fn input_backspace(&mut self) { self.input.pop(); }
 
-    pub fn blur(&mut self) {
-        self.focused = false;
-    }
-
-    /// Push a character to the input buffer.
-    pub fn input_char(&mut self, ch: char) {
-        self.input.push(ch);
-    }
-
-    /// Delete the last character from the input buffer.
-    pub fn input_backspace(&mut self) {
-        self.input.pop();
-    }
-
-    /// Submit the current input as a user message and start a chat request.
-    /// Returns an error if we can't authenticate or start the stream.
-    pub async fn submit(&mut self, context: Option<String>) -> Result<()> {
+    /// Submit input, launching the agentic tool-calling loop in the background.
+    pub async fn submit(
+        &mut self,
+        context: Option<String>,
+        project_root: PathBuf,
+    ) -> Result<()> {
         if self.input.trim().is_empty() {
             return Ok(());
         }
 
         let user_text = std::mem::take(&mut self.input);
+        let root_display = project_root.display().to_string();
 
-        // Build message list to send.
-        let mut send_messages: Vec<serde_json::Value> = Vec::new();
+        // Build a shallow file tree so the model knows the project layout upfront
+        // and never needs to burn rounds on list_directory exploration.
+        let project_tree = build_project_tree(&project_root, 2);
 
-        // System prompt with optional file context.
-        let system = if let Some(ctx) = context {
+        let tool_rules = "\
+MANDATORY PROTOCOL — follow these rules without exception:\n\
+\n\
+COMMUNICATION RULES:\n\
+6. Do NOT output any text while working through tool calls. Work silently.\n\
+   Only write a single, concise final response AFTER all tools have completed.\n\
+   Do not narrate steps, explain retries, or announce what you are about to do.\n\
+\n\
+FILE EDITING RULES:\n\
+1. ALWAYS call read_file on a file BEFORE calling edit_file or write_file on it.\n\
+   Never guess or assume what a file contains — you must read it first.\n\
+2. Copy old_str VERBATIM from the read_file output, including all whitespace,\n\
+   indentation, and surrounding lines needed to make it unique in the file.\n\
+3. If edit_file returns an error, call read_file again to get the current content\n\
+   and retry with the correct old_str. Do NOT retry with the same old_str.\n\
+4. Prefer edit_file over write_file for any change to an existing file.\n\
+5. Use list_directory only if the project tree above is insufficient.\n\
+\n\
+Available tools:\n\
+- read_file       Read a file (returns line-numbered content). REQUIRED before edits.\n\
+- write_file      Write a complete file (for new files or full rewrites only).\n\
+- edit_file       Surgical find-and-replace. old_str must match EXACTLY once.\n\
+- list_directory  List a directory's contents.\n";
+
+        let system = if let Some(ref ctx) = context {
             format!(
-                "You are a helpful coding assistant embedded in the 'forgiven' terminal editor.\n\nCurrent file context:\n```\n{}\n```",
-                ctx
+                "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
+                 Project root: {root_display}\n\n\
+                 Project file tree (depth 2 — use read_file to see contents):\n\
+                 ```\n{project_tree}```\n\n\
+                 {tool_rules}\n\
+                 Currently open file (already read — you may use this content directly for edits):\n\
+                 ```\n{ctx}\n```"
             )
         } else {
-            "You are a helpful coding assistant embedded in the 'forgiven' terminal editor.".to_string()
+            format!(
+                "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
+                 Project root: {root_display}\n\n\
+                 Project file tree (depth 2 — use read_file to see contents):\n\
+                 ```\n{project_tree}```\n\n\
+                 {tool_rules}"
+            )
         };
-        send_messages.push(serde_json::json!({ "role": "system", "content": system }));
 
-        // Include prior conversation history (last 10 exchanges to stay within token budget).
+        let mut send_messages: Vec<serde_json::Value> = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+        ];
+
         let history_start = self.messages.len().saturating_sub(20);
         for msg in &self.messages[history_start..] {
             send_messages.push(serde_json::json!({
@@ -174,82 +192,20 @@ impl AgentPanel {
                 "content": msg.content
             }));
         }
-
-        // Append the new user message.
         send_messages.push(serde_json::json!({ "role": "user", "content": user_text.clone() }));
-
-        // Record it in history.
         self.messages.push(ChatMessage { role: Role::User, content: user_text });
 
-        // Pin view to bottom so the user sees their message + the incoming reply.
         self.scroll = 0;
-
-        // Begin streaming reply (placeholder shown while tokens arrive).
         self.streaming_reply = Some(String::new());
 
-        // Get / refresh the Copilot API token.
         let api_token = self.ensure_token().await?;
-
-        // Spawn a background task that streams tokens into our channel.
         let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(rx);
 
-        let token_clone = api_token.clone();
-        tokio::spawn(async move {
-            // Fetch the streaming response.
-            let response = match start_chat_stream(token_clone, send_messages).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(StreamEvent::Error(format!("{}", e)));
-                    return;
-                }
-            };
-
-            // Consume the SSE byte stream.
-            let mut buf = String::new();
-            let mut stream = response.bytes_stream();
-            while let Some(item) = stream.next().await {
-                let chunk: reqwest::Result<_> = item;
-                match chunk {
-                    Ok(bytes) => {
-                        buf.push_str(&String::from_utf8_lossy(&bytes));
-                        // Process complete SSE events (newline-terminated).
-                        while let Some(pos) = buf.find('\n') {
-                            let line = buf[..pos].trim().to_string();
-                            buf.drain(..=pos);
-
-                            if line == "data: [DONE]" {
-                                let _ = tx.send(StreamEvent::Done);
-                                return;
-                            }
-                            if let Some(json_str) = line.strip_prefix("data: ") {
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                    if let Some(content) = val
-                                        .pointer("/choices/0/delta/content")
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        if !content.is_empty() {
-                                            let _ = tx.send(StreamEvent::Token(content.to_string()));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(StreamEvent::Error(format!("{}", e)));
-                        return;
-                    }
-                }
-            }
-            let _ = tx.send(StreamEvent::Done);
-        });
-
+        tokio::spawn(agentic_loop(api_token, send_messages, project_root, tx));
         Ok(())
     }
 
-    /// Poll the stream receiver (non-blocking).  Returns true if the stream is
-    /// still active so the caller knows to keep rendering.
     pub fn poll_stream(&mut self) -> bool {
         let mut active = false;
         if let Some(rx) = self.stream_rx.as_mut() {
@@ -257,80 +213,76 @@ impl AgentPanel {
                 match rx.try_recv() {
                     Ok(StreamEvent::Token(t)) => {
                         active = true;
-                        if let Some(reply) = self.streaming_reply.as_mut() {
-                            reply.push_str(&t);
+                        if let Some(r) = self.streaming_reply.as_mut() { r.push_str(&t); }
+                    }
+                    Ok(StreamEvent::ToolStart { name, args_summary }) => {
+                        active = true;
+                        let line = format!("\n⚙  {name}({args_summary})");
+                        match self.streaming_reply.as_mut() {
+                            Some(r) => r.push_str(&line),
+                            None    => self.streaming_reply = Some(line),
                         }
                     }
+                    Ok(StreamEvent::ToolDone { result_summary }) => {
+                        active = true;
+                        if let Some(r) = self.streaming_reply.as_mut() {
+                            r.push_str(&format!(" → {result_summary}"));
+                        }
+                    }
+                    Ok(StreamEvent::FileModified { path }) => {
+                        active = true;
+                        self.pending_reloads.push(path);
+                    }
                     Ok(StreamEvent::Done) => {
-                        // Commit the streamed reply into the history.
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
                                 self.messages.push(ChatMessage {
                                     role: Role::Assistant,
                                     content: text,
                                 });
-                                // Auto-scroll to bottom so the new reply is visible.
-                                self.scroll = 0;
                             }
                         }
+                        self.scroll = 0;
                         self.stream_rx = None;
                         break;
                     }
                     Ok(StreamEvent::Error(e)) => {
                         warn!("Copilot Chat stream error: {}", e);
-                        let msg = format!("[Error: {}]", e);
-                        self.messages.push(ChatMessage { role: Role::Assistant, content: msg });
+                        self.messages.push(ChatMessage {
+                            role: Role::Assistant,
+                            content: format!("[Error: {e}]"),
+                        });
                         self.streaming_reply = None;
                         self.stream_rx = None;
                         break;
                     }
-                    Err(_) => break, // channel empty
+                    Err(_) => break,
                 }
             }
         }
         active
     }
 
-    /// Scroll the chat history up (toward older messages).
-    /// The renderer caps this against the actual line count.
-    pub fn scroll_up(&mut self) {
-        self.scroll += 3;
-    }
-
-    /// Scroll the chat history down (toward newer messages / bottom).
-    pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_sub(3);
-    }
-
-    /// Pin the view to the bottom (newest content).
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll = 0;
-    }
+    pub fn scroll_up(&mut self)       { self.scroll += 3; }
+    pub fn scroll_down(&mut self)     { self.scroll = self.scroll.saturating_sub(3); }
+    pub fn scroll_to_bottom(&mut self){ self.scroll = 0; }
 
     // ── Code extraction ───────────────────────────────────────────────────────
 
-    /// Extract all fenced code blocks (``` … ```) from `text`.
-    /// The fence line itself (```lang) is not included in the output.
     pub fn extract_code_blocks(text: &str) -> Vec<String> {
-        let mut blocks: Vec<String> = Vec::new();
+        let mut blocks = Vec::new();
         let mut in_block = false;
         let mut current: Vec<&str> = Vec::new();
-
         for line in text.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
+            if line.trim_start().starts_with("```") {
                 if in_block {
-                    // Closing fence — commit block (strip trailing blank lines).
                     while current.last().map(|l: &&str| l.trim().is_empty()).unwrap_or(false) {
                         current.pop();
                     }
-                    if !current.is_empty() {
-                        blocks.push(current.join("\n"));
-                    }
+                    if !current.is_empty() { blocks.push(current.join("\n")); }
                     current.clear();
                     in_block = false;
                 } else {
-                    // Opening fence — start collecting.
                     in_block = true;
                 }
             } else if in_block {
@@ -340,27 +292,17 @@ impl AgentPanel {
         blocks
     }
 
-    /// Return the first code block from the latest assistant message, if any.
     pub fn get_code_to_apply(&self) -> Option<String> {
-        self.messages
-            .iter()
-            .rev()
+        self.messages.iter().rev()
             .find(|m| m.role == Role::Assistant)
             .and_then(|m| Self::extract_code_blocks(&m.content).into_iter().next())
     }
 
-    /// True when the latest assistant reply contains at least one code block.
-    pub fn has_code_to_apply(&self) -> bool {
-        self.get_code_to_apply().is_some()
-    }
-
-    // ── Private auth helpers ──────────────────────────────────────────────────
+    pub fn has_code_to_apply(&self) -> bool { self.get_code_to_apply().is_some() }
 
     async fn ensure_token(&mut self) -> Result<String> {
         if let Some(ref t) = self.token {
-            if !t.is_expired() {
-                return Ok(t.token.clone());
-            }
+            if !t.is_expired() { return Ok(t.token.clone()); }
         }
         info!("Refreshing Copilot API token");
         let oauth = load_oauth_token()?;
@@ -372,139 +314,236 @@ impl AgentPanel {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth helpers
+// Agentic loop (runs in a background tokio task)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Read the GitHub OAuth token from ~/.config/github-copilot/apps.json.
-fn load_oauth_token() -> Result<String> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let path = format!("{}/.config/github-copilot/apps.json", home);
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("Cannot read {}", path))?;
-    let val: serde_json::Value =
-        serde_json::from_str(&raw).context("apps.json is not valid JSON")?;
+async fn agentic_loop(
+    api_token: String,
+    mut messages: Vec<serde_json::Value>,
+    project_root: PathBuf,
+    tx: mpsc::UnboundedSender<StreamEvent>,
+) {
+    let tool_defs = tools::tool_definitions();
+    const MAX_ROUNDS: usize = 20;
 
-    // Structure: { "<app-key>": { "oauth_token": "ghu_…", … } }
-    val.as_object()
-        .and_then(|m| m.values().next())
-        .and_then(|entry| entry.get("oauth_token"))
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-        .context("oauth_token not found in apps.json")
-}
+    for _round in 0..MAX_ROUNDS {
+        // ── Call the API ──────────────────────────────────────────────────────
+        let response = match start_chat_stream_with_tools(
+            api_token.clone(),
+            messages.clone(),
+            tool_defs.clone(),
+        ).await {
+            Ok(r)  => r,
+            Err(e) => { let _ = tx.send(StreamEvent::Error(format!("{e}"))); return; }
+        };
 
-#[derive(Deserialize, Debug)]
-struct TokenResponse {
-    token: String,
-    expires_at: Option<String>,
-}
+        // ── Parse the SSE stream ──────────────────────────────────────────────
+        let mut text_buf = String::new();
+        let mut partial_tools: HashMap<usize, tools::PartialToolCall> = HashMap::new();
+        let mut sse_buf = String::new();
+        let mut byte_stream = response.bytes_stream();
 
-/// Exchange the GitHub OAuth token for a short-lived Copilot API token.
-async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.github.com/copilot_internal/v2/token")
-        .header("Authorization", format!("token {}", oauth_token))
-        .header("User-Agent", "forgiven/0.1.0")
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .context("Failed to reach GitHub API")?;
+        'sse: while let Some(item) = byte_stream.next().await {
+            match item {
+                Ok(bytes) => {
+                    sse_buf.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = sse_buf.find('\n') {
+                        let line = sse_buf[..pos].trim().to_string();
+                        sse_buf.drain(..=pos);
 
-    let status = resp.status();
-    // Read the raw body so we can log it before attempting to parse.
-    let body_text = resp.text().await.unwrap_or_default();
-    debug!("Token exchange response ({status}): {body_text}");
+                        if line == "data: [DONE]" { break 'sse; }
 
-    if !status.is_success() {
-        return Err(anyhow::anyhow!("Token exchange failed ({status}): {body_text}"));
+                        if let Some(json_str) = line.strip_prefix("data: ") {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                // Text content delta
+                                if let Some(content) = val
+                                    .pointer("/choices/0/delta/content")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !content.is_empty() {
+                                        text_buf.push_str(content);
+                                        let _ = tx.send(StreamEvent::Token(content.to_string()));
+                                    }
+                                }
+
+                                // Tool call delta
+                                if let Some(tc_arr) = val
+                                    .pointer("/choices/0/delta/tool_calls")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for tc_val in tc_arr {
+                                        let idx = tc_val.get("index")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0) as usize;
+                                        let entry = partial_tools.entry(idx).or_default();
+
+                                        if let Some(id) = tc_val.get("id").and_then(|v| v.as_str()) {
+                                            if !id.is_empty() { entry.id = id.to_string(); }
+                                        }
+                                        if let Some(name) = tc_val.pointer("/function/name").and_then(|v| v.as_str()) {
+                                            if !name.is_empty() { entry.name = name.to_string(); }
+                                        }
+                                        if let Some(chunk) = tc_val.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                                            entry.arguments.push_str(chunk);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => { let _ = tx.send(StreamEvent::Error(format!("{e}"))); return; }
+            }
+        }
+
+        // ── No tool calls → plain text response, done ─────────────────────────
+        if partial_tools.is_empty() {
+            if !text_buf.is_empty() {
+                messages.push(serde_json::json!({ "role": "assistant", "content": text_buf }));
+            }
+            let _ = tx.send(StreamEvent::Done);
+            return;
+        }
+
+        // ── Tool calls → execute and loop ─────────────────────────────────────
+        let mut sorted: Vec<(usize, tools::PartialToolCall)> = partial_tools.into_iter().collect();
+        sorted.sort_by_key(|(idx, _)| *idx);
+
+        let tool_calls_json: Vec<serde_json::Value> = sorted.iter().map(|(_, tc)| {
+            serde_json::json!({
+                "id": tc.id,
+                "type": "function",
+                "function": { "name": tc.name, "arguments": tc.arguments }
+            })
+        }).collect();
+
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": if text_buf.is_empty() { serde_json::Value::Null } else { serde_json::json!(text_buf) },
+            "tool_calls": tool_calls_json
+        }));
+
+        for (_, partial) in sorted {
+            let call = tools::ToolCall {
+                id: partial.id.clone(),
+                name: partial.name.clone(),
+                arguments: partial.arguments.clone(),
+            };
+
+            let _ = tx.send(StreamEvent::ToolStart {
+                name: call.name.clone(),
+                args_summary: call.args_summary(),
+            });
+
+            let result = tools::execute_tool(&call, &project_root);
+
+            // If a file was successfully written or edited, notify the editor
+            // so it can reload any open buffer for that path.
+            if matches!(call.name.as_str(), "write_file" | "edit_file")
+                && !result.starts_with("error")
+            {
+                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                        let _ = tx.send(StreamEvent::FileModified { path: p.to_string() });
+                    }
+                }
+            }
+
+            let result_summary = {
+                // Skip header lines like "src/foo.rs (42 lines)" or "path:"
+                // and show the first meaningful content line instead.
+                let meaningful = result.lines()
+                    .find(|l| {
+                        let t = l.trim();
+                        !t.is_empty() && !t.ends_with(':') && !t.contains('(') || t.starts_with("error")
+                    })
+                    .unwrap_or_else(|| result.lines().next().unwrap_or("ok"));
+                if meaningful.len() > 120 { format!("{}…", &meaningful[..120]) }
+                else { meaningful.to_string() }
+            };
+            let _ = tx.send(StreamEvent::ToolDone { result_summary });
+
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": partial.id,
+                "content": result
+            }));
+        }
+
+        // Visual separator between rounds
+        let _ = tx.send(StreamEvent::Token("\n".to_string()));
+        // Continue loop with tool results appended to messages
     }
 
-    // Parse via serde_json::Value first so we can extract fields flexibly
-    // and log exactly what the API returned when parsing fails.
-    let val: serde_json::Value = serde_json::from_str(&body_text)
-        .with_context(|| format!("Token response is not JSON: {body_text}"))?;
-
-    info!("Token response keys: {:?}", val.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-
-    let token_str = val.get("token")
-        .and_then(|v| v.as_str())
-        .with_context(|| format!("No 'token' field in response: {body_text}"))?
-        .to_string();
-
-    let expires_at_str = val.get("expires_at").and_then(|v| v.as_str()).map(|s| s.to_string());
-    debug!("Copilot API token acquired (expires_at={:?})", expires_at_str);
-    let tr = TokenResponse { token: token_str, expires_at: expires_at_str };
-
-    // Parse ISO-8601 expiry if present, otherwise assume 30 minutes.
-    let expires_at = tr
-        .expires_at
-        .as_deref()
-        .and_then(|s| {
-            // "2024-01-01T12:34:56+00:00" → unix seconds via manual parse
-            chrono_unix_from_iso(s)
-        })
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() + 1800)
-                .unwrap_or(1800)
-        });
-
-    Ok(CopilotApiToken { token: tr.token, expires_at })
+    let _ = tx.send(StreamEvent::Error(
+        "agentic loop reached maximum rounds without a final text response".to_string(),
+    ));
 }
 
-/// Very small ISO-8601 → Unix timestamp parser (avoids a chrono dependency).
-fn chrono_unix_from_iso(s: &str) -> Option<u64> {
-    // We expect "2024-01-01T12:34:56+00:00" or "2024-01-01T12:34:56Z"
-    // Parse via the standard library's SystemTime is not available, so we use
-    // a simple regex-free approach.
-    let s = s.trim_end_matches('Z');
-    let s = if let Some(pos) = s.find('+') { &s[..pos] } else { s };
-    let s = if let Some(pos) = s.rfind('-') {
-        // Only strip trailing -HH:MM if it looks like a timezone offset.
-        if pos > 10 { &s[..pos] } else { s }
-    } else {
-        s
-    };
-    // s should now be "2024-01-01T12:34:56"
-    let parts: Vec<&str> = s.splitn(2, 'T').collect();
-    if parts.len() != 2 { return None; }
-    let date: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-    let time: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
-    if date.len() < 3 || time.len() < 3 { return None; }
-    // Days since epoch (approximate — good enough for token expiry).
-    let years_since_1970 = date[0].saturating_sub(1970);
-    let leap_years = years_since_1970 / 4;
-    let days = years_since_1970 * 365 + leap_years
-        + days_before_month(date[1], date[0]) + date[2] - 1;
-    Some(days * 86400 + time[0] * 3600 + time[1] * 60 + time[2])
+// ─────────────────────────────────────────────────────────────────────────────
+// Project tree builder
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a compact, indented file tree of `root` to `max_depth` levels.
+/// Hidden files and noisy directories (target, node_modules, …) are skipped.
+fn build_project_tree(root: &std::path::Path, max_depth: usize) -> String {
+    let mut out = String::new();
+    tree_recursive(root, root, 0, max_depth, &mut out);
+    out
 }
 
-fn days_before_month(month: u64, year: u64) -> u64 {
-    let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 1 } else { 0 };
-    let mut total = 0;
-    for m in 1..month.min(13) {
-        total += days_in_month[m as usize];
-        if m == 2 { total += leap; }
+fn tree_recursive(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut String,
+) {
+    if depth >= max_depth {
+        return;
     }
-    total
+    let Ok(entries) = std::fs::read_dir(path) else { return };
+    let mut items: Vec<_> = entries.flatten().collect();
+    items.sort_by_key(|e| {
+        // dirs first, then files, both alphabetical
+        let is_file = e.path().is_file();
+        (is_file, e.file_name().to_string_lossy().to_lowercase())
+    });
+    for entry in items {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // skip hidden
+        }
+        if matches!(
+            name.as_str(),
+            "target" | "node_modules" | "dist" | "build" | ".git"
+        ) {
+            continue;
+        }
+        let indent = "  ".repeat(depth);
+        if entry.path().is_dir() {
+            out.push_str(&format!("{indent}{name}/\n"));
+            tree_recursive(root, &entry.path(), depth + 1, max_depth, out);
+        } else {
+            out.push_str(&format!("{indent}{name}\n"));
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Streaming chat request
+// HTTP
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a streaming chat request and return the raw `reqwest::Response`.
-/// The caller is responsible for consuming the byte stream via `response.bytes_stream()`.
-async fn start_chat_stream(
+async fn start_chat_stream_with_tools(
     api_token: String,
     messages: Vec<serde_json::Value>,
+    tools: serde_json::Value,
 ) -> Result<reqwest::Response> {
     let body = serde_json::json!({
         "model": "gpt-4o",
         "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
         "stream": true,
         "n": 1,
         "temperature": 0.1,
@@ -514,7 +553,7 @@ async fn start_chat_stream(
     let client = reqwest::Client::new();
     let resp = client
         .post("https://api.githubcopilot.com/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_token))
+        .header("Authorization", format!("Bearer {api_token}"))
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")
         .header("Copilot-Integration-Id", "vscode-chat")
@@ -535,4 +574,89 @@ async fn start_chat_stream(
 
     info!("Copilot Chat stream started ({})", resp.status());
     Ok(resp)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn load_oauth_token() -> Result<String> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let path = format!("{home}/.config/github-copilot/apps.json");
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("Cannot read {path}"))?;
+    let val: serde_json::Value = serde_json::from_str(&raw).context("apps.json is not valid JSON")?;
+    val.as_object()
+        .and_then(|m| m.values().next())
+        .and_then(|e| e.get("oauth_token"))
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .context("oauth_token not found in apps.json")
+}
+
+#[derive(Deserialize, Debug)]
+struct TokenResponse {
+    token: String,
+    expires_at: Option<String>,
+}
+
+async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("token {oauth_token}"))
+        .header("User-Agent", "forgiven/0.1.0")
+        .header("Accept", "application/json")
+        .send().await.context("Failed to reach GitHub API")?;
+
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    debug!("Token exchange response ({status}): {body_text}");
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("Token exchange failed ({status}): {body_text}"));
+    }
+
+    let val: serde_json::Value = serde_json::from_str(&body_text)
+        .with_context(|| format!("Token response is not JSON: {body_text}"))?;
+    info!("Token response keys: {:?}", val.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+
+    let token_str = val.get("token").and_then(|v| v.as_str())
+        .with_context(|| format!("No 'token' field in response: {body_text}"))?.to_string();
+    let expires_at_str = val.get("expires_at").and_then(|v| v.as_str()).map(|s| s.to_string());
+    debug!("Copilot API token acquired (expires_at={:?})", expires_at_str);
+
+    let tr = TokenResponse { token: token_str, expires_at: expires_at_str };
+    let expires_at = tr.expires_at.as_deref().and_then(chrono_unix_from_iso)
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() + 1800).unwrap_or(1800)
+        });
+
+    Ok(CopilotApiToken { token: tr.token, expires_at })
+}
+
+fn chrono_unix_from_iso(s: &str) -> Option<u64> {
+    let s = s.trim_end_matches('Z');
+    let s = if let Some(pos) = s.find('+') { &s[..pos] } else { s };
+    let s = if let Some(pos) = s.rfind('-') { if pos > 10 { &s[..pos] } else { s } } else { s };
+    let parts: Vec<&str> = s.splitn(2, 'T').collect();
+    if parts.len() != 2 { return None; }
+    let date: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+    if date.len() < 3 || time.len() < 3 { return None; }
+    let y = date[0].saturating_sub(1970);
+    let days = y * 365 + y / 4 + days_before_month(date[1], date[0]) + date[2] - 1;
+    Some(days * 86400 + time[0] * 3600 + time[1] * 60 + time[2])
+}
+
+fn days_before_month(month: u64, year: u64) -> u64 {
+    let dim = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let leap = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 1 } else { 0 };
+    let mut total = 0;
+    for m in 1..month.min(13) {
+        total += dim[m as usize];
+        if m == 2 { total += leap; }
+    }
+    total
 }
