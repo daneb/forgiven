@@ -126,6 +126,18 @@ impl FileExplorer {
         self.root_loaded = true;
     }
 
+    /// Re-scan the root directory, discarding all cached expand/collapse state.
+    /// Call this after files are created or deleted on disk.
+    pub fn reload(&mut self) {
+        self.root_nodes = load_dir(&self.root_path, 0);
+        self.root_loaded = true;
+        // Keep cursor in bounds after the reload.
+        let len = self.flat_visible().len();
+        if len > 0 {
+            self.cursor_idx = self.cursor_idx.min(len - 1);
+        }
+    }
+
     /// Expand or collapse the node at `flat_idx` in the flat visible list.
     pub fn toggle_node_at(&mut self, flat_idx: usize) {
         // Walk the tree to find the node at position `flat_idx`.

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -56,9 +56,16 @@ pub struct Editor {
     
     /// Currently selected file in PickFile mode
     file_picker_idx: usize,
-    
-    /// List of files for file picker
-    file_list: Vec<PathBuf>,
+
+    /// Full file list populated by scan_files() — never filtered.
+    file_all: Vec<PathBuf>,
+
+    /// Live search query typed in PickFile mode.
+    file_query: String,
+
+    /// Fuzzy-filtered results: (path, match-char indices in the display string).
+    /// Recomputed whenever file_query or file_all changes.
+    file_list: Vec<(PathBuf, Vec<usize>)>,
     
     /// LSP manager for language server protocol support
     lsp_manager: LspManager,
@@ -120,6 +127,8 @@ impl Editor {
             status_message: None,
             buffer_picker_idx: 0,
             file_picker_idx: 0,
+            file_all: Vec::new(),
+            file_query: String::new(),
             file_list: Vec::new(),
             lsp_manager: LspManager::new(),
             current_diagnostics: Vec::new(),
@@ -492,7 +501,7 @@ impl Editor {
 
         // File list for PickFile mode
         let file_list = if self.mode == Mode::PickFile {
-            Some((self.file_list.clone(), self.file_picker_idx))
+            Some((self.file_list.clone(), self.file_picker_idx, self.file_query.clone()))
         } else {
             None
         };
@@ -704,13 +713,20 @@ impl Editor {
                 }
             }
             Action::FileFind => {
-                self.scan_files();
+                self.scan_files();          // fills file_all
+                self.file_query.clear();
+                self.refilter_files();      // fills file_list from file_all
                 if self.file_list.is_empty() {
                     self.set_status("No files found".to_string());
                 } else {
                     self.file_picker_idx = 0;
                     self.mode = Mode::PickFile;
                 }
+            }
+            Action::FileNew => {
+                // Enter command mode pre-filled with "e " — user types the path.
+                self.command_buffer = "e ".to_string();
+                self.mode = Mode::Command;
             }
             Action::FileSave => {
                 // Get file path and text before doing LSP operations
@@ -905,29 +921,39 @@ impl Editor {
         Ok(())
     }
 
-    /// Handle keys in PickFile mode
+    /// Handle keys in PickFile mode (fuzzy search).
     fn handle_pick_file_mode(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
+                self.file_query.clear();
                 self.status_message = None;
             }
             KeyCode::Enter => {
-                if let Some(path) = self.file_list.get(self.file_picker_idx) {
+                if let Some((path, _)) = self.file_list.get(self.file_picker_idx) {
                     let path_clone = path.clone();
+                    self.file_query.clear();
                     self.mode = Mode::Normal;
                     self.open_file(&path_clone)?;
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if self.file_picker_idx > 0 {
                     self.file_picker_idx -= 1;
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if self.file_picker_idx + 1 < self.file_list.len() {
                     self.file_picker_idx += 1;
                 }
+            }
+            KeyCode::Backspace => {
+                self.file_query.pop();
+                self.refilter_files();
+            }
+            KeyCode::Char(c) => {
+                self.file_query.push(c);
+                self.refilter_files();
             }
             _ => {}
         }
@@ -985,6 +1011,28 @@ impl Editor {
             // Scroll history.
             KeyCode::Up => self.agent_panel.scroll_up(),
             KeyCode::Down => self.agent_panel.scroll_down(),
+            // Ctrl+T — cycle through available models.
+            // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
+            // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
+            // On first press, fetches the live model list from the Copilot API.
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Eagerly load models if not yet fetched (brief one-time network call).
+                if self.agent_panel.available_models.is_empty() {
+                    self.set_status("Loading model list…".to_string());
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            if let Err(e) = self.agent_panel.ensure_models().await {
+                                tracing::warn!("Could not fetch model list: {e}");
+                            }
+                        });
+                    });
+                }
+                self.agent_panel.cycle_model();
+                let model = self.agent_panel.selected_model_id().to_string();
+                let n = self.agent_panel.available_models.len();
+                let idx = self.agent_panel.selected_model + 1;
+                self.set_status(format!("Agent model → {model}  [{idx}/{n}]  (Ctrl+T to cycle)"));
+            }
             // Regular characters — handle special agent commands before appending to input.
             KeyCode::Char(ch) => {
                 // 'a' with empty input = apply code block from latest reply.
@@ -1042,20 +1090,143 @@ impl Editor {
                     }
                 }
             }
+            // n — new file: pre-fill command mode with "e <dir>/" so the user
+            //     only needs to type the filename and press Enter.
+            KeyCode::Char('n') => {
+                // Resolve the target directory: selected dir, or parent of selected file,
+                // or fall back to the explorer root.
+                let target_dir = self.file_explorer
+                    .selected_path()
+                    .map(|p| if p.is_dir() { p } else { p.parent().map(|x| x.to_path_buf()).unwrap_or(self.file_explorer.root_path.clone()) })
+                    .unwrap_or_else(|| self.file_explorer.root_path.clone());
+
+                // Build a project-relative prefix for readability.
+                let rel = target_dir
+                    .strip_prefix(&self.file_explorer.root_path)
+                    .unwrap_or(&target_dir)
+                    .to_string_lossy()
+                    .to_string();
+
+                let prefill = if rel.is_empty() {
+                    "e ".to_string()
+                } else {
+                    format!("e {}/", rel)
+                };
+
+                self.file_explorer.blur();
+                self.command_buffer = prefill;
+                self.mode = Mode::Command;
+            }
+            // r — reload / refresh the file tree from disk.
+            KeyCode::Char('r') => {
+                self.file_explorer.reload();
+                self.set_status("Explorer refreshed".to_string());
+            }
             _ => {}
         }
         Ok(())
     }
 
     /// Scan filesystem for files (excluding common ignored directories)
+    // ── Fuzzy file search ──────────────────────────────────────────────────────
+
+    /// Score `query` against `candidate` using a subsequence-match algorithm.
+    /// Returns `None` if not all query chars appear in order in the candidate.
+    /// Returns `Some((score, match_indices))` otherwise; higher score = better match.
+    fn fuzzy_score(query: &str, candidate: &str) -> Option<(i64, Vec<usize>)> {
+        if query.is_empty() {
+            return Some((0, vec![]));
+        }
+        let q_chars: Vec<char> = query.to_lowercase().chars().collect();
+        let c_chars: Vec<char> = candidate.to_lowercase().chars().collect();
+
+        // Subsequence scan — find the first left-to-right match
+        let mut indices = Vec::with_capacity(q_chars.len());
+        let mut qi = 0;
+        for (ci, &cc) in c_chars.iter().enumerate() {
+            if qi < q_chars.len() && cc == q_chars[qi] {
+                indices.push(ci);
+                qi += 1;
+            }
+        }
+        if qi < q_chars.len() {
+            return None; // not all query chars appeared
+        }
+
+        let mut score: i64 = 0;
+
+        // Bonus: consecutive matched characters (runs feel like exact substrings)
+        for i in 1..indices.len() {
+            if indices[i] == indices[i - 1] + 1 {
+                score += 10;
+            }
+        }
+
+        // Bonus: match starts right after a path separator or word boundary
+        for &idx in &indices {
+            let prev = if idx == 0 { '/' } else { c_chars[idx - 1] };
+            if matches!(prev, '/' | '\\' | '_' | '-' | '.') {
+                score += 8;
+            }
+        }
+
+        // Bonus: first matched char appears late in the path (filename > directory)
+        if let Some(&first) = indices.first() {
+            // Reward matches that are in the filename portion (after the last /)
+            let last_sep = c_chars.iter().rposition(|&c| c == '/' || c == '\\')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            if first >= last_sep {
+                score += 15;
+            }
+        }
+
+        // Penalty: longer paths score slightly lower (prefer direct matches)
+        score -= candidate.len() as i64 / 6;
+
+        Some((score, indices))
+    }
+
+    /// Rebuild `file_list` from `file_all` applying the current `file_query`.
+    /// Results are sorted by fuzzy score descending; `file_picker_idx` is clamped.
+    fn refilter_files(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        if self.file_query.is_empty() {
+            // No query → show everything, no highlights
+            self.file_list = self.file_all
+                .iter()
+                .map(|p| (p.clone(), vec![]))
+                .collect();
+        } else {
+            let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self.file_all
+                .iter()
+                .filter_map(|p| {
+                    let display = p.strip_prefix(&cwd)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .to_string();
+                    Self::fuzzy_score(&self.file_query, &display)
+                        .map(|(score, idxs)| (score, p.clone(), idxs))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            self.file_list = scored.into_iter().map(|(_, p, idxs)| (p, idxs)).collect();
+        }
+
+        // Clamp selection index
+        if self.file_list.is_empty() {
+            self.file_picker_idx = 0;
+        } else {
+            self.file_picker_idx = self.file_picker_idx.min(self.file_list.len() - 1);
+        }
+    }
+
     fn scan_files(&mut self) {
-        self.file_list.clear();
-        
+        self.file_all.clear();
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.scan_directory(&current_dir, 0);
-        
-        // Sort files by name for easier navigation
-        self.file_list.sort();
+        self.file_all.sort();
     }
 
     /// Recursively scan a directory for files
@@ -1093,7 +1264,7 @@ impl Editor {
                         continue;
                     }
                 }
-                self.file_list.push(path);
+                self.file_all.push(path);
             } else if path.is_dir() {
                 self.scan_directory(&path, depth + 1);
             }
@@ -1282,6 +1453,29 @@ impl Editor {
                     }
                 } else {
                     self.set_status("Copilot: server not connected (check config.toml)".to_string());
+                }
+            }
+            // :e <path> / :edit <path> — open or create a file
+            _ if cmd.starts_with("e ") || cmd.starts_with("edit ") => {
+                let path_str = cmd.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                if path_str.is_empty() {
+                    self.set_status("Usage: e <path>  (e.g.  e src/main.rs)".to_string());
+                } else {
+                    let path = {
+                        let p = PathBuf::from(path_str);
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            std::env::current_dir()
+                                .unwrap_or_else(|_| PathBuf::from("."))
+                                .join(p)
+                        }
+                    };
+                    self.open_file(&path)?;
+                    // Refresh explorer tree so newly-created buffers show up on save.
+                    if self.file_explorer.visible {
+                        self.file_explorer.reload();
+                    }
                 }
             }
             _ => {

@@ -17,8 +17,8 @@ use crate::keymap::Mode;
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
 // Buffer list tuple: (buffer names with modified flags, selected index)
 type BufferList = (Vec<(String, bool)>, usize);
-// File list tuple: (file paths, selected index)
-type FileList = (Vec<PathBuf>, usize);
+// File list tuple: (fuzzy-filtered entries with match indices, selected index, query)
+type FileList = (Vec<(PathBuf, Vec<usize>)>, usize, String);
 
 /// UI rendering for the editor
 pub struct UI;
@@ -145,10 +145,24 @@ impl UI {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Split area vertically: history (top) + input (bottom 3 lines).
+        // Compute input box height: expand as the user types, up to 5 text lines (7 rows).
+        // content_width = panel width minus 2 border columns.
+        // We calculate how many wrapped lines the current input occupies, then add 2 for borders.
+        let content_width = area.width.saturating_sub(2) as usize;
+        let text_len = panel.input.chars().count() + 1; // +1 for the trailing cursor char
+        let wrapped_lines = if content_width > 0 {
+            (text_len + content_width - 1) / content_width
+        } else {
+            1
+        };
+        // At least 1 text line; at most 5 text lines to keep history visible.
+        let input_text_lines = (wrapped_lines.max(1).min(5)) as u16;
+        let input_height = input_text_lines + 2; // +2 for top/bottom borders
+
+        // Split area vertically: history (top) + input (dynamic bottom).
         let vchunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .constraints([Constraint::Min(1), Constraint::Length(input_height)])
             .split(area);
 
         let history_area = vchunks[0];
@@ -253,14 +267,15 @@ impl UI {
         let start = end.saturating_sub(visible_height);
         let visible_lines = lines[start..end].to_vec();
 
-        // Build a title that shows scroll position when not at bottom.
+        // Build a title that shows the active model and scroll position.
+        let model_label = panel.selected_model_id();
         let history_title = if scroll > 0 {
             let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
-            format!(" Copilot Chat  ↑ scrolled ({}%)  ↑/↓ to navigate ", pct)
+            format!(" Copilot Chat [{model_label}]  ↑ scrolled ({pct}%)  ↑/↓ to navigate ")
         } else if total > visible_height {
-            " Copilot Chat  (↑ to scroll up) ".to_string()
+            format!(" Copilot Chat [{model_label}]  (↑ to scroll up) ")
         } else {
-            " Copilot Chat ".to_string()
+            format!(" Copilot Chat [{model_label}] ")
         };
 
         let history_block = Block::default()
@@ -280,11 +295,11 @@ impl UI {
         };
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Tab=back, Enter=send, Esc=close) ".to_string()
+            " Ask Copilot… (Enter=send, Ctrl+T=model, Tab=back) ".to_string()
         } else if panel.has_code_to_apply() && panel.input.is_empty() {
-            " Message Copilot… | [a] apply code to buffer ".to_string()
+            " Message Copilot… | [a] apply  Ctrl+T=model ".to_string()
         } else {
-            " Message Copilot… ".to_string()
+            " Message Copilot… (Ctrl+T=model) ".to_string()
         };
         let hint = hint.as_str();
         let input_block = Block::default()
@@ -293,7 +308,8 @@ impl UI {
             .border_style(border_style);
         let input_para = Paragraph::new(input_text)
             .block(input_block)
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
         frame.render_widget(input_para, input_area);
     }
 
@@ -665,73 +681,137 @@ impl UI {
 
     /// Render the file picker
     fn render_file_picker(frame: &mut Frame, file_list: Option<&FileList>, area: Rect) {
-        if let Some((files, selected_idx)) = file_list {
-            let mut lines = vec![Line::from(Span::styled(
-                "Find File:",
-                Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow),
-            ))];
-            lines.push(Line::from(""));
+        let Some((files, selected_idx, query)) = file_list else { return };
 
-            // Get current directory for relative path display
-            let current_dir = std::env::current_dir().unwrap_or_default();
+        let current_dir = std::env::current_dir().unwrap_or_default();
 
-            for (idx, path) in files.iter().enumerate() {
-                // Display relative path if possible, otherwise full path
-                let display_path = path.strip_prefix(&current_dir)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
+        // ── Size the popup ──────────────────────────────────────────────────────
+        let picker_width = 80.min(area.width);
+        // 1 border + 1 query line + 1 divider + up-to-20 results + 1 hint + 1 border
+        let result_rows = files.len().min(20) as u16;
+        let picker_height = (result_rows + 6).min(area.height);
 
-                let style = if idx == *selected_idx {
-                    Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(area.width.saturating_sub(picker_width) / 2),
+                Constraint::Length(picker_width),
+                Constraint::Min(0),
+            ])
+            .split(area);
+
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(area.height.saturating_sub(picker_height) / 2),
+                Constraint::Length(picker_height),
+                Constraint::Min(0),
+            ])
+            .split(horizontal[1]);
+
+        let picker_area = vertical[1];
+
+        // Split the popup vertically: query box (3 rows) | results list
+        let inner = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // query input
+                Constraint::Min(1),     // results
+            ])
+            .split(picker_area);
+
+        // ── Query input box ─────────────────────────────────────────────────────
+        let query_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightCyan))
+            .title(Span::styled(" Find File ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)))
+            .title_bottom(Span::styled(
+                format!(" {} files ", files.len()),
+                Style::default().fg(Color::DarkGray),
+            ));
+        let query_display = format!("> {query}_");
+        let query_para = Paragraph::new(Span::styled(
+            query_display,
+            Style::default().fg(Color::White),
+        ))
+        .block(query_block);
+        frame.render_widget(query_para, inner[0]);
+
+        // ── Results list ────────────────────────────────────────────────────────
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (idx, (path, match_indices)) in files.iter().enumerate().take(20) {
+            let display: String = path.strip_prefix(&current_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+
+            let is_selected = idx == *selected_idx;
+            let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
+            let prefix = if is_selected { "► " } else { "  " };
+
+            if match_indices.is_empty() {
+                // No highlights (empty query or no match positions)
+                let style = if is_selected {
+                    Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    Style::default().fg(Color::White)
                 };
-
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", display_path),
-                    style,
-                )));
+                lines.push(Line::from(Span::styled(format!("{prefix}{display}"), style)));
+            } else {
+                // Build multi-span line with matched chars highlighted in yellow
+                let mut spans: Vec<Span> = vec![Span::styled(
+                    prefix.to_string(),
+                    Style::default().bg(bg).fg(if is_selected { Color::White } else { Color::Reset }),
+                )];
+                let chars: Vec<char> = display.chars().collect();
+                let mut ci = 0;
+                let mut seg = String::new();
+                for (char_idx, &ch) in chars.iter().enumerate() {
+                    let is_match = match_indices.contains(&char_idx);
+                    let was_match = char_idx > 0 && match_indices.contains(&(char_idx - 1));
+                    if is_match != was_match && !seg.is_empty() {
+                        // Flush the segment with previous style
+                        let prev_is_match = !is_match;
+                        let style = if prev_is_match {
+                            Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        } else if is_selected {
+                            Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().bg(bg).fg(Color::White)
+                        };
+                        spans.push(Span::styled(std::mem::take(&mut seg), style));
+                    }
+                    seg.push(ch);
+                    ci = char_idx;
+                }
+                // Flush the last segment
+                if !seg.is_empty() {
+                    let last_is_match = match_indices.contains(&ci);
+                    let style = if last_is_match {
+                        Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().bg(bg).fg(Color::White)
+                    };
+                    spans.push(Span::styled(seg, style));
+                }
+                lines.push(Line::from(spans));
             }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "↑/↓ or j/k to navigate, Enter to open, Esc to cancel",
-                Style::default().fg(Color::Gray),
-            )));
-
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::LightCyan))
-                .title(" File Finder ");
-
-            // Center the picker
-            let picker_width = 80.min(area.width);
-            let picker_height = (files.len().min(30) + 6).min(area.height as usize);
-            
-            let horizontal = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length((area.width.saturating_sub(picker_width)) / 2),
-                    Constraint::Length(picker_width),
-                    Constraint::Min(0),
-                ])
-                .split(area);
-
-            let vertical = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length((area.height.saturating_sub(picker_height as u16)) / 2),
-                    Constraint::Length(picker_height as u16),
-                    Constraint::Min(0),
-                ])
-                .split(horizontal[1]);
-
-            let picker_area = vertical[1];
-
-            let paragraph = Paragraph::new(lines).block(block);
-            frame.render_widget(paragraph, picker_area);
         }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ↑/↓  navigate   Enter  open   Esc  cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let results_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::LightCyan));
+        let results_para = Paragraph::new(lines).block(results_block);
+        frame.render_widget(results_para, inner[1]);
     }
 
     /// Render the status line

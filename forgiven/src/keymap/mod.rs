@@ -54,6 +54,7 @@ pub enum Action {
     BufferPrevious,
     BufferClose,
     FileFind,
+    FileNew,
     FileSave,
     Quit,
     // LSP actions
@@ -139,6 +140,7 @@ impl KeyHandler {
         // SPC f - File commands
         let mut file_node = KeyNode::new("file");
         file_node.children.insert('f', KeyNode::leaf("find file", Action::FileFind));
+        file_node.children.insert('n', KeyNode::leaf("new file", Action::FileNew));
         file_node.children.insert('s', KeyNode::leaf("save file", Action::FileSave));
         tree.insert('f', file_node);
 

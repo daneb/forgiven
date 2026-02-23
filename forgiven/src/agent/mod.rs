@@ -65,6 +65,10 @@ pub struct AgentPanel {
     /// Paths (project-relative) of files modified by the agent this frame.
     /// The editor drains this each tick to reload open buffers.
     pub pending_reloads: Vec<String>,
+    /// Model IDs fetched from GET /models (lazily populated on first submit).
+    pub available_models: Vec<String>,
+    /// Index into available_models for the currently selected model.
+    pub selected_model: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +111,44 @@ impl AgentPanel {
             streaming_reply: None,
             stream_rx: None,
             pending_reloads: Vec::new(),
+            available_models: Vec::new(),
+            selected_model: 0,
         }
+    }
+
+    /// The model ID string to send in API requests.
+    /// Falls back to "gpt-4o" before the models list has been fetched.
+    pub fn selected_model_id(&self) -> &str {
+        if self.available_models.is_empty() {
+            return "gpt-4o";
+        }
+        &self.available_models[self.selected_model.min(self.available_models.len() - 1)]
+    }
+
+    /// Advance to the next model in the list (wraps around).
+    pub fn cycle_model(&mut self) {
+        if !self.available_models.is_empty() {
+            self.selected_model = (self.selected_model + 1) % self.available_models.len();
+        }
+    }
+
+    /// Ensure the model list is populated.  Fetches from /models if it hasn't
+    /// been loaded yet.  Safe to call multiple times — no-op after first load.
+    pub async fn ensure_models(&mut self) -> Result<()> {
+        if !self.available_models.is_empty() {
+            return Ok(());
+        }
+        let api_token = self.ensure_token().await?;
+        match fetch_models(&api_token).await {
+            Ok(models) if !models.is_empty() => {
+                let default_idx = models.iter().position(|m| m == "gpt-4o").unwrap_or(0);
+                self.available_models = models;
+                self.selected_model = default_idx;
+            }
+            Ok(_) => warn!("Copilot /models returned an empty list"),
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 
     pub fn toggle_visible(&mut self) {
@@ -199,10 +240,29 @@ Available tools:\n\
         self.streaming_reply = Some(String::new());
 
         let api_token = self.ensure_token().await?;
+
+        // Lazily populate the model list on first submit (or after a token refresh
+        // that cleared it).  Failure is non-fatal — we just keep the fallback.
+        if self.available_models.is_empty() {
+            match fetch_models(&api_token).await {
+                Ok(models) if !models.is_empty() => {
+                    info!("Fetched {} models from Copilot API", models.len());
+                    // Default to gpt-4o if present, otherwise index 0.
+                    let default_idx = models.iter().position(|m| m == "gpt-4o").unwrap_or(0);
+                    self.available_models = models;
+                    self.selected_model = default_idx;
+                }
+                Ok(_) => warn!("Copilot /models returned an empty list"),
+                Err(e) => warn!("Could not fetch Copilot model list: {e}"),
+            }
+        }
+
+        let model_id = self.selected_model_id().to_string();
+
         let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(rx);
 
-        tokio::spawn(agentic_loop(api_token, send_messages, project_root, tx));
+        tokio::spawn(agentic_loop(api_token, send_messages, project_root, tx, model_id));
         Ok(())
     }
 
@@ -322,6 +382,7 @@ async fn agentic_loop(
     mut messages: Vec<serde_json::Value>,
     project_root: PathBuf,
     tx: mpsc::UnboundedSender<StreamEvent>,
+    model_id: String,
 ) {
     let tool_defs = tools::tool_definitions();
     const MAX_ROUNDS: usize = 20;
@@ -332,6 +393,7 @@ async fn agentic_loop(
             api_token.clone(),
             messages.clone(),
             tool_defs.clone(),
+            &model_id,
         ).await {
             Ok(r)  => r,
             Err(e) => { let _ = tx.send(StreamEvent::Error(format!("{e}"))); return; }
@@ -538,9 +600,10 @@ async fn start_chat_stream_with_tools(
     api_token: String,
     messages: Vec<serde_json::Value>,
     tools: serde_json::Value,
+    model_id: &str,
 ) -> Result<reqwest::Response> {
     let body = serde_json::json!({
-        "model": "gpt-4o",
+        "model": model_id,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -574,6 +637,70 @@ async fn start_chat_stream_with_tools(
 
     info!("Copilot Chat stream started ({})", resp.status());
     Ok(resp)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model discovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the list of chat-capable model IDs from the Copilot `/models` endpoint.
+/// Returns the IDs sorted with preferred models first (gpt-4o, then others).
+async fn fetch_models(api_token: &str) -> Result<Vec<String>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.githubcopilot.com/models")
+        .header("Authorization", format!("Bearer {api_token}"))
+        .header("User-Agent", "forgiven/0.1.0")
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("editor-version", "forgiven/0.1.0")
+        .send()
+        .await
+        .context("Failed to reach Copilot /models endpoint")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Copilot /models error ({status}): {body}"));
+    }
+
+    let body: serde_json::Value = resp.json().await.context("/models response is not JSON")?;
+
+    let mut models: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let id = v.get("id")?.as_str()?.to_string();
+                    // Skip non-chat model types (embeddings, TTS, image gen, etc.)
+                    if id.contains("embed")
+                        || id.contains("whisper")
+                        || id.contains("tts")
+                        || id.contains("dall")
+                    {
+                        return None;
+                    }
+                    // If the response includes a model_picker_enabled flag, respect it.
+                    if let Some(picker) = v.get("model_picker_enabled") {
+                        if picker == &serde_json::Value::Bool(false) {
+                            return None;
+                        }
+                    }
+                    Some(id)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Sort: gpt-4o first, then alphabetically so the list is stable.
+    models.sort_by(|a, b| {
+        let a_pref = if a == "gpt-4o" { 0 } else { 1 };
+        let b_pref = if b == "gpt-4o" { 0 } else { 1 };
+        a_pref.cmp(&b_pref).then(a.cmp(b))
+    });
+
+    debug!("Available models: {:?}", models);
+    Ok(models)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

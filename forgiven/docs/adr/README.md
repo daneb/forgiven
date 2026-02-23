@@ -20,6 +20,9 @@ that motivated it, what was decided, and the consequences.
 | [0010](0010-file-explorer-tree-sidebar.md) | File Explorer Tree Sidebar | Accepted |
 | [0011](0011-agentic-tool-calling-loop.md) | Agentic Tool-Calling Loop | Accepted |
 | [0012](0012-agent-ux-context-and-file-refresh.md) | Agent UX: Context Injection, File Refresh, and Chat Rendering | Accepted |
+| [0013](0013-project-folder-argument.md) | Multi-Project Support: Project Folder Argument | Accepted |
+| [0014](0014-agent-model-selection.md) | Agent Model Selection: Dynamic Discovery and Ctrl+T Cycling | Accepted |
+| [0015](0015-file-creation-and-explorer-enhancements.md) | File Creation and Explorer Enhancements | Accepted |
 
 ## What is an ADR?
 
@@ -36,7 +39,9 @@ The format used here follows the lightweight template:
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                               forgiven editor                                 │
 │                                                                               │
-│  main.rs → Editor::new() → Editor::run()  (tokio async main)                 │
+│  main.rs  [--dir DIR | DIR positional]                                        │
+│    → set_current_dir(canonical)   ← project root for all downstream calls    │
+│    → Editor::new() → Editor::run()  (tokio async main)                        │
 │                                                                               │
 │  ┌────────────────────────────────────────────────────────────────────────┐   │
 │  │  Editor event loop  (50 ms poll)                                       │   │
@@ -50,20 +55,24 @@ The format used here follows the lightweight template:
 │    │  │rust-analyzer │  │   │  ┌──────────┐  ┌──────────┐  ┌────────┐  │    │
 │    │  │LspClient     │  │   │  │ Explorer │  │  Editor  │  │ Agent  │  │    │
 │    │  │reader thread │  │   │  │  25 cols │  │  Min(1)  │  │  35%   │  │    │
-│    │  │writer thread │  │   │  │          │  │          │  │        │  │    │
+│    │  │writer thread │  │   │  │          │  │          │  │[model] │  │    │
 │    │  └──────────────┘  │   │  │ ▼ src/   │  │ syntect  │  │ chat   │  │    │
 │    │  ┌──────────────┐  │   │  │   mod.rs │  │ highlight│  │ history│  │    │
 │    │  │copilot-ls    │  │   │  │ ▶ tests/ │  │ ghost txt│  │ input  │  │    │
-│    │  │LspClient     │  │   │  └──────────┘  └──────────┘  └────────┘  │    │
-│    │  └──────────────┘  │   │                                           │    │
-│    └────────────────────┘   └───────────────────────────────────────────┘    │
+│    │  │LspClient     │  │   │  │ n=new    │  │          │  │Ctrl+T  │  │    │
+│    │  └──────────────┘  │   │  │ r=reload │  │          │  │=model  │  │    │
+│    └────────────────────┘   │  └──────────┘  └──────────┘  └────────┘  │    │
+│                             └───────────────────────────────────────────┘    │
 │              │                                                                │
 │    ┌─────────┴──────────────────────────────────────────────────────────┐   │
 │    │  AgentPanel                                                         │   │
 │    │  messages: Vec<ChatMessage>      pending_reloads: Vec<String>       │   │
 │    │  stream_rx: mpsc::UnboundedRx    streaming_reply: Option<String>    │   │
+│    │  available_models: Vec<String>   selected_model: usize              │   │
 │    │                                                                     │   │
+│    │  ensure_models() ──────────────► GET /models (lazy, cached)        │   │
 │    │  tokio::spawn(agentic_loop)  ──► api.githubcopilot.com             │   │
+│    │    model_id = selected_model_id()                                   │   │
 │    │    MAX_ROUNDS=20                  tools: read_file / write_file     │   │
 │    │    parse SSE tool_call deltas           edit_file / list_directory  │   │
 │    │    execute tools (safe_path sandbox)                                │   │
@@ -73,7 +82,7 @@ The format used here follows the lightweight template:
 │    └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                               │
 │  Highlighter (syntect)  — SyntaxSet + ThemeSet loaded once at startup        │
-│  FileExplorer           — lazy tree rooted at current_dir()                  │
+│  FileExplorer           — lazy tree rooted at current_dir(); reload() on r   │
 │  clipboard: Option<String>  — shared yank/delete register                    │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -83,24 +92,29 @@ The format used here follows the lightweight template:
 ```
 Normal ──── i/a/I/A/o/O ──► Insert
        ──── v           ──► Visual
-       ──── :           ──► Command
+       ──── :           ──► Command  (:e path, :w, :q, :wq, :q!, copilot status/auth)
        ──── SPC b b     ──► PickBuffer
-       ──── SPC f f     ──► PickFile
+       ──── SPC f f     ──► PickFile  (fuzzy search)
+       ──── SPC f n     ──► Command   (pre-filled "e " for new file)
        ──── SPC a a/f   ──► Agent
        ──── SPC e e/f   ──► Explorer
 
 Explorer ── Esc/Tab     ──► Normal
          ── Enter/l     ──► (opens file → Normal) or (toggles dir)
+         ── n           ──► Command  (pre-filled "e <dir>/" for new file)
+         ── r           ──► reload tree from disk
+
+Agent    ── Esc/Tab     ──► Normal
+         ── Ctrl+T      ──► cycle model (loads /models list on first press)
 
 Insert ──── Esc         ──► Normal
-Agent  ──── Esc/Tab     ──► Normal
 ```
 
 ## Planned ADRs (future decisions)
 
-- `0013` — Undo/redo history (persistent `EditHistory` with Op log)
-- `0014` — Buffer model improvements (line-gap buffer or rope for large files)
-- `0015` — Hover / go-to-definition popup widget
-- `0016` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
-- `0017` — File system watcher for live explorer refresh (`notify` crate)
-- `0018` — Agent file attachment picker (`@`-mention files as context)
+- `0016` — Undo/redo history (persistent `EditHistory` with Op log)
+- `0017` — Buffer model improvements (line-gap buffer or rope for large files)
+- `0018` — Hover / go-to-definition popup widget
+- `0019` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
+- `0020` — File system watcher for live explorer refresh (`notify` crate)
+- `0021` — Agent file attachment picker (`@`-mention files as context)
