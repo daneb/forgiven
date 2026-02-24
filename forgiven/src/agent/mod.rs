@@ -267,13 +267,19 @@ Available tools:\n\
     }
 
     pub fn poll_stream(&mut self) -> bool {
+        // Process at most this many tokens per frame to avoid stalling the render loop
+        // when the LLM is streaming a large response at high speed.
+        const MAX_TOKENS_PER_FRAME: usize = 64;
         let mut active = false;
+        let mut token_count = 0usize;
         if let Some(rx) = self.stream_rx.as_mut() {
             loop {
                 match rx.try_recv() {
                     Ok(StreamEvent::Token(t)) => {
                         active = true;
                         if let Some(r) = self.streaming_reply.as_mut() { r.push_str(&t); }
+                        token_count += 1;
+                        if token_count >= MAX_TOKENS_PER_FRAME { break; }
                     }
                     Ok(StreamEvent::ToolStart { name, args_summary }) => {
                         active = true;

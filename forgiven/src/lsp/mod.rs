@@ -799,7 +799,9 @@ impl LspManager {
 
     /// Process pending LSP notifications and client messages.
     /// Call this every frame — it is non-blocking and capped per frame.
-    pub fn process_messages(&mut self) -> Result<()> {
+    /// Process pending LSP notifications and client wire messages.
+    /// Returns `true` if anything was processed (so callers can decide whether to re-render).
+    pub fn process_messages(&mut self) -> Result<bool> {
         const MAX_NOTIFS_PER_FRAME: usize = 32;
         let mut count = 0;
 
@@ -825,11 +827,12 @@ impl LspManager {
         }
 
         // Drain raw wire messages from each client (routes responses to pending requests).
+        let mut client_count = 0usize;
         for client in self.clients.values_mut() {
-            let _ = client.process_messages();
+            client_count += client.process_messages().unwrap_or(0);
         }
 
-        Ok(())
+        Ok(count > 0 || client_count > 0)
     }
 
     /// Get current diagnostics for a file (returns an empty vec if none).

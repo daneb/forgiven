@@ -8,7 +8,8 @@ pub enum Mode {
     Normal,
     Insert,
     Command,
-    Visual,
+    Visual,      // character-wise visual selection (v)
+    VisualLine,  // line-wise visual selection (V)
     PickBuffer,  // For buffer selection UI
     PickFile,    // For file finder UI
     Agent,       // Copilot Chat / agent panel focused
@@ -31,6 +32,7 @@ pub enum Action {
     MoveUp,
     MoveDown,
     MoveLineStart,
+    MoveFirstNonBlank,  // ^ — first non-whitespace char on the line
     MoveLineEnd,        // A / InsertLineEnd motion (past last char)
     MoveLineEndNormal,  // $ in Normal mode (lands ON last char)
     MoveWordForward,
@@ -44,10 +46,18 @@ pub enum Action {
     DeleteChar,         // x — delete char at cursor
     DeleteLine,         // dd — delete current line into clipboard
     DeleteToLineEnd,    // D  — delete from cursor to EOL
-    YankLine,           // yy
+    DeleteWord,         // dw — delete from cursor to end of word
+    YankLine,           // yy — yank whole line
+    YankWord,           // yw — yank to end of word
+    YankToLineEnd,      // y$ — yank to end of line
+    YankSelection,      // y in Visual mode — yank selection
+    DeleteSelection,    // d/x in Visual mode — delete selection into clipboard
+    ChangeLine,         // cc — delete line + enter Insert
+    ChangeWord,         // cw — delete word + enter Insert
     PasteAfter,         // p
     PasteBefore,        // P
     Undo,               // u
+    Redo,               // Ctrl+R
     // Leader key actions
     BufferList,
     BufferNext,
@@ -65,12 +75,16 @@ pub enum Action {
     LspDocumentSymbols,
     LspNextDiagnostic,
     LspPrevDiagnostic,
+    // Visual modes
+    VisualLine,
     // Agent panel
     AgentToggle,
     AgentFocus,
     // Explorer panel
     ExplorerToggle,
     ExplorerFocus,
+    // Git
+    GitOpen,    // SPC g g — open lazygit
 }
 
 /// Represents a keybinding tree node
@@ -111,6 +125,8 @@ pub struct KeyHandler {
     show_which_key: bool,
     /// Pending prefix key for two-key Normal-mode commands (d, g, y, c …)
     pending_key: Option<char>,
+    /// Accumulated numeric count prefix (e.g. `3` before `dd` → delete 3 lines).
+    pending_count: Option<usize>,
 }
 
 impl KeyHandler {
@@ -122,7 +138,14 @@ impl KeyHandler {
             leader_tree,
             show_which_key: false,
             pending_key: None,
+            pending_count: None,
         }
+    }
+
+    /// Consume and return the pending count, defaulting to 1.
+    /// Should be called once at the start of `execute_action`.
+    pub fn take_count(&mut self) -> usize {
+        self.pending_count.take().unwrap_or(1)
     }
 
     /// Build the Spacemacs-inspired leader key tree
@@ -170,16 +193,25 @@ impl KeyHandler {
         explorer_node.children.insert('f', KeyNode::leaf("focus file explorer", Action::ExplorerFocus));
         tree.insert('e', explorer_node);
 
+        // SPC g - Git (lazygit)
+        let mut git_node = KeyNode::new("git");
+        git_node.children.insert('g', KeyNode::leaf("open lazygit", Action::GitOpen));
+        tree.insert('g', git_node);
+
         tree
     }
 
-    /// Get the current key sequence (for display in status line)
+    /// Get the current key sequence (for display in status line).
+    /// Shows accumulated count + pending key/leader so the user has feedback.
     pub fn sequence(&self) -> String {
+        let count_prefix = self.pending_count
+            .map(|n| n.to_string())
+            .unwrap_or_default();
         if let Some(pk) = self.pending_key {
-            return format!("{}", pk);
+            return format!("{}{}", count_prefix, pk);
         }
         if self.sequence.is_empty() {
-            String::new()
+            count_prefix
         } else {
             format!("SPC {}", self.sequence.iter().collect::<String>())
         }
@@ -232,22 +264,44 @@ impl KeyHandler {
         }
     }
 
-    /// Clear the current sequence
+    /// Clear the current sequence and any accumulated count.
     pub fn clear_sequence(&mut self) {
         self.sequence.clear();
         self.sequence_start = None;
         self.show_which_key = false;
+        self.pending_count = None;
     }
 
     /// Handle a key in Normal mode, returning an action
     pub fn handle_normal(&mut self, key: KeyEvent) -> Action {
+        // ── Numeric count prefix (e.g. 3 in 3dd / 5j) ────────────────────────
+        // `0` alone = MoveLineStart; `0` after digits = part of count.
+        if let KeyCode::Char(ch) = key.code {
+            if ch.is_ascii_digit() && (ch != '0' || self.pending_count.is_some()) {
+                let digit = (ch as usize) - ('0' as usize);
+                self.pending_count = Some(self.pending_count.unwrap_or(0) * 10 + digit);
+                return Action::Noop; // accumulating — don't act yet
+            }
+        }
+
         // ── Resolve pending double-key prefixes (dd, gg, yy) ─────────────────
         if let Some(pk) = self.pending_key.take() {
             if let KeyCode::Char(ch) = key.code {
                 return match (pk, ch) {
+                    // d — delete into clipboard
                     ('d', 'd') => Action::DeleteLine,
+                    ('d', 'w') => Action::DeleteWord,
+                    ('d', '$') => Action::DeleteToLineEnd,
+                    // g — goto
                     ('g', 'g') => Action::GotoFileTop,
+                    // y — yank into clipboard
                     ('y', 'y') => Action::YankLine,
+                    ('y', 'w') => Action::YankWord,
+                    ('y', '$') => Action::YankToLineEnd,
+                    // c — change (delete + Insert)
+                    ('c', 'c') => Action::ChangeLine,
+                    ('c', 'w') => Action::ChangeWord,
+                    ('c', '$') => Action::DeleteToLineEnd, // same as D, then insert
                     _ => Action::Noop, // unknown combo — discard
                 };
             }
@@ -293,6 +347,8 @@ impl KeyHandler {
             KeyCode::Char('k') | KeyCode::Up   => Action::MoveUp,
             KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
             KeyCode::Char('0') | KeyCode::Home => Action::MoveLineStart,
+            // ^ — first non-whitespace character on the line
+            KeyCode::Char('^') => Action::MoveFirstNonBlank,
             // $ lands ON the last character in Normal mode
             KeyCode::Char('$') | KeyCode::End  => Action::MoveLineEndNormal,
             KeyCode::Char('w') => Action::MoveWordForward,
@@ -309,20 +365,22 @@ impl KeyHandler {
             KeyCode::Char('P') => Action::PasteBefore,
 
             // Double-key prefixes: store first key, resolve on next keypress
-            KeyCode::Char('d') | KeyCode::Char('g') | KeyCode::Char('y') => {
+            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)
+            KeyCode::Char('d') | KeyCode::Char('g') | KeyCode::Char('y') | KeyCode::Char('c') => {
                 if let KeyCode::Char(ch) = key.code {
                     self.pending_key = Some(ch);
                 }
                 Action::Noop
             }
 
-            // Ctrl+R — redo (not implemented yet, reserved)
+            // Ctrl+R — redo
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::Noop
+                Action::Redo
             }
 
-            // Visual mode
+            // Visual modes
             KeyCode::Char('v') => Action::Visual,
+            KeyCode::Char('V') => Action::VisualLine,
 
             // Command mode
             KeyCode::Char(':') => Action::Command,

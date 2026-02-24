@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use crate::buffer::cursor::Cursor;
-use crate::buffer::history::{EditHistory, EditOp};
+use crate::buffer::history::EditHistory;
 
 /// Selection range for visual mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +59,11 @@ pub struct Buffer {
 
     /// Vertical scroll offset (row)
     pub scroll_row: usize,
+
+    /// Anchor row for Visual Line mode (`V`).
+    /// Kept separately from `selection.start` so up/down movement can always
+    /// recompute the correct inclusive range without losing the anchor.
+    pub visual_line_anchor: Option<usize>,
 }
 
 impl Buffer {
@@ -75,6 +80,7 @@ impl Buffer {
             history: EditHistory::new(),
             scroll_col: 0,
             scroll_row: 0,
+            visual_line_anchor: None,
         }
     }
 
@@ -119,6 +125,7 @@ impl Buffer {
             history: EditHistory::new(),
             scroll_col: 0,
             scroll_row: 0,
+            visual_line_anchor: None,
         })
     }
 
@@ -195,6 +202,50 @@ impl Buffer {
     }
 
     // -------------------------------------------------------------------------
+    // Undo / redo
+    // -------------------------------------------------------------------------
+
+    /// Save the current buffer state to the undo history.
+    /// Call this **once** before any mutating action, not per-keystroke.
+    /// For Insert mode, call it when *entering* Insert (not on each character),
+    /// so the whole Insert session is a single undo step.
+    pub fn save_undo_snapshot(&mut self) {
+        self.history.save(&self.lines, self.cursor.row, self.cursor.col);
+    }
+
+    /// Undo the most recent action.  Returns `true` if a snapshot was available.
+    pub fn undo(&mut self) -> bool {
+        let snap = self.history.undo(&self.lines, self.cursor.row, self.cursor.col);
+        if let Some(s) = snap {
+            self.lines = s.lines;
+            self.cursor.row = s.cursor_row;
+            self.cursor.col = s.cursor_col;
+            self.clamp_cursor_col();
+            self.is_modified = true;
+            self.lsp_version += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo the most recently undone action.  Returns `true` if available.
+    pub fn redo(&mut self) -> bool {
+        let snap = self.history.redo(&self.lines, self.cursor.row, self.cursor.col);
+        if let Some(s) = snap {
+            self.lines = s.lines;
+            self.cursor.row = s.cursor_row;
+            self.cursor.col = s.cursor_col;
+            self.clamp_cursor_col();
+            self.is_modified = true;
+            self.lsp_version += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Normal-mode edit operations (delete, yank, paste, goto)
     // -------------------------------------------------------------------------
 
@@ -236,22 +287,174 @@ impl Buffer {
         self.lines[self.cursor.row].clone()
     }
 
-    /// Insert `text` as a new line BELOW the cursor row (Normal-mode `p`).
-    pub fn paste_after_cursor(&mut self, text: &str) {
+    /// Line-wise paste BELOW the cursor row (`yy`/`dd` → `p`).
+    /// Splits text on `\n` so multi-line content becomes multiple real lines.
+    pub fn paste_linewise_after(&mut self, text: &str) {
+        let parts: Vec<&str> = text.split('\n').collect();
         let row = self.cursor.row;
-        self.lines.insert(row + 1, text.to_string());
+        for (i, part) in parts.iter().enumerate() {
+            self.lines.insert(row + 1 + i, part.to_string());
+        }
         self.cursor.row = row + 1;
         self.cursor.col = 0;
         self.mark_modified();
     }
 
-    /// Insert `text` as a new line ABOVE the cursor row (Normal-mode `P`).
-    pub fn paste_before_cursor(&mut self, text: &str) {
+    /// Line-wise paste ABOVE the cursor row (`yy`/`dd` → `P`).
+    pub fn paste_linewise_before(&mut self, text: &str) {
+        let parts: Vec<&str> = text.split('\n').collect();
         let row = self.cursor.row;
-        self.lines.insert(row, text.to_string());
-        // cursor row stays the same (now points at the pasted line).
+        for (i, part) in parts.iter().enumerate() {
+            self.lines.insert(row + i, part.to_string());
+        }
+        // cursor stays pointing at first inserted line
         self.cursor.col = 0;
         self.mark_modified();
+    }
+
+    /// Char-wise paste AFTER the cursor character (`yw`/`y$`/visual → `p`).
+    /// Advances one column then calls insert_text_block (handles multi-line).
+    pub fn paste_charwise_after(&mut self, text: &str) {
+        let line_len = self.current_line_len();
+        if self.cursor.col < line_len {
+            self.cursor.col += 1;
+        }
+        self.insert_text_block(text);
+    }
+
+    /// Char-wise paste AT the cursor position (`yw`/`y$`/visual → `P`).
+    pub fn paste_charwise_before(&mut self, text: &str) {
+        self.insert_text_block(text);
+    }
+
+    // -------------------------------------------------------------------------
+    // Word-motion helpers (yw / dw)
+    // -------------------------------------------------------------------------
+
+    /// Column AFTER the end of the current word — the exclusive end for yw/dw.
+    /// Mirrors vim's `w` motion: skip the current token, then trailing spaces.
+    fn word_end_col(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.cursor.row].chars().collect();
+        let len = chars.len();
+        let mut col = self.cursor.col;
+
+        if col >= len {
+            return col;
+        }
+
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+        if is_word(chars[col]) {
+            while col < len && is_word(chars[col]) { col += 1; }
+        } else if chars[col].is_whitespace() {
+            while col < len && chars[col].is_whitespace() { col += 1; }
+        } else {
+            // Punctuation / operator run
+            while col < len && !is_word(chars[col]) && !chars[col].is_whitespace() { col += 1; }
+        }
+        // Consume trailing spaces (like vim `dw`)
+        while col < len && chars[col] == ' ' { col += 1; }
+        col
+    }
+
+    /// Return the text from the cursor to the end of the current word (yw).
+    pub fn yank_word(&self) -> String {
+        let end = self.word_end_col();
+        self.lines[self.cursor.row]
+            .chars()
+            .skip(self.cursor.col)
+            .take(end.saturating_sub(self.cursor.col))
+            .collect()
+    }
+
+    /// Return text from cursor to end of line (y$).
+    pub fn yank_to_line_end(&self) -> String {
+        self.lines[self.cursor.row]
+            .chars()
+            .skip(self.cursor.col)
+            .collect()
+    }
+
+    /// Remove and return text from cursor to end of word (dw).
+    pub fn delete_word(&mut self) -> String {
+        let end = self.word_end_col();
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let deleted: String = chars[col..end].iter().collect();
+        let new_line: String = chars[..col].iter().chain(&chars[end..]).collect();
+        self.lines[row] = new_line;
+        self.mark_modified();
+        deleted
+    }
+
+    // -------------------------------------------------------------------------
+    // Visual selection extract / delete
+    // -------------------------------------------------------------------------
+
+    /// Return the text covered by the current selection without modifying the buffer.
+    pub fn yank_selection(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let (start, end) = sel.normalized();
+        let mut result = String::new();
+
+        if start.row == end.row {
+            let chars: Vec<char> = self.lines[start.row].chars().collect();
+            let from = start.col.min(chars.len());
+            let to = (end.col + 1).min(chars.len());
+            result.extend(&chars[from..to]);
+        } else {
+            // First row: from start.col to EOL
+            let first: Vec<char> = self.lines[start.row].chars().collect();
+            result.extend(&first[start.col.min(first.len())..]);
+            result.push('\n');
+            // Middle rows
+            for row in (start.row + 1)..end.row {
+                result.push_str(&self.lines[row]);
+                result.push('\n');
+            }
+            // Last row: up to and including end.col
+            let last: Vec<char> = self.lines[end.row].chars().collect();
+            let to = (end.col + 1).min(last.len());
+            result.extend(&last[..to]);
+        }
+
+        Some(result)
+    }
+
+    /// Remove and return the text covered by the current selection.
+    /// Cursor is placed at the start of the deleted region.
+    pub fn delete_selection(&mut self) -> Option<String> {
+        let yanked = self.yank_selection()?;
+        let sel = self.selection.take()?;
+        let (start, end) = sel.normalized();
+
+        if start.row == end.row {
+            let chars: Vec<char> = self.lines[start.row].chars().collect();
+            let from = start.col.min(chars.len());
+            let to = (end.col + 1).min(chars.len());
+            let new_line: String = chars[..from].iter().chain(&chars[to..]).collect();
+            self.lines[start.row] = new_line;
+        } else {
+            let start_prefix: String = self.lines[start.row].chars().take(start.col).collect();
+            let end_suffix: String = self.lines[end.row].chars().skip(end.col + 1).collect();
+            // Remove rows from start.row+1 up through end.row
+            let rows_to_remove = end.row - start.row;
+            for _ in 0..rows_to_remove {
+                if start.row + 1 < self.lines.len() {
+                    self.lines.remove(start.row + 1);
+                }
+            }
+            self.lines[start.row] = start_prefix + &end_suffix;
+        }
+
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor = start;
+        self.clamp_cursor_col();
+        self.mark_modified();
+        Some(yanked)
     }
 
     /// Move cursor to the first line of the buffer (Normal-mode `gg`).
@@ -331,8 +534,6 @@ impl Buffer {
 
         self.cursor.col += 1;
         self.mark_modified();
-
-        self.history.record(EditOp::InsertChar { row, col, ch });
     }
 
     /// Insert a newline at the current cursor position, splitting the current line
@@ -347,8 +548,6 @@ impl Buffer {
         self.cursor.row += 1;
         self.cursor.col = 0;
         self.mark_modified();
-
-        self.history.record(EditOp::InsertNewline { row, col });
     }
 
     /// Delete the character before the cursor (backspace)
@@ -380,7 +579,6 @@ impl Buffer {
         }
 
         self.mark_modified();
-        self.history.record(EditOp::DeleteCharBefore { row, col });
     }
 
     /// Delete the character at the cursor position (delete key)
@@ -403,7 +601,6 @@ impl Buffer {
         }
 
         self.mark_modified();
-        self.history.record(EditOp::DeleteCharAt { row, col });
     }
 
     // -------------------------------------------------------------------------
@@ -445,6 +642,23 @@ impl Buffer {
 
     pub fn move_cursor_line_start(&mut self) {
         self.cursor.col = 0;
+    }
+
+    /// Move cursor to the first non-whitespace character on the current line (`^`).
+    /// If the line is all whitespace (or empty), falls back to column 0.
+    pub fn move_cursor_first_nonblank(&mut self) {
+        let col = self.lines
+            .get(self.cursor.row)
+            .and_then(|line| {
+                line.char_indices()
+                    .find(|(_, c)| !c.is_whitespace())
+                    .map(|(byte_idx, _)| {
+                        // Convert byte index to char index
+                        line[..byte_idx].chars().count()
+                    })
+            })
+            .unwrap_or(0);
+        self.cursor.col = col;
     }
 
     pub fn move_cursor_line_end(&mut self) {
@@ -553,6 +767,82 @@ impl Buffer {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+        self.visual_line_anchor = None;
+    }
+
+    // ── Visual Line mode selection helpers ────────────────────────────────────
+
+    /// Enter Visual Line mode: record the anchor row and set the initial selection.
+    pub fn start_selection_line(&mut self) {
+        self.visual_line_anchor = Some(self.cursor.row);
+        self.update_selection_line();
+    }
+
+    /// Recompute the linewise selection from `visual_line_anchor` to `cursor.row`.
+    /// The selection always spans complete lines (col=0 … col=usize::MAX).
+    pub fn update_selection_line(&mut self) {
+        let anchor = self.visual_line_anchor.unwrap_or(self.cursor.row);
+        let cur = self.cursor.row;
+        let (min_row, max_row) = if anchor <= cur { (anchor, cur) } else { (cur, anchor) };
+        self.selection = Some(Selection {
+            start: Cursor { row: min_row, col: 0 },
+            end:   Cursor { row: max_row, col: usize::MAX },
+        });
+    }
+
+    // ── Multi-line yank / delete (count-prefix and Visual Line operators) ─────
+
+    /// Yank `count` lines starting at cursor row (for `Nyy`).
+    /// Returns lines joined with `\n`; caller tags register as Linewise.
+    pub fn yank_lines(&self, count: usize) -> String {
+        let start = self.cursor.row;
+        let end = (start + count).min(self.lines.len());
+        self.lines[start..end].join("\n")
+    }
+
+    /// Delete `count` lines starting at cursor row (for `Ndd`).
+    /// Returns deleted text joined with `\n`.
+    pub fn delete_lines(&mut self, count: usize) -> String {
+        let start = self.cursor.row;
+        let end = (start + count).min(self.lines.len());
+        let yanked = self.lines[start..end].join("\n");
+        self.lines.drain(start..end);
+        if self.lines.is_empty() { self.lines.push(String::new()); }
+        self.cursor.row = start.min(self.lines.len() - 1);
+        self.clamp_cursor_col();
+        self.mark_modified();
+        yanked
+    }
+
+    /// Yank the lines covered by the current Visual Line selection.
+    pub fn yank_selection_lines(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let (start, end) = sel.normalized();
+        let end_row = end.row.min(self.lines.len().saturating_sub(1));
+        Some(self.lines[start.row..=end_row].join("\n"))
+    }
+
+    /// Delete the lines covered by the current Visual Line selection.
+    /// Returns the deleted text joined with `\n`.
+    pub fn delete_selection_lines(&mut self) -> Option<String> {
+        let yanked = self.yank_selection_lines()?;
+        let sel = self.selection.take()?;
+        let (start, end) = sel.normalized();
+        let end_row = end.row.min(self.lines.len().saturating_sub(1));
+        self.lines.drain(start.row..=end_row);
+        if self.lines.is_empty() { self.lines.push(String::new()); }
+        self.cursor.row = start.row.min(self.lines.len() - 1);
+        self.cursor.col = 0;
+        self.visual_line_anchor = None;
+        self.mark_modified();
+        Some(yanked)
+    }
+
+    /// Jump to an absolute line number (1-based, as typed by the user).
+    /// Used by `5G` / `5gg` count-prefix navigation.
+    pub fn goto_line(&mut self, one_based: usize) {
+        self.cursor.row = one_based.saturating_sub(1).min(self.lines.len().saturating_sub(1));
+        self.clamp_cursor_col();
     }
 
     /// Ensure cursor is visible with default viewport size

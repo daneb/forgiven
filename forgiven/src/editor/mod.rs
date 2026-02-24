@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
+use arboard;
 use crate::agent::AgentPanel;
 use crate::buffer::Buffer;
 use crate::config::Config;
@@ -24,6 +25,30 @@ use crate::lsp::{LspManager, parse_first_inline_completion};
 use crate::ui::UI;
 use ratatui::text::Span;
 use lsp_types::Diagnostic;
+
+/// Whether the clipboard was populated by a line-wise or char-wise operation.
+/// Controls how `p`/`P` pastes the content.
+#[derive(Clone)]
+enum ClipboardType {
+    /// Produced by `yy`/`dd`/`cc` — paste inserts whole new line(s).
+    Linewise,
+    /// Produced by `yw`/`y$`/visual-y etc — paste inserts inline at cursor.
+    Charwise,
+}
+
+/// Cached syntax-highlight spans for the visible viewport.
+///
+/// The key is `(buffer_idx, scroll_row, lsp_version)`. When any of these change the
+/// cache is stale and syntect is re-run; otherwise the spans are reused without touching
+/// the highlighter at all.  A full re-highlight of 40 visible lines takes ~3–8 ms; with
+/// the cache that cost drops to ~0 for all frames where the user is just moving the
+/// cursor or reading.
+struct HighlightCache {
+    buffer_idx: usize,
+    scroll_row: usize,
+    lsp_version: i32,
+    spans: Vec<Vec<ratatui::text::Span<'static>>>,
+}
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
 pub struct Editor {
@@ -96,12 +121,15 @@ pub struct Editor {
     agent_panel: AgentPanel,
 
     // ── Clipboard (yank register) ─────────────────────────────────────────────
-    /// Last yanked / deleted text for p/P paste operations.
-    clipboard: Option<String>,
+    /// Last yanked / deleted text + whether it is linewise or charwise.
+    clipboard: Option<(String, ClipboardType)>,
 
     // ── Syntax highlighter ────────────────────────────────────────────────────
     /// Loaded once at startup; highlight_line() is called per visible line each frame.
     highlighter: Highlighter,
+
+    /// Per-viewport highlight cache — invalidated on content change or scroll.
+    highlight_cache: Option<HighlightCache>,
 
     // ── File explorer ─────────────────────────────────────────────────────────
     file_explorer: FileExplorer,
@@ -138,8 +166,9 @@ impl Editor {
             copilot_auth_rx: None,
             status_sticky: false,
             agent_panel: AgentPanel::new(),
-            clipboard: None,
+            clipboard: None::<(String, ClipboardType)>,
             highlighter: Highlighter::new(),
+            highlight_cache: None,
             file_explorer: FileExplorer::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             ),
@@ -258,21 +287,31 @@ impl Editor {
     pub async fn run(&mut self) -> Result<()> {
         const COMPLETION_DEBOUNCE_MS: u128 = 300;
 
+        // Render on the very first frame regardless of activity.
+        let mut needs_render = true;
+
         loop {
-            // Process LSP messages (non-blocking, capped per frame)
-            let _ = self.lsp_manager.process_messages();
+            // ── LSP: process incoming notifications / responses ────────────────
+            let lsp_changed = self.lsp_manager.process_messages().unwrap_or(false);
+            if lsp_changed {
+                needs_render = true;
+            }
 
             // Surface any human-readable LSP messages (e.g. Copilot auth instructions).
             // These are sticky so they persist until the user presses Esc.
             for msg in self.lsp_manager.drain_messages() {
                 self.set_sticky(msg);
+                needs_render = true;
             }
 
-            // Update diagnostics for current buffer
-            if let Some(buf) = self.current_buffer() {
-                if let Some(path) = &buf.file_path {
-                    if let Ok(uri) = LspManager::path_to_uri(path) {
-                        self.current_diagnostics = self.lsp_manager.get_diagnostics(&uri);
+            // Update diagnostics for current buffer — only when LSP sent something new
+            // to avoid cloning the full diagnostic Vec on every frame.
+            if lsp_changed {
+                if let Some(buf) = self.current_buffer() {
+                    if let Some(path) = &buf.file_path {
+                        if let Ok(uri) = LspManager::path_to_uri(path) {
+                            self.current_diagnostics = self.lsp_manager.get_diagnostics(&uri);
+                        }
                     }
                 }
             }
@@ -289,6 +328,7 @@ impl Editor {
             };
             if let Some(val) = auth_done {
                 self.copilot_auth_rx = None;
+                needs_render = true;
                 let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 tracing::info!("Copilot auth response: {:?}", val);
                 match status {
@@ -321,7 +361,10 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Agent panel stream polling ─────────────────────────────────────
-            self.agent_panel.poll_stream();
+            let agent_active = self.agent_panel.poll_stream();
+            if agent_active {
+                needs_render = true;
+            }
 
             // Reload any buffers the agent modified on disk this tick.
             let reloads: Vec<String> = std::mem::take(&mut self.agent_panel.pending_reloads);
@@ -357,6 +400,7 @@ impl Editor {
                 }
                 if reloaded {
                     self.set_status(format!("↺ reloaded {rel_path}"));
+                    needs_render = true;
                 }
             }
             // ──────────────────────────────────────────────────────────────────
@@ -389,6 +433,7 @@ impl Editor {
             };
             if let Some(value) = completed {
                 self.pending_completion = None;
+                needs_render = true;
                 if let Some(text) = parse_first_inline_completion(value) {
                     if let Some(buf) = self.current_buffer() {
                         let row = buf.cursor.row;
@@ -399,13 +444,23 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // Render the UI
-            self.render()?;
+            // Also render whenever background polling is still in-flight so the
+            // user sees spinner/progress updates.
+            if self.copilot_auth_rx.is_some() || self.pending_completion.is_some() {
+                needs_render = true;
+            }
 
-            // Handle input
+            // ── Render (only when something changed) ───────────────────────────
+            if needs_render {
+                self.render()?;
+                needs_render = false;
+            }
+
+            // ── Input (blocks up to 50 ms) ─────────────────────────────────────
             if event::poll(std::time::Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     self.handle_key(key)?;
+                    needs_render = true;
                 }
             }
 
@@ -446,15 +501,30 @@ impl Editor {
 
         // ── Scroll to keep cursor in view ─────────────────────────────────────
         // Must happen before the buffer snapshot so scroll_row/col are current.
-        // viewport_height accounts for: status line (1 row) + which-key popup
-        // (10 rows) when visible.  viewport_width is the full terminal width as
-        // a conservative approximation; the actual text area may be narrower when
-        // the explorer or agent panel are open, but the horizontal scroll logic
-        // still keeps the cursor reachable.
+        //
+        // viewport_height: subtract status line (1) and which-key popup (10) when shown.
+        //
+        // viewport_width: we must match the three-panel layout produced by UI::render()
+        // so that horizontal scrolling kicks in at the right column.  The layout is:
+        //   explorer+agent → [Length(25), Min(1), Percentage(35)]
+        //   explorer only  → [Length(25), Min(1)]
+        //   agent only     → [Percentage(60), Percentage(40)]
+        //   neither        → [Min(1)]
+        // Then subtract 2 for the diagnostic gutter that is always prepended.
         let size = self.terminal.size().unwrap_or_default();
         let viewport_height = (size.height as usize)
             .saturating_sub(if show_which_key { 11 } else { 1 });
-        let viewport_width = size.width as usize;
+
+        const GUTTER: usize = 2;
+        let total_w = size.width as usize;
+        let editor_area_w = match (self.file_explorer.visible, self.agent_panel.visible) {
+            (true,  true)  => total_w.saturating_sub(25).saturating_sub(total_w * 35 / 100),
+            (true,  false) => total_w.saturating_sub(25),
+            (false, true)  => total_w * 60 / 100,
+            (false, false) => total_w,
+        };
+        let viewport_width = editor_area_w.saturating_sub(GUTTER);
+
         if let Some(buf) = self.current_buffer_mut() {
             buf.scroll_to_cursor(viewport_height, viewport_width);
         }
@@ -472,22 +542,53 @@ impl Editor {
             )
         });
 
-        // Compute syntax-highlighted spans for the visible viewport only.
-        // Reuse the already-computed viewport_height (terminal height minus UI chrome).
+        // ── Syntax-highlight cache ─────────────────────────────────────────────
+        // Re-use spans from the previous frame when the buffer content (lsp_version),
+        // scroll position, and active buffer are all unchanged.  This eliminates the
+        // ~3–8 ms syntect cost on every frame where the user is just moving the cursor.
         let term_height = viewport_height;
+        let buf_idx = self.current_buffer_idx;
 
-        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> =
-            self.current_buffer().map(|buf| {
-                let ext = buf.file_path.as_deref()
-                    .map(Highlighter::extension_for)
-                    .unwrap_or_default();
-                let start = buf.scroll_row;
-                let end = (start + term_height).min(buf.lines().len());
-                buf.lines()[start..end]
-                    .iter()
-                    .map(|line| self.highlighter.highlight_line(line, &ext))
-                    .collect()
+        // Collect the cache key from an immutable borrow (borrow ends before mut access).
+        let cache_key = self.current_buffer().map(|buf| {
+            let ext = buf.file_path.as_deref()
+                .map(Highlighter::extension_for)
+                .unwrap_or_default();
+            (buf.scroll_row, buf.lsp_version, ext)
+        });
+
+        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> = if let Some((scroll_row, lsp_ver, ext)) = cache_key {
+            let cache_hit = self.highlight_cache.as_ref().map_or(false, |c| {
+                c.buffer_idx == buf_idx
+                    && c.scroll_row == scroll_row
+                    && c.lsp_version == lsp_ver
             });
+
+            if cache_hit {
+                // Zero allocation: clone the already-built Span vecs.
+                self.highlight_cache.as_ref().map(|c| c.spans.clone())
+            } else {
+                // Cache miss: run syntect for the visible window and store result.
+                let spans = if let Some(buf) = self.current_buffer() {
+                    let end = (scroll_row + term_height).min(buf.lines().len());
+                    buf.lines()[scroll_row..end]
+                        .iter()
+                        .map(|line| self.highlighter.highlight_line(line, &ext))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                self.highlight_cache = Some(HighlightCache {
+                    buffer_idx: buf_idx,
+                    scroll_row,
+                    lsp_version: lsp_ver,
+                    spans: spans.clone(),
+                });
+                Some(spans)
+            }
+        } else {
+            None
+        };
 
         // Buffer list for PickBuffer mode
         let buffer_list = if self.mode == Mode::PickBuffer {
@@ -550,6 +651,7 @@ impl Editor {
             Mode::Insert => self.handle_insert_mode(key)?,
             Mode::Command => self.handle_command_mode(key)?,
             Mode::Visual => self.handle_visual_mode(key)?,
+            Mode::VisualLine => self.handle_visual_line_mode(key)?,
             Mode::PickBuffer => self.handle_pick_buffer_mode(key)?,
             Mode::PickFile => self.handle_pick_file_mode(key)?,
             Mode::Agent => self.handle_agent_mode(key)?,
@@ -568,8 +670,47 @@ impl Editor {
 
     /// Execute an action
     fn execute_action(&mut self, action: Action) -> Result<()> {
+        // Don't consume the count for Noop — the user may still be building a
+        // count prefix (e.g. typing "3" before "d") and we must not lose it.
+        if matches!(action, Action::Noop) { return Ok(()); }
+
+        // Consume the accumulated count (defaults to 1 if none).
+        let count = self.key_handler.take_count();
+
+        // ── Undo snapshot ─────────────────────────────────────────────────────
+        // Save buffer state BEFORE any action that mutates content.
+        // Insert-mode entry actions save once here — all subsequent keystrokes
+        // in Insert mode are NOT snapshotted individually, so the whole Insert
+        // session forms a single undo step (vim behaviour).
+        let needs_snapshot = matches!(
+            action,
+            // Enter Insert mode (one snapshot per Insert session)
+            Action::Insert
+            | Action::InsertAppend
+            | Action::InsertLineStart
+            | Action::InsertLineEnd
+            | Action::InsertNewlineBelow
+            | Action::InsertNewlineAbove
+            // Normal-mode destructive operations
+            | Action::DeleteChar
+            | Action::DeleteLine
+            | Action::DeleteToLineEnd
+            | Action::DeleteWord
+            | Action::DeleteSelection
+            | Action::ChangeLine
+            | Action::ChangeWord
+            // Paste (alters content)
+            | Action::PasteAfter
+            | Action::PasteBefore
+        );
+        if needs_snapshot {
+            if let Some(buf) = self.current_buffer_mut() {
+                buf.save_undo_snapshot();
+            }
+        }
+
         match action {
-            Action::Noop => {}
+            Action::Noop => unreachable!(),
             Action::Insert => self.mode = Mode::Insert,
             Action::InsertAppend => {
                 if let Some(buf) = self.current_buffer_mut() {
@@ -605,30 +746,35 @@ impl Editor {
                 self.mode = Mode::Insert;
             }
             Action::MoveLeft => {
-                // h — clamped, no line wrap
+                // h — clamped, no line wrap; repeats `count` times
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_left_clamp();
+                    for _ in 0..count { buf.move_cursor_left_clamp(); }
                 }
             }
             Action::MoveRight => {
-                // l — clamped, no line wrap
+                // l — clamped, no line wrap; repeats `count` times
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_right_clamp();
+                    for _ in 0..count { buf.move_cursor_right_clamp(); }
                 }
             }
             Action::MoveUp => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_up();
+                    for _ in 0..count { buf.move_cursor_up(); }
                 }
             }
             Action::MoveDown => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_down();
+                    for _ in 0..count { buf.move_cursor_down(); }
                 }
             }
             Action::MoveLineStart => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_start();
+                }
+            }
+            Action::MoveFirstNonBlank => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_first_nonblank();
                 }
             }
             Action::MoveLineEnd => {
@@ -645,22 +791,24 @@ impl Editor {
             }
             Action::GotoFileTop => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.goto_first_line();
+                    // `5gg` → jump to line 5 (1-based); bare `gg` → first line
+                    if count > 1 { buf.goto_line(count); } else { buf.goto_first_line(); }
                 }
             }
             Action::GotoFileBottom => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.goto_last_line();
+                    // `5G` → jump to line 5 (1-based); bare `G` → last line
+                    if count > 1 { buf.goto_line(count); } else { buf.goto_last_line(); }
                 }
             }
             Action::MoveWordForward => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_word_forward();
+                    for _ in 0..count { buf.move_cursor_word_forward(); }
                 }
             }
             Action::MoveWordBackward => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_word_backward();
+                    for _ in 0..count { buf.move_cursor_word_backward(); }
                 }
             }
             Action::Command => {
@@ -701,12 +849,16 @@ impl Editor {
                 if !self.buffers.is_empty() {
                     let buf = &self.buffers[self.current_buffer_idx];
                     if buf.is_modified {
-                        self.set_status("Buffer has unsaved changes. Save first!".to_string());
+                        self.set_status(
+                            "Unsaved changes. Use :bd! to discard and close, or :w to save."
+                                .to_string(),
+                        );
                     } else {
                         let name = buf.name.clone();
                         self.buffers.remove(self.current_buffer_idx);
                         if !self.buffers.is_empty() {
-                            self.current_buffer_idx = self.current_buffer_idx.min(self.buffers.len() - 1);
+                            self.current_buffer_idx =
+                                self.current_buffer_idx.min(self.buffers.len() - 1);
                         }
                         self.set_status(format!("Closed buffer: {}", name));
                     }
@@ -802,6 +954,10 @@ impl Editor {
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
             }
+            // ── Git ───────────────────────────────────────────────────────────
+            Action::GitOpen => {
+                self.open_lazygit()?;
+            }
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
                 if let Some(buf) = self.current_buffer_mut() {
@@ -809,48 +965,160 @@ impl Editor {
                 }
                 self.notify_lsp_change();
             }
+            // ── Linewise deletes/yanks (paste creates new rows) ───────────────
             Action::DeleteLine => {
+                // `count` lines deleted, e.g. `3dd` removes 3 lines
                 let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_current_line());
+                    .map(|buf| buf.delete_lines(count));
                 if let Some(text) = deleted {
-                    self.clipboard = Some(text);
-                }
-                self.notify_lsp_change();
-            }
-            Action::DeleteToLineEnd => {
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_to_line_end());
-                if let Some(text) = deleted {
-                    self.clipboard = Some(text);
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
                 }
                 self.notify_lsp_change();
             }
             Action::YankLine => {
+                // `count` lines yanked, e.g. `3yy` copies 3 lines
                 let yanked = self.current_buffer()
-                    .map(|buf| buf.yank_current_line());
+                    .map(|buf| buf.yank_lines(count));
                 if let Some(text) = yanked {
-                    self.clipboard = Some(text);
-                    self.set_status("Line yanked".to_string());
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
+                    self.set_status(format!("{count} line{} yanked", if count == 1 { "" } else { "s" }));
                 }
             }
+            Action::ChangeLine => {
+                // `count` lines deleted then enter Insert, e.g. `3cc`
+                let deleted = self.current_buffer_mut()
+                    .map(|buf| buf.delete_lines(count));
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Insert;
+            }
+            // ── Visual Line mode ─────────────────────────────────────────────
+            Action::VisualLine => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.start_selection_line();
+                }
+                self.mode = Mode::VisualLine;
+            }
+            // ── Charwise deletes/yanks (paste inserts inline) ─────────────────
+            Action::DeleteToLineEnd => {
+                let deleted = self.current_buffer_mut()
+                    .map(|buf| buf.delete_to_line_end());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                }
+                self.notify_lsp_change();
+            }
+            Action::DeleteWord => {
+                let deleted = self.current_buffer_mut()
+                    .map(|buf| buf.delete_word());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                }
+                self.notify_lsp_change();
+            }
+            Action::YankWord => {
+                let yanked = self.current_buffer()
+                    .map(|buf| buf.yank_word());
+                if let Some(text) = yanked {
+                    let n = text.chars().count();
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.set_status(format!("{n} chars yanked"));
+                }
+            }
+            Action::YankToLineEnd => {
+                let yanked = self.current_buffer()
+                    .map(|buf| buf.yank_to_line_end());
+                if let Some(text) = yanked {
+                    let n = text.chars().count();
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.set_status(format!("{n} chars yanked"));
+                }
+            }
+            Action::YankSelection => {
+                let yanked = self.current_buffer()
+                    .and_then(|buf| buf.yank_selection());
+                if let Some(text) = yanked {
+                    let n = text.chars().count();
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.set_status(format!("{n} chars yanked"));
+                }
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.clear_selection();
+                }
+                self.mode = Mode::Normal;
+            }
+            Action::DeleteSelection => {
+                let deleted = self.current_buffer_mut()
+                    .and_then(|buf| buf.delete_selection());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Normal;
+            }
+            Action::ChangeWord => {
+                let deleted = self.current_buffer_mut()
+                    .map(|buf| buf.delete_word());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Insert;
+            }
+            // ── Paste — dispatch on clipboard type ────────────────────────────
             Action::PasteAfter => {
-                if let Some(text) = self.clipboard.clone() {
+                if let Some((text, clip_type)) = self.clipboard.clone() {
                     if let Some(buf) = self.current_buffer_mut() {
-                        buf.paste_after_cursor(&text);
+                        match clip_type {
+                            ClipboardType::Linewise => buf.paste_linewise_after(&text),
+                            ClipboardType::Charwise => buf.paste_charwise_after(&text),
+                        }
                     }
                     self.notify_lsp_change();
                 }
             }
             Action::PasteBefore => {
-                if let Some(text) = self.clipboard.clone() {
+                if let Some((text, clip_type)) = self.clipboard.clone() {
                     if let Some(buf) = self.current_buffer_mut() {
-                        buf.paste_before_cursor(&text);
+                        match clip_type {
+                            ClipboardType::Linewise => buf.paste_linewise_before(&text),
+                            ClipboardType::Charwise => buf.paste_charwise_before(&text),
+                        }
                     }
                     self.notify_lsp_change();
                 }
             }
             Action::Undo => {
-                self.set_status("Undo not yet implemented".to_string());
+                let did_undo = self.current_buffer_mut()
+                    .map(|buf| buf.undo())
+                    .unwrap_or(false);
+                if did_undo {
+                    self.notify_lsp_change();
+                } else {
+                    self.set_status("Already at oldest change".to_string());
+                }
+            }
+            Action::Redo => {
+                let did_redo = self.current_buffer_mut()
+                    .map(|buf| buf.redo())
+                    .unwrap_or(false);
+                if did_redo {
+                    self.notify_lsp_change();
+                } else {
+                    self.set_status("Already at newest change".to_string());
+                }
             }
         }
         Ok(())
@@ -859,12 +1127,39 @@ impl Editor {
     /// Handle keys in Visual mode
     fn handle_visual_mode(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            // ── Exit / cancel ─────────────────────────────────────────────────
             KeyCode::Esc => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.clear_selection();
                 }
                 self.mode = Mode::Normal;
             }
+
+            // ── Yank / delete / change operators ──────────────────────────────
+            // y — copy selection to register + system clipboard, back to Normal
+            KeyCode::Char('y') => {
+                self.execute_action(Action::YankSelection)?;
+            }
+            // d / x — delete selection into register, back to Normal
+            KeyCode::Char('d') | KeyCode::Char('x') => {
+                self.execute_action(Action::DeleteSelection)?;
+            }
+            // c — delete selection + enter Insert mode
+            KeyCode::Char('c') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.save_undo_snapshot();
+                }
+                let deleted = self.current_buffer_mut()
+                    .and_then(|buf| buf.delete_selection());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Insert;
+            }
+
+            // ── Motion keys (extend the selection) ────────────────────────────
             KeyCode::Char('h') | KeyCode::Left => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_left();
@@ -889,6 +1184,138 @@ impl Editor {
                     buf.update_selection();
                 }
             }
+            KeyCode::Char('w') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_word_forward();
+                    buf.update_selection();
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_word_backward();
+                    buf.update_selection();
+                }
+            }
+            KeyCode::Char('0') | KeyCode::Home => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_line_start();
+                    buf.update_selection();
+                }
+            }
+            KeyCode::Char('^') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_first_nonblank();
+                    buf.update_selection();
+                }
+            }
+            KeyCode::Char('$') | KeyCode::End => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_line_end_normal();
+                    buf.update_selection();
+                }
+            }
+            KeyCode::Char('G') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.goto_last_line();
+                    buf.update_selection();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle keys in Visual Line mode (`V`)
+    ///
+    /// The selection always covers whole lines. `j`/`k` move the cursor and
+    /// re-anchor the selection; `y`/`d`/`x` operate on the selected line span.
+    fn handle_visual_line_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            // ── Exit ──────────────────────────────────────────────────────────
+            KeyCode::Esc | KeyCode::Char('V') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.clear_selection();
+                }
+                self.mode = Mode::Normal;
+            }
+
+            // ── Yank selection (linewise) ─────────────────────────────────────
+            // `y` — copy selected lines into register + system clipboard, Normal
+            KeyCode::Char('y') => {
+                let yanked = self.current_buffer()
+                    .and_then(|buf| buf.yank_selection_lines());
+                if let Some(text) = yanked {
+                    let n = text.lines().count();
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
+                    self.set_status(format!("{n} line{} yanked", if n == 1 { "" } else { "s" }));
+                }
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.clear_selection();
+                }
+                self.mode = Mode::Normal;
+            }
+
+            // ── Delete / change selection (linewise) ─────────────────────────
+            // `d` / `x` — remove selected lines, store in register, Normal
+            KeyCode::Char('d') | KeyCode::Char('x') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.save_undo_snapshot();
+                }
+                let deleted = self.current_buffer_mut()
+                    .and_then(|buf| buf.delete_selection_lines());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Normal;
+            }
+
+            // `c` — remove selected lines + enter Insert
+            KeyCode::Char('c') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.save_undo_snapshot();
+                }
+                let deleted = self.current_buffer_mut()
+                    .and_then(|buf| buf.delete_selection_lines());
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Linewise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Insert;
+            }
+
+            // ── Motion keys (extend the line selection) ───────────────────────
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_down();
+                    buf.update_selection_line();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.move_cursor_up();
+                    buf.update_selection_line();
+                }
+            }
+            KeyCode::Char('G') => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.goto_last_line();
+                    buf.update_selection_line();
+                }
+            }
+            KeyCode::Char('g') => {
+                // gg — go to first line (we can't use pending_key here easily,
+                // so a single `g` press jumps to the top — matches common muscle
+                // memory for `Vgg` select-to-top).
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.goto_first_line();
+                    buf.update_selection_line();
+                }
+            }
+
             _ => {}
         }
         Ok(())
@@ -1424,6 +1851,38 @@ impl Editor {
                 }
                 self.should_quit = true;
             }
+            // :bd / :bdelete — close buffer, refuse if unsaved
+            "bd" | "bdelete" => {
+                if !self.buffers.is_empty() {
+                    let is_modified = self.buffers[self.current_buffer_idx].is_modified;
+                    if is_modified {
+                        self.set_status(
+                            "Unsaved changes. Use :bd! to discard and close, or :w to save."
+                                .to_string(),
+                        );
+                    } else {
+                        let name = self.buffers[self.current_buffer_idx].name.clone();
+                        self.buffers.remove(self.current_buffer_idx);
+                        if !self.buffers.is_empty() {
+                            self.current_buffer_idx =
+                                self.current_buffer_idx.min(self.buffers.len() - 1);
+                        }
+                        self.set_status(format!("Closed buffer: {name}"));
+                    }
+                }
+            }
+            // :bd! / :bdelete! — force-close buffer, discarding unsaved changes
+            "bd!" | "bdelete!" => {
+                if !self.buffers.is_empty() {
+                    let name = self.buffers[self.current_buffer_idx].name.clone();
+                    self.buffers.remove(self.current_buffer_idx);
+                    if !self.buffers.is_empty() {
+                        self.current_buffer_idx =
+                            self.current_buffer_idx.min(self.buffers.len() - 1);
+                    }
+                    self.set_status(format!("Closed buffer: {name} (discarded changes)"));
+                }
+            }
             "copilot status" => {
                 let completion_state = if self.ghost_text.is_some() {
                     "suggestion ready (Tab to accept)"
@@ -1509,6 +1968,19 @@ impl Editor {
     fn set_sticky(&mut self, msg: String) {
         self.status_sticky = true;
         self.status_message = Some(msg);
+    }
+
+    /// Write `text` to the OS system clipboard.
+    /// Errors are silently swallowed — the internal register is always primary.
+    fn sync_system_clipboard(&self, text: &str) {
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(text.to_string()) {
+                    tracing::debug!("system clipboard write failed: {e}");
+                }
+            }
+            Err(e) => tracing::debug!("system clipboard unavailable: {e}"),
+        }
     }
 
     /// Request hover information at cursor position
@@ -1721,6 +2193,56 @@ impl Editor {
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    /// Suspend the TUI, open lazygit, then restore the TUI.
+    ///
+    /// The suspend/resume pattern:
+    ///   1. Leave alternate screen + disable raw mode  → terminal is back to normal
+    ///   2. Spawn `lazygit` as a child process with inherited stdio  → lazygit takes over
+    ///   3. Wait for lazygit to exit
+    ///   4. Re-enter alternate screen + re-enable raw mode  → our TUI resumes
+    ///   5. Force a full redraw so no lazygit artifacts remain
+    ///   6. Reload every open buffer from disk (git ops may have changed files)
+    fn open_lazygit(&mut self) -> Result<()> {
+        // ── Suspend TUI ──────────────────────────────────────────────────────
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+
+        // ── Run lazygit ───────────────────────────────────────────────────────
+        // lazygit is itself a full-screen TUI; it inherits our stdin/stdout/stderr.
+        let result = std::process::Command::new("lazygit").status();
+
+        // ── Restore TUI (always, even if lazygit errored) ─────────────────────
+        enable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        // Force ratatui to repaint every cell — clears any lazygit residue.
+        self.terminal.clear()?;
+
+        // ── Handle outcome ────────────────────────────────────────────────────
+        match result {
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.set_status(
+                    "lazygit not found — install it (e.g. brew install lazygit)".to_string(),
+                );
+            }
+            Err(e) => {
+                self.set_status(format!("lazygit error: {e}"));
+            }
+            Ok(_) => {
+                // Reload every open buffer — a git pull/checkout/rebase may have
+                // changed files on disk that are currently open in the editor.
+                for buf in &mut self.buffers {
+                    if buf.file_path.is_some() {
+                        let _ = buf.reload_from_disk();
+                    }
+                }
+                self.set_status("Returned from lazygit".to_string());
+            }
+        }
+
         Ok(())
     }
 }

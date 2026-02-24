@@ -410,7 +410,7 @@ impl UI {
                     // Use pre-highlighted spans when available, fall back to plain text.
                     let line_idx = row - start_line;
                     let line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
-                        Self::render_highlighted_line(spans, *scroll_col, viewport_width, has_diagnostic, row_ghost)
+                        Self::render_highlighted_line(spans, *scroll_col, viewport_width, has_diagnostic, row_ghost, selection, row)
                     } else {
                         Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row, has_diagnostic, row_ghost)
                     };
@@ -451,15 +451,17 @@ impl UI {
         }
     }
 
-    /// Render a pre-highlighted line (from syntect) with gutter marker and ghost text.
-    /// `spans` is the syntect-coloured token list for this line.
-    /// We truncate tokens to fit within `viewport_width` (minus the 2-char gutter).
+    /// Render a pre-highlighted line (from syntect) with gutter marker, optional selection
+    /// highlight, and ghost text.  Selection is overlaid on top of syntax colours so both
+    /// are visible simultaneously.
     fn render_highlighted_line(
         spans: &[Span<'static>],
         scroll_col: usize,
         viewport_width: usize,
         has_diagnostic: bool,
         ghost: Option<&str>,
+        selection: &Option<Selection>,
+        row: usize,
     ) -> Line<'static> {
         let diag_marker = if has_diagnostic {
             Span::styled("● ", Style::default().fg(Color::Red))
@@ -470,33 +472,94 @@ impl UI {
         // Available columns for actual text (gutter uses 2).
         let text_width = viewport_width.saturating_sub(2);
 
-        // Concatenate span text, apply horizontal scroll, then re-split into spans.
-        // Build a plain-string slice first, then overlay original styles.
+        // Pre-compute normalised selection bounds once.
+        let sel_range = selection.as_ref().map(|sel| sel.normalized());
+
+        // Determine whether this specific row overlaps the selection at all.
+        // If it doesn't, we can use the original efficient span-clipping path
+        // (no per-character String allocations).
+        let row_in_selection = match &sel_range {
+            None => false,
+            Some((start, end)) => row >= start.row && row <= end.row,
+        };
+
         let mut out_spans: Vec<Span<'static>> = vec![diag_marker];
-        let mut col_budget = text_width;
-        let mut skipped = 0usize; // columns already consumed by scroll_col skipping
 
-        for span in spans {
-            if col_budget == 0 {
-                break;
-            }
-            let span_chars: Vec<char> = span.content.chars().collect();
-            let span_len = span_chars.len();
+        if !row_in_selection {
+            // ── Fast path: no selection on this row — clip spans to viewport ──
+            // Reuses syntect Span content directly; zero extra String allocations.
+            let mut col_budget = text_width;
+            let mut skipped = 0usize;
 
-            if skipped < scroll_col {
-                // Need to skip some columns in this span
-                let skip_here = (scroll_col - skipped).min(span_len);
-                skipped += skip_here;
-                let rest: String = span_chars[skip_here..].iter().collect();
-                if !rest.is_empty() {
-                    let take: String = rest.chars().take(col_budget).collect();
+            for span in spans {
+                if col_budget == 0 {
+                    break;
+                }
+                let span_chars: Vec<char> = span.content.chars().collect();
+                let span_len = span_chars.len();
+
+                if skipped < scroll_col {
+                    let skip_here = (scroll_col - skipped).min(span_len);
+                    skipped += skip_here;
+                    let rest: String = span_chars[skip_here..].iter().collect();
+                    if !rest.is_empty() {
+                        let take: String = rest.chars().take(col_budget).collect();
+                        col_budget = col_budget.saturating_sub(take.chars().count());
+                        out_spans.push(Span::styled(take, span.style));
+                    }
+                } else {
+                    let take: String = span_chars.iter().take(col_budget).collect();
                     col_budget = col_budget.saturating_sub(take.chars().count());
                     out_spans.push(Span::styled(take, span.style));
                 }
-            } else {
-                let take: String = span_chars.iter().take(col_budget).collect();
-                col_budget = col_budget.saturating_sub(take.chars().count());
-                out_spans.push(Span::styled(take, span.style));
+            }
+        } else {
+            // ── Slow path: row overlaps selection — walk character by character ──
+            // Needed so we can override the background colour per character.
+            let mut abs_col = 0usize;
+
+            for span in spans {
+                if abs_col >= scroll_col + text_width {
+                    break;
+                }
+                for ch in span.content.chars() {
+                    if abs_col >= scroll_col + text_width {
+                        break;
+                    }
+                    if abs_col < scroll_col {
+                        abs_col += 1;
+                        continue;
+                    }
+
+                    let col_idx = abs_col;
+
+                    // Is this character inside the visual selection?
+                    // Charwise visual is inclusive on both ends (like vim).
+                    // Linewise mode sets end.col = usize::MAX so `<= usize::MAX` is always true.
+                    let is_selected = match &sel_range {
+                        Some((start, end)) => {
+                            if start.row == end.row && row == start.row {
+                                col_idx >= start.col && col_idx <= end.col
+                            } else if row == start.row {
+                                col_idx >= start.col
+                            } else if row == end.row {
+                                col_idx <= end.col
+                            } else {
+                                true // row > start.row && row < end.row (already checked)
+                            }
+                        }
+                        None => false,
+                    };
+
+                    let style = if is_selected {
+                        Style::default().bg(Color::DarkGray).fg(Color::White)
+                    } else {
+                        span.style
+                    };
+
+                    out_spans.push(Span::styled(ch.to_string(), style));
+                    abs_col += 1;
+                }
             }
         }
 
@@ -533,23 +596,28 @@ impl UI {
         // If there's a selection, highlight the selected portion
         if let Some(sel) = selection {
             let (start, end) = sel.normalized();
-            
+
+            // Available text columns: viewport_width (= area.width) minus the 2-char gutter.
+            let text_width = viewport_width.saturating_sub(2);
+
             let mut spans = Vec::new();
             for (col_idx, ch) in chars.iter().enumerate() {
                 if col_idx < scroll_col {
                     continue;
                 }
-                if col_idx >= scroll_col + viewport_width {
+                if col_idx >= scroll_col + text_width {
                     break;
                 }
 
-                // Check if this character is in the selection
+                // Check if this character is in the selection.
+                // Charwise visual is inclusive on both ends (like vim).
+                // Linewise mode sets end.col = usize::MAX so `<= usize::MAX` is always true.
                 let is_selected = if start.row == end.row && row == start.row {
-                    col_idx >= start.col && col_idx < end.col
+                    col_idx >= start.col && col_idx <= end.col
                 } else if row == start.row {
                     col_idx >= start.col
                 } else if row == end.row {
-                    col_idx < end.col
+                    col_idx <= end.col
                 } else {
                     row > start.row && row < end.row
                 };
@@ -830,6 +898,7 @@ impl UI {
             Mode::Insert => "INSERT",
             Mode::Command => "COMMAND",
             Mode::Visual => "VISUAL",
+            Mode::VisualLine => "VISUAL LINE",
             Mode::PickBuffer => "PICK",
             Mode::PickFile => "FIND",
             Mode::Agent => "AGENT",
@@ -841,6 +910,7 @@ impl UI {
             Mode::Insert => Color::Green,
             Mode::Command => Color::Yellow,
             Mode::Visual => Color::Magenta,
+            Mode::VisualLine => Color::Magenta,
             Mode::PickBuffer => Color::Cyan,
             Mode::PickFile => Color::LightCyan,
             Mode::Agent => Color::Cyan,

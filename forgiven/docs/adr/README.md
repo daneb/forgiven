@@ -23,6 +23,12 @@ that motivated it, what was decided, and the consequences.
 | [0013](0013-project-folder-argument.md) | Multi-Project Support: Project Folder Argument | Accepted |
 | [0014](0014-agent-model-selection.md) | Agent Model Selection: Dynamic Discovery and Ctrl+T Cycling | Accepted |
 | [0015](0015-file-creation-and-explorer-enhancements.md) | File Creation and Explorer Enhancements | Accepted |
+| [0016](0016-vim-yank-paste-register.md) | Vim Yank / Paste Register | Accepted |
+| [0017](0017-multi-line-yank-delete-visual-line.md) | Multi-line Yank / Delete and Visual Line Mode | Accepted |
+| [0018](0018-horizontal-scroll-viewport-fix.md) | Horizontal Scroll Viewport Fix | Accepted |
+| [0019](0019-snapshot-undo-redo.md) | Snapshot-based Undo / Redo | Accepted |
+| [0020](0020-lazygit-integration.md) | LazyGit Integration | Accepted |
+| [0021](0021-render-loop-performance.md) | Render Loop Performance Optimisations | Accepted |
 
 ## What is an ADR?
 
@@ -91,7 +97,8 @@ The format used here follows the lightweight template:
 
 ```
 Normal ──── i/a/I/A/o/O ──► Insert
-       ──── v           ──► Visual
+       ──── v           ──► Visual      (charwise, extend with h/j/k/l/w/b/0/$)
+       ──── V           ──► VisualLine  (linewise, extend with j/k/G/g)
        ──── :           ──► Command  (:e path, :w, :q, :wq, :q!, copilot status/auth)
        ──── SPC b b     ──► PickBuffer
        ──── SPC f f     ──► PickFile  (fuzzy search)
@@ -112,9 +119,8 @@ Insert ──── Esc         ──► Normal
 
 ## Planned ADRs (future decisions)
 
-- `0016` — Undo/redo history (persistent `EditHistory` with Op log)
-- `0017` — Buffer model improvements (line-gap buffer or rope for large files)
-- `0018` — Hover / go-to-definition popup widget
-- `0019` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
-- `0020` — File system watcher for live explorer refresh (`notify` crate)
-- `0021` — Agent file attachment picker (`@`-mention files as context)
+- `0022` — Hover / go-to-definition popup widget
+- `0023` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
+- `0024` — File system watcher for live explorer refresh (`notify` crate)
+- `0025` — Agent file attachment picker (`@`-mention files as context)
+- `0026` — Buffer model improvements (line-gap buffer or rope for large files)
