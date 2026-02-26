@@ -10,6 +10,7 @@ mod explorer;
 mod highlight;
 mod keymap;
 mod markdown;
+mod search;
 mod lsp;
 mod ui;
 

@@ -22,6 +22,7 @@ use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{LspManager, parse_first_inline_completion};
+use crate::search::{SearchState, SearchStatus, run_search};
 use crate::ui::UI;
 use ratatui::text::Span;
 use lsp_types::Diagnostic;
@@ -138,6 +139,14 @@ pub struct Editor {
     /// Scroll offset (in rendered lines) for Mode::MarkdownPreview.
     preview_scroll: usize,
 
+    // ── Project-wide text search ──────────────────────────────────────────────
+    /// State for the search overlay (Mode::Search).
+    search_state: SearchState,
+    /// In-flight ripgrep task receiver; `Some` while a search is running.
+    search_rx: Option<oneshot::Receiver<anyhow::Result<Vec<crate::search::SearchResult>>>>,
+    /// Timestamp of the last query/glob change — drives the 300 ms debounce.
+    last_search_instant: Option<Instant>,
+
 }
 
 impl Editor {
@@ -179,6 +188,9 @@ impl Editor {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             ),
             preview_scroll: 0,
+            search_state: SearchState::new(),
+            search_rx: None,
+            last_search_instant: None,
         })
     }
 
@@ -451,6 +463,42 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Project-wide search: debounce + poll ──────────────────────────
+            const SEARCH_DEBOUNCE_MS: u128 = 300;
+            if self.search_rx.is_none() {
+                if let Some(instant) = self.last_search_instant {
+                    if instant.elapsed().as_millis() >= SEARCH_DEBOUNCE_MS
+                        && self.mode == Mode::Search
+                    {
+                        self.last_search_instant = None;
+                        self.fire_search();
+                    }
+                }
+            }
+
+            let search_done = if let Some(rx) = self.search_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(_) => Some(Err(anyhow::anyhow!("search channel closed"))),
+                }
+            } else {
+                None
+            };
+            if let Some(result) = search_done {
+                self.search_rx = None;
+                needs_render = true;
+                match result {
+                    Ok(results) => {
+                        self.search_state.set_results(results);
+                    }
+                    Err(e) => {
+                        self.search_state.status = SearchStatus::Error(e.to_string());
+                    }
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // Also render whenever background polling is still in-flight so the
             // user sees spinner/progress updates.
             // Force a render whenever background work is in-flight OR the
@@ -459,6 +507,7 @@ impl Editor {
             if self.copilot_auth_rx.is_some()
                 || self.pending_completion.is_some()
                 || self.key_handler.which_key_pending()
+                || self.search_rx.is_some()
             {
                 needs_render = true;
             }
@@ -644,6 +693,7 @@ impl Editor {
         let explorer_ref = if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
         let hl_ref = highlighted_lines.as_deref();
         let preview_ref = preview_lines_owned.as_deref();
+        let search_ref = if mode == Mode::Search { Some(&self.search_state) } else { None };
 
         self.terminal.draw(|frame| {
             UI::render(
@@ -662,6 +712,7 @@ impl Editor {
                 hl_ref,
                 explorer_ref,
                 preview_ref,
+                search_ref,
             );
         })?;
 
@@ -676,7 +727,9 @@ impl Editor {
         }
 
         // Clear transient status message on any new input (except sticky messages and picker modes).
-        if self.mode != Mode::PickBuffer && self.mode != Mode::PickFile && !self.status_sticky {
+        if self.mode != Mode::PickBuffer && self.mode != Mode::PickFile
+            && self.mode != Mode::Search && !self.status_sticky
+        {
             self.status_message = None;
         }
 
@@ -691,6 +744,7 @@ impl Editor {
             Mode::Agent => self.handle_agent_mode(key)?,
             Mode::Explorer => self.handle_explorer_mode(key)?,
             Mode::MarkdownPreview => self.handle_preview_mode(key)?,
+            Mode::Search => self.handle_search_mode(key)?,
         }
 
         Ok(())
@@ -1003,6 +1057,13 @@ impl Editor {
                     self.mode = Mode::MarkdownPreview;
                     self.set_status("Markdown preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string());
                 }
+            }
+            // ── Project-wide text search ──────────────────────────────────────
+            Action::SearchOpen => {
+                self.search_state = SearchState::new();
+                self.search_rx = None;
+                self.last_search_instant = None;
+                self.mode = Mode::Search;
             }
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
@@ -1642,6 +1703,93 @@ impl Editor {
             _ => {}
         }
         Ok(())
+    }
+
+    // ── Search mode key handling ───────────────────────────────────────────────
+
+    fn handle_search_mode(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::search::SearchFocus;
+        match key.code {
+            // Esc — close the search overlay, return to Normal.
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.search_rx = None;
+                self.last_search_instant = None;
+            }
+
+            // Enter — open the selected result at the matched line.
+            KeyCode::Enter => {
+                if let Some(result) = self.search_state.selected_result() {
+                    let path = result.path.clone();
+                    let line = result.line;
+                    self.mode = Mode::Normal;
+                    self.search_rx = None;
+                    self.last_search_instant = None;
+                    self.open_file(&path)?;
+                    if let Some(buf) = self.current_buffer_mut() {
+                        buf.goto_line(line + 1); // goto_line expects 1-based
+                    }
+                }
+            }
+
+            // Tab — switch focus between query and glob fields.
+            KeyCode::Tab => {
+                self.search_state.focus = match self.search_state.focus {
+                    SearchFocus::Query => SearchFocus::Glob,
+                    SearchFocus::Glob  => SearchFocus::Query,
+                };
+            }
+
+            // Navigation within results list.
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.search_state.select_up();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.search_state.select_down();
+            }
+
+            // Text editing in the focused field.
+            KeyCode::Backspace => {
+                match self.search_state.focus {
+                    SearchFocus::Query => { self.search_state.query.pop(); }
+                    SearchFocus::Glob  => { self.search_state.glob.pop(); }
+                }
+                self.on_search_input_changed();
+            }
+            KeyCode::Char(c) => {
+                match self.search_state.focus {
+                    SearchFocus::Query => { self.search_state.query.push(c); }
+                    SearchFocus::Glob  => { self.search_state.glob.push(c); }
+                }
+                self.on_search_input_changed();
+            }
+
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Called whenever the query or glob field changes — resets the debounce timer
+    /// and cancels any in-flight search so only the settled value is searched.
+    fn on_search_input_changed(&mut self) {
+        self.last_search_instant = Some(Instant::now());
+        self.search_state.status = SearchStatus::Running;
+        self.search_rx = None; // cancel previous in-flight request
+    }
+
+    /// Spawn a tokio task that runs ripgrep and delivers results via oneshot channel.
+    fn fire_search(&mut self) {
+        let query = self.search_state.query.clone();
+        let glob  = self.search_state.glob.clone();
+        let cwd   = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (tx, rx) = oneshot::channel();
+        self.search_rx = Some(rx);
+        self.search_state.status = SearchStatus::Running;
+        tokio::spawn(async move {
+            let result = run_search(&query, &glob, &cwd).await;
+            let _ = tx.send(result);
+        });
     }
 
     /// Scan filesystem for files (excluding common ignored directories)

@@ -34,6 +34,7 @@ Which-key popup shows available bindings after a 500 ms pause.
 | `SPC e` | `e/f` | Toggle / focus file explorer |
 | `SPC g` | `g` | Open lazygit |
 | `SPC m` | `p` | Markdown preview toggle |
+| `SPC s` | `g` | Search text in project (ripgrep) |
 
 ### Language Server Protocol
 - Auto-connects to `rust-analyzer` and `copilot-language-server` on startup
@@ -53,6 +54,15 @@ Which-key popup shows available bindings after a 500 ms pause.
 - Left-sidebar tree (`SPC e e`); lazy directory loading
 - `Enter` expands dirs / opens files; `Esc/Tab` blurs back to editor
 - Hides `target/`, `node_modules/`, `dist/`, `build/` and dotfiles
+
+### Project-wide search (`SPC s g`)
+
+- Opens a centred popup overlay in `SEARCH` mode
+- **Query** field: text to search (ripgrep regex, smart-case)
+- **File filter** field: optional glob pattern (e.g. `*.rs`, `src/**/*.ts`) — `Tab` switches focus
+- Results update live with a 300 ms debounce; up to 500 matches displayed
+- `↑`/`↓` or `j`/`k` navigate the list; `Enter` opens the file at the matched line
+- `Esc` closes the panel and returns to Normal mode
 
 ### Markdown (`SPC m p`)
 - Toggle a read-only rendered preview for any buffer
@@ -87,9 +97,10 @@ cargo build --release
 
 | Tool | Install | Required for |
 |------|---------|--------------|
-| `mmdc` | `npm install -g @mermaid-js/mermaid-cli` | Mermaid diagram rendering (`SPC m d`) |
+| `rg` (ripgrep) | `brew install ripgrep` / `cargo install ripgrep` | Project-wide search (`SPC s g`) |
 | `lazygit` | `brew install lazygit` / distro package | Git UI (`SPC g g`) |
 | `rust-analyzer` | `rustup component add rust-analyzer` | Rust LSP |
+| `mmdc` | `npm install -g @mermaid-js/mermaid-cli` | Mermaid diagram rendering (`SPC m d`) |
 
 ---
 
@@ -141,6 +152,17 @@ cargo build --release
 | `Ctrl+C` | Cancel streaming response |
 | `j/k` | Scroll history |
 
+### Search panel (`Mode::Search`, `SPC s g`)
+
+| Key | Action |
+|-----|--------|
+| *(type)* | Update search query (or glob if glob field focused) |
+| `Tab` | Switch focus between query and file-glob fields |
+| `↑` / `k` | Select previous result |
+| `↓` / `j` | Select next result |
+| `Enter` | Open selected file at matched line |
+| `Esc` | Close panel, return to Normal mode |
+
 ---
 
 ## Project Structure
@@ -170,12 +192,12 @@ forgiven/
 │   │   └── mod.rs
 │   ├── markdown/            # CommonMark → ratatui Lines renderer
 │   │   └── mod.rs
-│   ├── mermaid/             # Mermaid block detection + mmdc subprocess
+│   ├── search/              # Project-wide ripgrep search (SPC s g)
 │   │   └── mod.rs
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0023)
+│   └── adr/                 # Architecture Decision Records (0001 – 0024)
 └── Cargo.toml
 ```
 
@@ -220,6 +242,7 @@ forgiven/
 
 | Tool | Purpose |
 |------|---------|
+| `rg` (ripgrep) | Project-wide text search — `rg` must be on `$PATH`; install via `brew install ripgrep` or `cargo install ripgrep` |
 | `lazygit` | Full-screen Git UI overlay (`SPC g g`) |
 | `rust-analyzer` | Rust language server |
 | `copilot-language-server` | GitHub Copilot LSP server |
@@ -255,6 +278,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0021](docs/adr/0021-render-loop-performance.md) | Render Loop Performance |
 | [0022](docs/adr/0022-markdown-rendering.md) | Markdown Rendering (Agent Panel + Editor Preview) |
 | [0023](docs/adr/0023-which-key-render-timer.md) | Which-Key Popup Render Timer |
+| [0024](docs/adr/0024-project-wide-text-search.md) | Project-wide Text Search |
 
 ---
 

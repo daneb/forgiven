@@ -15,6 +15,7 @@ pub enum Mode {
     Agent,            // Copilot Chat / agent panel focused
     Explorer,         // File explorer tree focused
     MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
+    Search,           // Project-wide ripgrep search overlay (SPC s g)
 }
 
 /// An editor action to be executed
@@ -88,6 +89,8 @@ pub enum Action {
     GitOpen,    // SPC g g — open lazygit
     // Markdown preview
     MarkdownPreviewToggle,  // SPC m p — toggle markdown preview for .md buffers
+    // Project-wide text search
+    SearchOpen,             // SPC s g — open the project search overlay
 }
 
 /// Represents a keybinding tree node
@@ -205,6 +208,11 @@ impl KeyHandler {
         let mut md_node = KeyNode::new("markdown");
         md_node.children.insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
         tree.insert('m', md_node);
+
+        // SPC s - Search
+        let mut search_node = KeyNode::new("search");
+        search_node.children.insert('g', KeyNode::leaf("search in project (ripgrep)", Action::SearchOpen));
+        tree.insert('s', search_node);
 
         tree
     }
