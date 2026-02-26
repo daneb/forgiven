@@ -133,6 +133,11 @@ pub struct Editor {
 
     // ── File explorer ─────────────────────────────────────────────────────────
     file_explorer: FileExplorer,
+
+    // ── Markdown preview ──────────────────────────────────────────────────────
+    /// Scroll offset (in rendered lines) for Mode::MarkdownPreview.
+    preview_scroll: usize,
+
 }
 
 impl Editor {
@@ -141,6 +146,7 @@ impl Editor {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -172,6 +178,7 @@ impl Editor {
             file_explorer: FileExplorer::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             ),
+            preview_scroll: 0,
         })
     }
 
@@ -446,7 +453,13 @@ impl Editor {
 
             // Also render whenever background polling is still in-flight so the
             // user sees spinner/progress updates.
-            if self.copilot_auth_rx.is_some() || self.pending_completion.is_some() {
+            // Force a render whenever background work is in-flight OR the
+            // which-key timer is pending (so the popup appears after 500 ms
+            // even when no key event arrives to trigger a normal render).
+            if self.copilot_auth_rx.is_some()
+                || self.pending_completion.is_some()
+                || self.key_handler.which_key_pending()
+            {
                 needs_render = true;
             }
 
@@ -610,9 +623,28 @@ impl Editor {
         let ghost = self.ghost_text.as_ref()
             .map(|(text, row, col)| (text.as_str(), *row, *col));
 
+        // ── Markdown preview lines ─────────────────────────────────────────────
+        // Computed when in MarkdownPreview mode; scrolled by self.preview_scroll so
+        // render_buffer() only needs to take(viewport_height) from the front.
+        let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> =
+            if mode == Mode::MarkdownPreview {
+                let content = self.current_buffer()
+                    .map(|buf| buf.lines().join("\n"))
+                    .unwrap_or_default();
+                let all_lines = crate::markdown::render(&content, viewport_width);
+                // Cap scroll so we can't scroll past the end.
+                let max_scroll = all_lines.len().saturating_sub(1);
+                let scroll = self.preview_scroll.min(max_scroll);
+                Some(all_lines.into_iter().skip(scroll).collect())
+            } else {
+                None
+            };
+
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref = if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
         let hl_ref = highlighted_lines.as_deref();
+        let preview_ref = preview_lines_owned.as_deref();
+
         self.terminal.draw(|frame| {
             UI::render(
                 frame,
@@ -629,6 +661,7 @@ impl Editor {
                 agent_ref,
                 hl_ref,
                 explorer_ref,
+                preview_ref,
             );
         })?;
 
@@ -641,6 +674,7 @@ impl Editor {
         if key.code == KeyCode::Esc {
             self.status_sticky = false;
         }
+
         // Clear transient status message on any new input (except sticky messages and picker modes).
         if self.mode != Mode::PickBuffer && self.mode != Mode::PickFile && !self.status_sticky {
             self.status_message = None;
@@ -656,6 +690,7 @@ impl Editor {
             Mode::PickFile => self.handle_pick_file_mode(key)?,
             Mode::Agent => self.handle_agent_mode(key)?,
             Mode::Explorer => self.handle_explorer_mode(key)?,
+            Mode::MarkdownPreview => self.handle_preview_mode(key)?,
         }
 
         Ok(())
@@ -957,6 +992,17 @@ impl Editor {
             // ── Git ───────────────────────────────────────────────────────────
             Action::GitOpen => {
                 self.open_lazygit()?;
+            }
+            // ── Markdown preview ──────────────────────────────────────────────
+            Action::MarkdownPreviewToggle => {
+                if self.mode == Mode::MarkdownPreview {
+                    self.mode = Mode::Normal;
+                    self.set_status("Preview closed".to_string());
+                } else {
+                    self.preview_scroll = 0;
+                    self.mode = Mode::MarkdownPreview;
+                    self.set_status("Markdown preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string());
+                }
             }
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
@@ -1549,6 +1595,50 @@ impl Editor {
                 self.file_explorer.reload();
                 self.set_status("Explorer refreshed".to_string());
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Markdown preview mode key handling ────────────────────────────────────
+
+    fn handle_preview_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            // Esc / q — exit preview, return to Normal
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+            }
+
+            // j / Down — scroll down one line
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.preview_scroll = self.preview_scroll.saturating_add(1);
+            }
+
+            // k / Up — scroll up one line
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(1);
+            }
+
+            // Ctrl+D — scroll down half-page (10 lines)
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+            }
+
+            // Ctrl+U — scroll up half-page (10 lines)
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+            }
+
+            // g — jump to top
+            KeyCode::Char('g') => {
+                self.preview_scroll = 0;
+            }
+
+            // G — jump to bottom (approximate — capped in render())
+            KeyCode::Char('G') => {
+                self.preview_scroll = usize::MAX / 2; // capped by render()
+            }
+
             _ => {}
         }
         Ok(())

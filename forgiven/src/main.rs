@@ -9,6 +9,7 @@ mod editor;
 mod explorer;
 mod highlight;
 mod keymap;
+mod markdown;
 mod lsp;
 mod ui;
 

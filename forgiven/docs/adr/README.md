@@ -29,6 +29,7 @@ that motivated it, what was decided, and the consequences.
 | [0019](0019-snapshot-undo-redo.md) | Snapshot-based Undo / Redo | Accepted |
 | [0020](0020-lazygit-integration.md) | LazyGit Integration | Accepted |
 | [0021](0021-render-loop-performance.md) | Render Loop Performance Optimisations | Accepted |
+| [0022](0022-markdown-rendering.md) | Markdown Rendering (Agent Panel + Editor Preview) | Accepted |
 
 ## What is an ADR?
 
@@ -114,13 +115,19 @@ Explorer ── Esc/Tab     ──► Normal
 Agent    ── Esc/Tab     ──► Normal
          ── Ctrl+T      ──► cycle model (loads /models list on first press)
 
+Preview  ── Esc/q       ──► Normal
+         ── j/k         ──► scroll down/up one line
+         ── Ctrl+D/U    ──► scroll down/up half-page
+         ── g/G         ──► jump to top/bottom
+
 Insert ──── Esc         ──► Normal
 ```
 
 ## Planned ADRs (future decisions)
 
-- `0022` — Hover / go-to-definition popup widget
-- `0023` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
-- `0024` — File system watcher for live explorer refresh (`notify` crate)
-- `0025` — Agent file attachment picker (`@`-mention files as context)
-- `0026` — Buffer model improvements (line-gap buffer or rope for large files)
+- `0023` — Hover / go-to-definition popup widget
+- `0024` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
+- `0025` — File system watcher for live explorer refresh (`notify` crate)
+- `0026` — Agent file attachment picker (`@`-mention files as context)
+- `0027` — Buffer model improvements (line-gap buffer or rope for large files)
+- `0028` — Markdown preview cache (keyed on `lsp_version`, avoid re-rendering unchanged buffers)

@@ -46,6 +46,9 @@ impl UI {
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
         // File explorer panel (None = hidden)
         file_explorer: Option<&FileExplorer>,
+        // Pre-rendered markdown lines (Mode::MarkdownPreview only).
+        // When Some, these are displayed in place of normal buffer content.
+        preview_lines: Option<&[Line<'static>]>,
     ) {
         let size = frame.area();
 
@@ -120,7 +123,7 @@ impl UI {
         };
 
         // Render buffer content
-        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text, highlighted_lines);
+        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text, highlighted_lines, preview_lines);
 
         // Render status line
         Self::render_status_line(frame, buffer_data, mode, status_message, command_buffer, key_sequence, status_area, diagnostics);
@@ -134,6 +137,7 @@ impl UI {
         if let (Some(explorer), Some(area)) = (file_explorer, explorer_area) {
             Self::render_file_explorer(frame, explorer, mode, area);
         }
+
     }
 
     /// Render the Copilot Chat / agent panel on the right side.
@@ -172,66 +176,6 @@ impl UI {
         let mut lines: Vec<Line> = Vec::new();
         let content_width = history_area.width.saturating_sub(4) as usize;
 
-        // Render message content, visually separating tool-call lines from prose.
-        // Lines starting with ⚙ are tool operations — shown dim.
-        // The first prose line after a block of tool lines gets a faint separator.
-        let render_content = |content: &str, lines: &mut Vec<Line>| {
-            let mut prev_was_tool = false;
-            for content_line in content.lines() {
-                let trimmed = content_line.trim_start();
-                let is_tool = trimmed.starts_with('⚙');
-
-                if trimmed.is_empty() {
-                    // Only emit blank lines in the prose section
-                    if !prev_was_tool {
-                        lines.push(Line::from(""));
-                    }
-                    continue;
-                }
-
-                // Thin separator when transitioning from tools → final answer
-                if prev_was_tool && !is_tool {
-                    lines.push(Line::from(Span::styled(
-                        "  ────────────────────",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-
-                if is_tool {
-                    // Tool line: dim, no word-wrap (already compact)
-                    lines.push(Line::from(Span::styled(
-                        format!("  {trimmed}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                } else {
-                    // Prose: word-wrap in white
-                    let words = content_line.split_whitespace().collect::<Vec<_>>();
-                    let mut cur = String::new();
-                    for word in &words {
-                        if cur.is_empty() {
-                            cur = word.to_string();
-                        } else if cur.len() + 1 + word.len() <= content_width {
-                            cur.push(' ');
-                            cur.push_str(word);
-                        } else {
-                            lines.push(Line::from(Span::styled(
-                                format!("  {cur}"),
-                                Style::default().fg(Color::White),
-                            )));
-                            cur = word.to_string();
-                        }
-                    }
-                    if !cur.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {cur}"),
-                            Style::default().fg(Color::White),
-                        )));
-                    }
-                }
-                prev_was_tool = is_tool;
-            }
-        };
-
         for msg in &panel.messages {
             let (label, color) = match msg.role {
                 Role::User => ("You", Color::Green),
@@ -241,7 +185,9 @@ impl UI {
             lines.push(Line::from(vec![
                 Span::styled(format!("╔ {label} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
             ]));
-            render_content(&msg.content, &mut lines);
+            // Render via the markdown renderer (handles headings, bold, code blocks,
+            // lists, tool-call lines starting with ⚙, etc.)
+            lines.extend(crate::markdown::render(&msg.content, content_width));
             lines.push(Line::from(""));
         }
 
@@ -251,7 +197,7 @@ impl UI {
                 Span::styled("╔ Copilot ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::styled("▋", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
             ]));
-            render_content(partial, &mut lines);
+            lines.extend(crate::markdown::render(partial, content_width));
         }
 
         // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
@@ -384,7 +330,26 @@ impl UI {
         diagnostics: &[Diagnostic],
         ghost_text: Option<(&str, usize, usize)>,
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
+        preview_lines: Option<&[Line<'static>]>,
     ) {
+        // ── Markdown preview mode — render pre-computed lines directly ─────────
+        if let Some(md_lines) = preview_lines {
+            let viewport_height = area.height as usize;
+            // Slice to viewport height; pad with blank lines below.
+            let mut visible: Vec<Line> = md_lines
+                .iter()
+                .take(viewport_height)
+                .cloned()
+                .collect();
+            while visible.len() < viewport_height {
+                visible.push(Line::from(Span::styled("~", Style::default().fg(Color::DarkGray))));
+            }
+            let paragraph = Paragraph::new(visible);
+            frame.render_widget(paragraph, area);
+            // No cursor in preview mode.
+            return;
+        }
+
         if let Some((_, _, cursor, scroll_row, scroll_col, lines, selection)) = buffer_data {
             let viewport_height = area.height as usize;
             let viewport_width = area.width as usize;
@@ -903,6 +868,7 @@ impl UI {
             Mode::PickFile => "FIND",
             Mode::Agent => "AGENT",
             Mode::Explorer => "EXPLORE",
+            Mode::MarkdownPreview => "PREVIEW",
         };
 
         let mode_color = match mode {
@@ -915,6 +881,7 @@ impl UI {
             Mode::PickFile => Color::LightCyan,
             Mode::Agent => Color::Cyan,
             Mode::Explorer => Color::LightGreen,
+            Mode::MarkdownPreview => Color::Magenta,
         };
 
         let mut spans = vec![
@@ -991,4 +958,5 @@ impl UI {
 
         frame.render_widget(paragraph, area);
     }
+
 }

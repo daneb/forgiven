@@ -8,12 +8,13 @@ pub enum Mode {
     Normal,
     Insert,
     Command,
-    Visual,      // character-wise visual selection (v)
-    VisualLine,  // line-wise visual selection (V)
-    PickBuffer,  // For buffer selection UI
-    PickFile,    // For file finder UI
-    Agent,       // Copilot Chat / agent panel focused
-    Explorer,    // File explorer tree focused
+    Visual,           // character-wise visual selection (v)
+    VisualLine,       // line-wise visual selection (V)
+    PickBuffer,       // For buffer selection UI
+    PickFile,         // For file finder UI
+    Agent,            // Copilot Chat / agent panel focused
+    Explorer,         // File explorer tree focused
+    MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
 }
 
 /// An editor action to be executed
@@ -85,6 +86,8 @@ pub enum Action {
     ExplorerFocus,
     // Git
     GitOpen,    // SPC g g — open lazygit
+    // Markdown preview
+    MarkdownPreviewToggle,  // SPC m p — toggle markdown preview for .md buffers
 }
 
 /// Represents a keybinding tree node
@@ -198,6 +201,11 @@ impl KeyHandler {
         git_node.children.insert('g', KeyNode::leaf("open lazygit", Action::GitOpen));
         tree.insert('g', git_node);
 
+        // SPC m - Markdown
+        let mut md_node = KeyNode::new("markdown");
+        md_node.children.insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
+        tree.insert('m', md_node);
+
         tree
     }
 
@@ -217,7 +225,16 @@ impl KeyHandler {
         }
     }
 
-    /// Check if which-key should be displayed
+    /// Returns true when a leader sequence is in-flight and the which-key
+    /// popup has not yet been shown — used by the event loop to force a render
+    /// tick so the popup appears exactly when the 500 ms timer fires, without
+    /// waiting for the next key event.
+    pub fn which_key_pending(&self) -> bool {
+        self.sequence_start.is_some() && !self.show_which_key
+    }
+
+    /// Check if which-key should be displayed (also arms the flag on first call
+    /// after the 500 ms delay).
     pub fn should_show_which_key(&mut self) -> bool {
         if let Some(start) = self.sequence_start {
             if start.elapsed() > Duration::from_millis(500) && !self.show_which_key {

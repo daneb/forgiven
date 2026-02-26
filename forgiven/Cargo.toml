@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # TUI rendering
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 
 # Async runtime
@@ -54,6 +54,9 @@ syntect = { version = "5", default-features = false, features = ["default-themes
 
 # System clipboard
 arboard = "3"
+
+# Markdown rendering (agent panel + editor preview)
+pulldown-cmark = "0.12"
 
 [dev-dependencies]
 pretty_assertions = "1"
