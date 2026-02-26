@@ -23,6 +23,7 @@ use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{LspManager, parse_first_inline_completion};
 use crate::search::{SearchState, SearchStatus, run_search};
+use crate::tasks::TaskPanel;
 use crate::ui::UI;
 use ratatui::text::Span;
 use lsp_types::Diagnostic;
@@ -135,6 +136,9 @@ pub struct Editor {
     // ── File explorer ─────────────────────────────────────────────────────────
     file_explorer: FileExplorer,
 
+    // ── Task panel ────────────────────────────────────────────────────────────
+    task_panel: TaskPanel,
+
     // ── Markdown preview ──────────────────────────────────────────────────────
     /// Scroll offset (in rendered lines) for Mode::MarkdownPreview.
     preview_scroll: usize,
@@ -191,6 +195,7 @@ impl Editor {
             file_explorer: FileExplorer::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             ),
+            task_panel: TaskPanel::new(),
             preview_scroll: 0,
             search_state: SearchState::new(),
             search_rx: None,
@@ -696,6 +701,7 @@ impl Editor {
 
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref = if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
+        let task_ref = if self.task_panel.visible { Some(&self.task_panel) } else { None };
         let hl_ref = highlighted_lines.as_deref();
         let preview_ref = preview_lines_owned.as_deref();
         let search_ref = if mode == Mode::Search { Some(&self.search_state) } else { None };
@@ -716,6 +722,7 @@ impl Editor {
                 agent_ref,
                 hl_ref,
                 explorer_ref,
+                task_ref,
                 preview_ref,
                 search_ref,
             );
@@ -750,6 +757,7 @@ impl Editor {
             Mode::Explorer => self.handle_explorer_mode(key)?,
             Mode::MarkdownPreview => self.handle_preview_mode(key)?,
             Mode::Search => self.handle_search_mode(key)?,
+            Mode::Tasks => self.handle_tasks_mode(key)?,
         }
 
         Ok(())
@@ -1078,6 +1086,27 @@ impl Editor {
                     "Explorer: hiding hidden files"
                 };
                 self.set_status(status.to_string());
+            }
+            // ── Tasks ─────────────────────────────────────────────────────────
+            Action::TasksToggle => {
+                self.task_panel.toggle_visible();
+                if self.task_panel.visible {
+                    self.mode = Mode::Tasks;
+                    // Load tasks from .forgiven/tasks.json on first open
+                    let project_root = std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    self.task_panel.load(&project_root);
+                } else {
+                    self.mode = Mode::Normal;
+                }
+            }
+            Action::TasksFocus => {
+                self.task_panel.focus();
+                self.mode = Mode::Tasks;
+                // Load tasks from .forgiven/tasks.json on first open
+                let project_root = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                self.task_panel.load(&project_root);
             }
             // ── Git ───────────────────────────────────────────────────────────
             Action::GitOpen => {
@@ -1747,6 +1776,82 @@ impl Editor {
             KeyCode::Char('r') => {
                 self.file_explorer.reload();
                 self.set_status("Explorer refreshed".to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Task panel mode key handling ──────────────────────────────────────────
+
+    fn handle_tasks_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // If we're editing or adding a task, handle input differently
+        if self.task_panel.editing.is_some() || self.task_panel.is_adding() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.task_panel.cancel_edit();
+                }
+                KeyCode::Enter => {
+                    if self.task_panel.is_adding() {
+                        // Finish adding new task
+                        let title = std::mem::take(&mut self.task_panel.input_buffer);
+                        self.task_panel.add_task(title);
+                        self.set_status("Task added".to_string());
+                    } else {
+                        // Finish editing existing task
+                        self.task_panel.finish_edit();
+                        self.set_status("Task updated".to_string());
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.task_panel.input_backspace();
+                }
+                KeyCode::Char(ch) => {
+                    self.task_panel.input_char(ch);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Normal task panel navigation
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => {
+                // Blur task panel, return to editor
+                self.task_panel.blur();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.task_panel.move_up();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.task_panel.move_down();
+            }
+            KeyCode::Char(' ') => {
+                // Toggle task completion status
+                self.task_panel.toggle_selected();
+            }
+            KeyCode::Char('a') => {
+                // Start adding a new task
+                self.set_status("Add task: (Enter to save, Esc to cancel)".to_string());
+            }
+            KeyCode::Char('e') => {
+                // Start editing selected task
+                self.task_panel.start_edit();
+                self.set_status("Edit task: (Enter to save, Esc to cancel)".to_string());
+            }
+            KeyCode::Char('d') => {
+                // Mark selected task as done (cycle to completed)
+                if let Some(task) = self.task_panel.tasks.get_mut(self.task_panel.selected) {
+                    task.status = crate::tasks::TaskStatus::Completed;
+                    self.task_panel.save();
+                    self.set_status("Task marked as done".to_string());
+                }
+            }
+            KeyCode::Char('x') => {
+                // Delete selected task
+                self.task_panel.delete_selected();
+                self.set_status("Task deleted".to_string());
             }
             _ => {}
         }

@@ -16,6 +16,7 @@ pub enum Mode {
     Explorer,         // File explorer tree focused
     MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
     Search,           // Project-wide ripgrep search overlay (SPC s g)
+    Tasks,            // Task tracking panel (SPC t t)
 }
 
 /// An editor action to be executed
@@ -95,6 +96,9 @@ pub enum Action {
     MarkdownPreviewToggle,  // SPC m p — toggle markdown preview for .md buffers
     // Project-wide text search
     SearchOpen,             // SPC s g — open the project search overlay
+    // Task panel
+    TasksToggle,            // SPC t t — toggle task panel
+    TasksFocus,             // Focus task panel
 }
 
 /// Represents a keybinding tree node
@@ -218,6 +222,12 @@ impl KeyHandler {
         let mut search_node = KeyNode::new("search");
         search_node.children.insert('g', KeyNode::leaf("search in project (ripgrep)", Action::SearchOpen));
         tree.insert('s', search_node);
+
+        // SPC t - Tasks
+        let mut tasks_node = KeyNode::new("tasks");
+        tasks_node.children.insert('t', KeyNode::leaf("toggle task panel", Action::TasksToggle));
+        tasks_node.children.insert('f', KeyNode::leaf("focus task panel", Action::TasksFocus));
+        tree.insert('t', tasks_node);
 
         tree
     }

@@ -13,6 +13,7 @@ use crate::buffer::{Cursor, Selection};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchState, SearchFocus, SearchStatus};
+use crate::tasks::TaskPanel;
 
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
@@ -26,8 +27,7 @@ pub struct UI;
 
 impl UI {
     /// Render the entire UI
-    #[allow(clippy::too_many_arguments)]
-    pub fn render(
+    #[allow(clippy::too_many_arguments)]    pub fn render(
         frame: &mut Frame,
         buffer_data: Option<&BufferData>,
         mode: Mode,
@@ -47,6 +47,8 @@ impl UI {
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
         // File explorer panel (None = hidden)
         file_explorer: Option<&FileExplorer>,
+        // Task panel (None = hidden)
+        task_panel: Option<&TaskPanel>,
         // Pre-rendered markdown lines (Mode::MarkdownPreview only).
         // When Some, these are displayed in place of normal buffer content.
         preview_lines: Option<&[Line<'static>]>,
@@ -75,11 +77,13 @@ impl UI {
             return;
         }
 
-        // ── Horizontal splits: [explorer?] | [editor] | [agent?] ─────────────
+        // ── Horizontal splits: [explorer/tasks?] | [editor] | [agent?] ─────────────
         let explorer_visible = file_explorer.map(|e| e.visible).unwrap_or(false);
+        let tasks_visible = task_panel.map(|t| t.visible).unwrap_or(false);
         let agent_visible = agent_panel.map(|p| p.visible).unwrap_or(false);
+        let left_sidebar_visible = explorer_visible || tasks_visible;
 
-        let (explorer_area, content_area, agent_area) = match (explorer_visible, agent_visible) {
+        let (left_sidebar_area, content_area, agent_area) = match (left_sidebar_visible, agent_visible) {
             (true, true) => {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
@@ -144,9 +148,17 @@ impl UI {
             Self::render_agent_panel(frame, panel, mode, area);
         }
 
-        // Render file explorer if visible
-        if let (Some(explorer), Some(area)) = (file_explorer, explorer_area) {
-            Self::render_file_explorer(frame, explorer, mode, area);
+        // Render left sidebar: task panel takes priority over explorer
+        if let Some(area) = left_sidebar_area {
+            if let Some(tasks) = task_panel {
+                if tasks.visible {
+                    Self::render_task_panel(frame, tasks, mode, area);
+                }
+            } else if let Some(explorer) = file_explorer {
+                if explorer.visible {
+                    Self::render_file_explorer(frame, explorer, mode, area);
+                }
+            }
         }
 
     }
@@ -330,6 +342,94 @@ impl UI {
 
         let para = Paragraph::new(lines).block(block);
         frame.render_widget(para, area);
+    }
+
+    /// Render the task panel on the left side.
+    fn render_task_panel(frame: &mut Frame, panel: &TaskPanel, mode: Mode, area: Rect) {
+        let focused = mode == Mode::Tasks;
+        let border_style = if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let visible_height = area.height.saturating_sub(4) as usize; // account for border + hint line
+
+        // Current task counts
+        let completed = panel.completed_count();
+        let total = panel.total_count();
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        // If editing or adding, show input at top
+        if panel.editing.is_some() {
+            lines.push(Line::from(vec![
+                Span::styled("Edit: ", Style::default().fg(Color::Yellow)),
+                Span::styled(&panel.input_buffer, Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(""));  // Blank separator
+        } else if panel.is_adding() {
+            lines.push(Line::from(vec![
+                Span::styled("New: ", Style::default().fg(Color::Green)),
+                Span::styled(&panel.input_buffer, Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(""));  // Blank separator
+        }
+
+        // Render task list
+        for (i, task) in panel.tasks.iter().enumerate() {
+            let is_selected = i == panel.selected;
+            let icon = task.status.icon();
+            let label = format!("{} {}", icon, task.title);
+
+            let style = if is_selected && focused {
+                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                match task.status {
+                    crate::tasks::TaskStatus::Completed => Style::default().fg(Color::DarkGray),
+                    crate::tasks::TaskStatus::InProgress => Style::default().fg(Color::Yellow),
+                    crate::tasks::TaskStatus::NotStarted => Style::default().fg(Color::White),
+                }
+            };
+
+            lines.push(Line::from(Span::styled(label, style)));
+        }
+
+        // Fill remaining rows
+        while lines.len() < visible_height {
+            lines.push(Line::from(""));
+        }
+
+        // Add hint line at bottom
+        let hint = if panel.editing.is_some() || panel.is_adding() {
+            " Enter=save Esc=cancel "
+        } else {
+            " [a]dd [e]dit [d]one [x]delete [Space]toggle "
+        };
+
+        let title = format!(" Tasks ({}/{}) ", completed, total);
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+
+        // Split area into content and hint
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+
+        let inner_area = block.inner(chunks[0]);
+        frame.render_widget(block, chunks[0]);
+
+        let para = Paragraph::new(lines);
+        frame.render_widget(para, inner_area);
+
+        // Render hint
+        let hint_para = Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(hint_para, chunks[1]);
     }
 
     /// Render the buffer content
@@ -1038,6 +1138,7 @@ impl UI {
             Mode::Explorer => "EXPLORE",
             Mode::MarkdownPreview => "PREVIEW",
             Mode::Search => "SEARCH",
+            Mode::Tasks => "TASKS",
         };
 
         let mode_color = match mode {
@@ -1052,6 +1153,7 @@ impl UI {
             Mode::Explorer => Color::LightGreen,
             Mode::MarkdownPreview => Color::Magenta,
             Mode::Search => Color::LightRed,
+            Mode::Tasks => Color::Yellow,
         };
 
         let mut spans = vec![

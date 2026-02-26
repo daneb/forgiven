@@ -12,6 +12,7 @@ mod keymap;
 mod markdown;
 mod search;
 mod lsp;
+mod tasks;
 mod ui;
 
 use crate::config::Config;
