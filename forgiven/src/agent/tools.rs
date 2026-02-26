@@ -107,6 +107,7 @@ pub fn tool_definitions() -> serde_json::Value {
 /// A fully-assembled tool call (all streaming delta chunks combined).
 #[derive(Debug, Clone)]
 pub struct ToolCall {
+    #[allow(dead_code)] // tool-call ID is part of the Copilot API protocol
     pub id: String,
     pub name: String,
     /// Raw JSON string of the arguments object.

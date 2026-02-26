@@ -7,6 +7,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    #[allow(dead_code)]
     pub fn new(row: usize, col: usize) -> Self {
         Self { row, col }
     }

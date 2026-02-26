@@ -14,7 +14,8 @@ pub struct SearchResult {
     pub rel_path: String,
     /// 0-indexed line number.
     pub line: usize,
-    /// 0-indexed column.
+    /// 0-indexed column (stored for future column-highlight support).
+    #[allow(dead_code)]
     pub col: usize,
     /// Content of the matched line (trailing whitespace stripped).
     pub text: String,

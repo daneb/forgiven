@@ -179,10 +179,12 @@ impl Buffer {
     // Line access
     // -------------------------------------------------------------------------
 
+    #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
 
+    #[allow(dead_code)]
     pub fn line(&self, row: usize) -> Option<&str> {
         self.lines.get(row).map(|s| s.as_str())
     }
@@ -256,6 +258,7 @@ impl Buffer {
 
     /// Delete the entire current line and return it (Normal-mode `dd`).
     /// Cursor stays on the same row (or the last row if the last line was deleted).
+    #[allow(dead_code)]
     pub fn delete_current_line(&mut self) -> String {
         let row = self.cursor.row;
         let deleted = self.lines.remove(row);
@@ -283,6 +286,7 @@ impl Buffer {
     }
 
     /// Return the content of the current line without modifying the buffer (Normal-mode `yy`).
+    #[allow(dead_code)]
     pub fn yank_current_line(&self) -> String {
         self.lines[self.cursor.row].clone()
     }
@@ -746,6 +750,7 @@ impl Buffer {
         self.cursor.col = col;
     }
 
+    #[allow(dead_code)]
     pub fn move_cursor_to(&mut self, row: usize, col: usize) {
         self.cursor.row = row.min(self.lines.len().saturating_sub(1));
         self.clamp_cursor_col_at(col);
@@ -887,6 +892,7 @@ impl Buffer {
         }
     }
 
+    #[allow(dead_code)]
     fn clamp_cursor_col_at(&mut self, col: usize) {
         let max = self.current_line_len();
         self.cursor.col = col.min(max);

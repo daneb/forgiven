@@ -35,6 +35,7 @@ pub enum Action {
     MoveDown,
     MoveLineStart,
     MoveFirstNonBlank,  // ^ — first non-whitespace char on the line
+    #[allow(dead_code)]
     MoveLineEnd,        // A / InsertLineEnd motion (past last char)
     MoveLineEndNormal,  // $ in Normal mode (lands ON last char)
     MoveWordForward,
@@ -75,7 +76,9 @@ pub enum Action {
     LspReferences,
     LspRename,
     LspDocumentSymbols,
+    #[allow(dead_code)]
     LspNextDiagnostic,
+    #[allow(dead_code)]
     LspPrevDiagnostic,
     // Visual modes
     VisualLine,

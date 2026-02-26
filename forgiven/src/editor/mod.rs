@@ -2224,7 +2224,7 @@ impl Editor {
     /// Request hover information at cursor position
     fn request_hover(&mut self) {
         // Get current buffer and position
-        let (uri, position) = match self.get_current_lsp_position() {
+        let (_uri, _position) = match self.get_current_lsp_position() {
             Some(pos) => pos,
             None => {
                 self.set_status("No file open or LSP not available".to_string());
@@ -2239,7 +2239,7 @@ impl Editor {
 
     /// Request go-to-definition at cursor position
     fn request_goto_definition(&mut self) {
-        let (uri, position) = match self.get_current_lsp_position() {
+        let (_uri, _position) = match self.get_current_lsp_position() {
             Some(pos) => pos,
             None => {
                 self.set_status("No file open or LSP not available".to_string());
@@ -2252,7 +2252,7 @@ impl Editor {
 
     /// Request find references at cursor position
     fn request_references(&mut self) {
-        let (uri, position) = match self.get_current_lsp_position() {
+        let (_uri, _position) = match self.get_current_lsp_position() {
             Some(pos) => pos,
             None => {
                 self.set_status("No file open or LSP not available".to_string());

@@ -51,11 +51,13 @@ impl EditHistory {
     }
 
     /// Returns `true` if there is anything to undo.
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         !self.past.is_empty()
     }
 
     /// Returns `true` if there is anything to redo.
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         !self.future.is_empty()
     }

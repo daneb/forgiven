@@ -36,6 +36,7 @@ pub struct ChatMessage {
 pub enum Role {
     User,
     Assistant,
+    #[allow(dead_code)] // used in as_str(); reserved for system-prompt messages
     System,
 }
 
@@ -331,7 +332,8 @@ Available tools:\n\
 
     pub fn scroll_up(&mut self)       { self.scroll += 3; }
     pub fn scroll_down(&mut self)     { self.scroll = self.scroll.saturating_sub(3); }
-    pub fn scroll_to_bottom(&mut self){ self.scroll = 0; }
+    #[allow(dead_code)]
+    pub fn scroll_to_bottom(&mut self) { self.scroll = 0; }
 
     // ── Code extraction ───────────────────────────────────────────────────────
 

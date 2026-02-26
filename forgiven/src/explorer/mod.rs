@@ -164,6 +164,7 @@ impl FileExplorer {
     }
 
     /// Return the path selected by the cursor, if it's a file (not a directory).
+    #[allow(dead_code)]
     pub fn selected_file(&self) -> Option<PathBuf> {
         let flat = self.flat_visible();
         flat.get(self.cursor_idx).and_then(|n| {

@@ -12,26 +12,12 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-/// Messages sent from editor to LSP client
-#[derive(Debug)]
-pub enum LspRequest {
-    DidOpen { uri: Uri, language_id: String, text: String },
-    DidChange { uri: Uri, version: i32, text: String },
-    DidSave { uri: Uri, text: Option<String> },
-    Hover { uri: Uri, position: Position, response: oneshot::Sender<Option<Hover>> },
-    GotoDefinition { uri: Uri, position: Position, response: oneshot::Sender<Option<GotoDefinitionResponse>> },
-    Completion { uri: Uri, position: Position, response: oneshot::Sender<Option<CompletionResponse>> },
-    References { uri: Uri, position: Position, response: oneshot::Sender<Option<Vec<Location>>> },
-    Rename { uri: Uri, position: Position, new_name: String, response: oneshot::Sender<Option<WorkspaceEdit>> },
-    DocumentSymbols { uri: Uri, response: oneshot::Sender<Option<DocumentSymbolResponse>> },
-    Shutdown,
-}
-
 /// Messages sent from LSP client to editor
 #[derive(Debug, Clone)]
 pub enum LspNotificationMsg {
     Diagnostics { uri: Uri, diagnostics: Vec<Diagnostic> },
     Initialized,
+    #[allow(dead_code)]
     Error { message: String },
     /// Human-readable message from the server (e.g. Copilot auth instructions).
     ShowMessage { message: String },
@@ -39,6 +25,7 @@ pub enum LspNotificationMsg {
 
 /// Stored diagnostic information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiagnosticInfo {
     pub diagnostic: Diagnostic,
     pub uri: Uri,
@@ -239,9 +226,14 @@ impl LspClient {
         &mut self,
         initialization_options: Option<serde_json::Value>,
     ) -> Result<()> {
+        #[allow(deprecated)] // root_uri kept for servers that predate workspace_folders
         let params = InitializeParams {
             process_id: Some(std::process::id()),
             root_uri: Some(self.workspace_root.clone()),
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: self.workspace_root.clone(),
+                name: "project".to_string(),
+            }]),
             initialization_options,
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
@@ -340,6 +332,7 @@ impl LspClient {
     }
 
     /// Send a request and return a oneshot receiver for the async response.
+    #[allow(dead_code)]
     fn send_request<R>(&mut self, params: R::Params) -> Result<oneshot::Receiver<serde_json::Value>>
     where
         R: lsp_types::request::Request,
@@ -527,8 +520,10 @@ impl LspClient {
 
     // -------------------------------------------------------------------------
     // Public request methods (return oneshot receivers)
+    // TODO: wire these up from editor/mod.rs request_hover / request_goto_definition etc.
     // -------------------------------------------------------------------------
 
+    #[allow(dead_code)]
     pub fn hover(
         &mut self,
         uri: Uri,
@@ -543,6 +538,7 @@ impl LspClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn goto_definition(
         &mut self,
         uri: Uri,
@@ -558,6 +554,7 @@ impl LspClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn completion(
         &mut self,
         uri: Uri,
@@ -574,6 +571,7 @@ impl LspClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn references(
         &mut self,
         uri: Uri,
@@ -592,6 +590,7 @@ impl LspClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn rename(
         &mut self,
         uri: Uri,
@@ -608,6 +607,7 @@ impl LspClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn document_symbols(
         &mut self,
         uri: Uri,
@@ -841,6 +841,7 @@ impl LspManager {
     }
 
     /// Get all diagnostics across all files.
+    #[allow(dead_code)]
     pub fn get_all_diagnostics(&self) -> &HashMap<Uri, Vec<Diagnostic>> {
         &self.diagnostics
     }
