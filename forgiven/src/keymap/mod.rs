@@ -88,6 +88,7 @@ pub enum Action {
     // Explorer panel
     ExplorerToggle,
     ExplorerFocus,
+    ExplorerToggleHidden,
     // Git
     GitOpen,    // SPC g g — open lazygit
     // Markdown preview
@@ -200,6 +201,7 @@ impl KeyHandler {
         let mut explorer_node = KeyNode::new("explorer");
         explorer_node.children.insert('e', KeyNode::leaf("toggle file explorer", Action::ExplorerToggle));
         explorer_node.children.insert('f', KeyNode::leaf("focus file explorer", Action::ExplorerFocus));
+        explorer_node.children.insert('h', KeyNode::leaf("toggle hidden files", Action::ExplorerToggleHidden));
         tree.insert('e', explorer_node);
 
         // SPC g - Git (lazygit)

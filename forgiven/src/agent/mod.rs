@@ -63,6 +63,9 @@ pub struct AgentPanel {
     token: Option<CopilotApiToken>,
     pub streaming_reply: Option<String>,
     pub stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    /// Channel to send continuation decisions back to the agentic loop.
+    /// When the loop hits max rounds, it sends AwaitingContinuation and waits on this channel.
+    pub continuation_tx: Option<mpsc::UnboundedSender<bool>>,
     /// Paths (project-relative) of files modified by the agent this frame.
     /// The editor drains this each tick to reload open buffers.
     pub pending_reloads: Vec<String>,
@@ -70,6 +73,12 @@ pub struct AgentPanel {
     pub available_models: Vec<String>,
     /// Index into available_models for the currently selected model.
     pub selected_model: usize,
+    /// Current agentic loop round (for UI display).
+    pub current_round: usize,
+    /// Maximum rounds configured.
+    pub max_rounds: usize,
+    /// Whether the agent is paused waiting for user to approve continuation.
+    pub awaiting_continuation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +89,14 @@ pub enum StreamEvent {
     /// A file was successfully written or edited by a tool.
     /// The path is project-relative (as passed to the tool).
     FileModified { path: String },
+    /// Progress indicator: current round and max rounds.
+    RoundProgress { current: usize, max: usize },
+    /// Warning that the max rounds limit is approaching.
+    /// The loop will pause after this round and wait for user input.
+    MaxRoundsWarning { current: usize, max: usize, remaining: usize },
+    /// Request user decision on whether to continue.
+    /// The loop is paused and waiting for a response via the continuation channel.
+    AwaitingContinuation,
     Done,
     Error(String),
 }
@@ -111,9 +128,13 @@ impl AgentPanel {
             token: None,
             streaming_reply: None,
             stream_rx: None,
+            continuation_tx: None,
             pending_reloads: Vec::new(),
             available_models: Vec::new(),
             selected_model: 0,
+            current_round: 0,
+            max_rounds: 20,
+            awaiting_continuation: false,
         }
     }
 
@@ -135,21 +156,50 @@ impl AgentPanel {
 
     /// Ensure the model list is populated.  Fetches from /models if it hasn't
     /// been loaded yet.  Safe to call multiple times — no-op after first load.
-    pub async fn ensure_models(&mut self) -> Result<()> {
+    pub async fn ensure_models(&mut self, preferred_model: &str) -> Result<()> {
         if !self.available_models.is_empty() {
             return Ok(());
         }
         let api_token = self.ensure_token().await?;
         match fetch_models(&api_token).await {
             Ok(models) if !models.is_empty() => {
-                let default_idx = models.iter().position(|m| m == "gpt-4o").unwrap_or(0);
-                self.available_models = models;
-                self.selected_model = default_idx;
+                self.set_models(models, preferred_model);
             }
             Ok(_) => warn!("Copilot /models returned an empty list"),
             Err(e) => return Err(e),
         }
         Ok(())
+    }
+
+    /// Refresh the model list from the API, preserving the current selection if possible.
+    /// Use this to pick up newly released models or remove deprecated ones.
+    pub async fn refresh_models(&mut self, preferred_model: &str) -> Result<()> {
+        let current_model = if !self.available_models.is_empty() {
+            Some(self.available_models[self.selected_model].clone())
+        } else {
+            None
+        };
+
+        let api_token = self.ensure_token().await?;
+        match fetch_models(&api_token).await {
+            Ok(models) if !models.is_empty() => {
+                let preferred = current_model.as_deref().unwrap_or(preferred_model);
+                self.set_models(models, preferred);
+                info!("Refreshed model list, selected: {}", self.selected_model_id());
+            }
+            Ok(_) => warn!("Copilot /models returned an empty list"),
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// Set the available models and select the preferred one (or fallback).
+    fn set_models(&mut self, models: Vec<String>, preferred_model: &str) {
+        let default_idx = models.iter().position(|m| m == preferred_model)
+            .or_else(|| models.iter().position(|m| m == "gpt-4o"))
+            .unwrap_or(0);
+        self.available_models = models;
+        self.selected_model = default_idx;
     }
 
     pub fn toggle_visible(&mut self) {
@@ -167,6 +217,9 @@ impl AgentPanel {
         &mut self,
         context: Option<String>,
         project_root: PathBuf,
+        max_rounds: usize,
+        warning_threshold: usize,
+        preferred_model: &str,
     ) -> Result<()> {
         if self.input.trim().is_empty() {
             return Ok(());
@@ -248,10 +301,8 @@ Available tools:\n\
             match fetch_models(&api_token).await {
                 Ok(models) if !models.is_empty() => {
                     info!("Fetched {} models from Copilot API", models.len());
-                    // Default to gpt-4o if present, otherwise index 0.
-                    let default_idx = models.iter().position(|m| m == "gpt-4o").unwrap_or(0);
-                    self.available_models = models;
-                    self.selected_model = default_idx;
+                    // Select user's preferred model from config
+                    self.set_models(models, preferred_model);
                 }
                 Ok(_) => warn!("Copilot /models returned an empty list"),
                 Err(e) => warn!("Could not fetch Copilot model list: {e}"),
@@ -263,7 +314,19 @@ Available tools:\n\
         let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(rx);
 
-        tokio::spawn(agentic_loop(api_token, send_messages, project_root, tx, model_id));
+        let (cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
+        self.continuation_tx = Some(cont_tx);
+
+        tokio::spawn(agentic_loop(
+            api_token,
+            send_messages,
+            project_root,
+            tx,
+            model_id,
+            max_rounds,
+            warning_threshold,
+            cont_rx,
+        ));
         Ok(())
     }
 
@@ -300,6 +363,31 @@ Available tools:\n\
                         active = true;
                         self.pending_reloads.push(path);
                     }
+                    Ok(StreamEvent::RoundProgress { current, max }) => {
+                        active = true;
+                        self.current_round = current;
+                        self.max_rounds = max;
+                    }
+                    Ok(StreamEvent::MaxRoundsWarning { current, max, remaining }) => {
+                        active = true;
+                        let warning = format!(
+                            "\n⚠  Agent: {} of {} rounds complete ({} remaining)",
+                            current, max, remaining
+                        );
+                        if let Some(r) = self.streaming_reply.as_mut() {
+                            r.push_str(&warning);
+                        }
+                    }
+                    Ok(StreamEvent::AwaitingContinuation) => {
+                        active = true;
+                        self.awaiting_continuation = true;
+                        let prompt = "\n\n⏸  Maximum rounds reached. Continue? (y/n)";
+                        if let Some(r) = self.streaming_reply.as_mut() {
+                            r.push_str(prompt);
+                        } else {
+                            self.streaming_reply = Some(prompt.to_string());
+                        }
+                    }
                     Ok(StreamEvent::Done) => {
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
@@ -311,6 +399,9 @@ Available tools:\n\
                         }
                         self.scroll = 0;
                         self.stream_rx = None;
+                        self.continuation_tx = None;
+                        self.awaiting_continuation = false;
+                        self.current_round = 0;
                         break;
                     }
                     Ok(StreamEvent::Error(e)) => {
@@ -321,6 +412,9 @@ Available tools:\n\
                         });
                         self.streaming_reply = None;
                         self.stream_rx = None;
+                        self.continuation_tx = None;
+                        self.awaiting_continuation = false;
+                        self.current_round = 0;
                         break;
                     }
                     Err(_) => break,
@@ -328,6 +422,40 @@ Available tools:\n\
             }
         }
         active
+    }
+
+    /// Approve continuation when the agent is awaiting user decision.
+    pub fn approve_continuation(&mut self) {
+        if self.awaiting_continuation {
+            if let Some(tx) = &self.continuation_tx {
+                let _ = tx.send(true);
+                self.awaiting_continuation = false;
+                // Update the reply to remove the prompt
+                if let Some(r) = self.streaming_reply.as_mut() {
+                    if let Some(pos) = r.rfind("\n\n⏸  Maximum rounds reached") {
+                        r.truncate(pos);
+                        r.push_str("\n\n✓ Continuing...");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Deny continuation when the agent is awaiting user decision.
+    pub fn deny_continuation(&mut self) {
+        if self.awaiting_continuation {
+            if let Some(tx) = &self.continuation_tx {
+                let _ = tx.send(false);
+                self.awaiting_continuation = false;
+                // Update the reply to remove the prompt
+                if let Some(r) = self.streaming_reply.as_mut() {
+                    if let Some(pos) = r.rfind("\n\n⏸  Maximum rounds reached") {
+                        r.truncate(pos);
+                        r.push_str("\n\n✗ Stopped by user");
+                    }
+                }
+            }
+        }
     }
 
     pub fn scroll_up(&mut self)       { self.scroll += 3; }
@@ -370,7 +498,12 @@ Available tools:\n\
 
     async fn ensure_token(&mut self) -> Result<String> {
         if let Some(ref t) = self.token {
-            if !t.is_expired() { return Ok(t.token.clone()); }
+            if !t.is_expired() {
+                info!("Using cached token, expires at: {}", t.expires_at);
+                return Ok(t.token.clone());
+            } else {
+                warn!("Cached token expired, refreshing...");
+            }
         }
         info!("Refreshing Copilot API token");
         let oauth = load_oauth_token()?;
@@ -391,11 +524,29 @@ async fn agentic_loop(
     project_root: PathBuf,
     tx: mpsc::UnboundedSender<StreamEvent>,
     model_id: String,
+    max_rounds: usize,
+    warning_threshold: usize,
+    mut cont_rx: mpsc::UnboundedReceiver<bool>,
 ) {
     let tool_defs = tools::tool_definitions();
-    const MAX_ROUNDS: usize = 20;
 
-    for _round in 0..MAX_ROUNDS {
+    for round in 0..max_rounds {
+        // Report progress
+        let _ = tx.send(StreamEvent::RoundProgress {
+            current: round + 1,
+            max: max_rounds,
+        });
+
+        // Warn if approaching limit
+        let remaining = max_rounds.saturating_sub(round + 1);
+        if remaining <= warning_threshold && remaining > 0 {
+            let _ = tx.send(StreamEvent::MaxRoundsWarning {
+                current: round + 1,
+                max: max_rounds,
+                remaining,
+            });
+        }
+
         // ── Call the API ──────────────────────────────────────────────────────
         let response = match start_chat_stream_with_tools(
             api_token.clone(),
@@ -412,8 +563,25 @@ async fn agentic_loop(
         let mut partial_tools: HashMap<usize, tools::PartialToolCall> = HashMap::new();
         let mut sse_buf = String::new();
         let mut byte_stream = response.bytes_stream();
+        const STREAM_TIMEOUT_SECS: u64 = 60; // Timeout if no data for 60 seconds
 
-        'sse: while let Some(item) = byte_stream.next().await {
+        'sse: loop {
+            // Wrap stream read in timeout to detect stalled connections
+            let item = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
+                byte_stream.next()
+            ).await {
+                Ok(Some(result)) => result,
+                Ok(None) => break 'sse, // Stream ended normally
+                Err(_) => {
+                    warn!("Stream timeout after {STREAM_TIMEOUT_SECS}s with no data");
+                    let _ = tx.send(StreamEvent::Error(
+                        "Stream stalled - no data received".to_string()
+                    ));
+                    break 'sse;
+                }
+            };
+
             match item {
                 Ok(bytes) => {
                     sse_buf.push_str(&String::from_utf8_lossy(&bytes));
@@ -462,7 +630,64 @@ async fn agentic_loop(
                         }
                     }
                 }
-                Err(e) => { let _ = tx.send(StreamEvent::Error(format!("{e}"))); return; }
+                Err(e) => {
+                    warn!("Stream error, attempting to process buffered data: {e}");
+                    // Try to salvage any complete lines from the buffer
+                    while let Some(pos) = sse_buf.find('\n') {
+                        let line = sse_buf[..pos].trim().to_string();
+                        sse_buf.drain(..=pos);
+                        if line == "data: [DONE]" { break; }
+                        if let Some(json_str) = line.strip_prefix("data: ") {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                // Process any text content
+                                if let Some(content) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+                                    if !content.is_empty() {
+                                        text_buf.push_str(content);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                    return;
+                }
+            }
+        }
+
+        // ── Process any remaining data in buffer after stream ends ────────────
+        if !sse_buf.is_empty() {
+            debug!("Processing {} bytes of remaining buffer data", sse_buf.len());
+            // Split by newlines and process any complete SSE events
+            for line in sse_buf.lines() {
+                let line = line.trim();
+                if line == "data: [DONE]" { break; }
+                if let Some(json_str) = line.strip_prefix("data: ") {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        // Process text content delta
+                        if let Some(content) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+                            if !content.is_empty() {
+                                text_buf.push_str(content);
+                                let _ = tx.send(StreamEvent::Token(content.to_string()));
+                            }
+                        }
+                        // Process tool call deltas
+                        if let Some(tc_arr) = val.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array()) {
+                            for tc_val in tc_arr {
+                                let idx = tc_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                let entry = partial_tools.entry(idx).or_default();
+                                if let Some(id) = tc_val.get("id").and_then(|v| v.as_str()) {
+                                    if !id.is_empty() { entry.id = id.to_string(); }
+                                }
+                                if let Some(name) = tc_val.pointer("/function/name").and_then(|v| v.as_str()) {
+                                    if !name.is_empty() { entry.name = name.to_string(); }
+                                }
+                                if let Some(chunk) = tc_val.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                                    entry.arguments.push_str(chunk);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -542,11 +767,37 @@ async fn agentic_loop(
 
         // Visual separator between rounds
         let _ = tx.send(StreamEvent::Token("\n".to_string()));
+        
+        // Check if we've hit the limit and need user approval to continue
+        if round + 1 >= max_rounds {
+            let _ = tx.send(StreamEvent::AwaitingContinuation);
+            
+            // Wait for user decision (with timeout to avoid hanging forever)
+            let decision = tokio::time::timeout(
+                tokio::time::Duration::from_secs(300), // 5 minute timeout
+                cont_rx.recv()
+            ).await;
+            
+            match decision {
+                Ok(Some(true)) => {
+                    // User approved, give them more rounds (another batch)
+                    info!("User approved continuation, extending by {} rounds", max_rounds);
+                    // Just continue the loop; we'll break when no more tool calls
+                    continue;
+                }
+                Ok(Some(false)) | Ok(None) | Err(_) => {
+                    // User denied, or channel closed, or timeout
+                    let _ = tx.send(StreamEvent::Done);
+                    return;
+                }
+            }
+        }
         // Continue loop with tool results appended to messages
     }
 
+    // Only reached if we exhausted all rounds without user stopping
     let _ = tx.send(StreamEvent::Error(
-        "agentic loop reached maximum rounds without a final text response".to_string(),
+        format!("Agent reached maximum rounds ({}) without completing. Consider increasing max_agent_rounds in config.", max_rounds)
     ));
 }
 
@@ -622,29 +873,48 @@ async fn start_chat_stream_with_tools(
     });
 
     let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.githubcopilot.com/chat/completions")
-        .header("Authorization", format!("Bearer {api_token}"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("Copilot-Integration-Id", "vscode-chat")
-        .header("editor-version", "forgiven/0.1.0")
-        .header("editor-plugin-version", "forgiven-copilot/0.1.0")
-        .header("openai-intent", "conversation-panel")
-        .header("User-Agent", "forgiven/0.1.0")
-        .json(&body)
-        .send()
-        .await
-        .context("Failed to reach Copilot Chat API")?;
+        let mut retry_attempts = 0;
+        let max_retries = 5;
+        let mut delay = tokio::time::Duration::from_secs(1);
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
-    }
+        loop {
+            let resp = client
+                .post("https://api.githubcopilot.com/chat/completions")
+                .header("Authorization", format!("Bearer {api_token}"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .header("editor-version", "forgiven/0.1.0")
+                .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+                .header("openai-intent", "conversation-panel")
+                .header("User-Agent", "forgiven/0.1.0")
+                .json(&body)
+                .send()
+                .await;
 
-    info!("Copilot Chat stream started ({})", resp.status());
-    Ok(resp)
+            match resp {
+                Ok(response) if response.status().is_success() => {
+                    info!("Copilot Chat stream started ({})", response.status());
+                    return Ok(response);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    warn!("Retrying due to API error ({status}): {body}");
+                }
+                Err(e) => {
+                    warn!("Retrying due to network error: {e}");
+                }
+            }
+
+            retry_attempts += 1;
+            if retry_attempts >= max_retries {
+                return Err(anyhow::anyhow!("Max retries reached for Copilot Chat API"));
+            }
+
+            tokio::time::sleep(delay).await;
+            delay *= 2; // Exponential backoff
+        }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -655,60 +925,71 @@ async fn start_chat_stream_with_tools(
 /// Returns the IDs sorted with preferred models first (gpt-4o, then others).
 async fn fetch_models(api_token: &str) -> Result<Vec<String>> {
     let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.githubcopilot.com/models")
-        .header("Authorization", format!("Bearer {api_token}"))
-        .header("User-Agent", "forgiven/0.1.0")
-        .header("Copilot-Integration-Id", "vscode-chat")
-        .header("editor-version", "forgiven/0.1.0")
-        .send()
-        .await
-        .context("Failed to reach Copilot /models endpoint")?;
+        let mut retry_attempts = 0;
+        let max_retries = 5;
+        let mut delay = tokio::time::Duration::from_secs(1);
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Copilot /models error ({status}): {body}"));
-    }
+        loop {
+            let resp = client
+                .get("https://api.githubcopilot.com/models")
+                .header("Authorization", format!("Bearer {api_token}"))
+                .header("User-Agent", "forgiven/0.1.0")
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .header("editor-version", "forgiven/0.1.0")
+                .send()
+                .await;
 
-    let body: serde_json::Value = resp.json().await.context("/models response is not JSON")?;
+            match resp {
+                Ok(response) if response.status().is_success() => {
+                    let body: serde_json::Value = response.json().await.context("/models response is not JSON")?;
+                    let mut models: Vec<String> = body
+                        .get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| {
+                                    let id = v.get("id")?.as_str()?.to_string();
+                                    if id.contains("embed") || id.contains("whisper") || id.contains("tts") || id.contains("dall") {
+                                        return None;
+                                    }
+                                    if let Some(picker) = v.get("model_picker_enabled") {
+                                        if picker == &serde_json::Value::Bool(false) {
+                                            return None;
+                                        }
+                                    }
+                                    Some(id)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
-    let mut models: Vec<String> = body
-        .get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| {
-                    let id = v.get("id")?.as_str()?.to_string();
-                    // Skip non-chat model types (embeddings, TTS, image gen, etc.)
-                    if id.contains("embed")
-                        || id.contains("whisper")
-                        || id.contains("tts")
-                        || id.contains("dall")
-                    {
-                        return None;
-                    }
-                    // If the response includes a model_picker_enabled flag, respect it.
-                    if let Some(picker) = v.get("model_picker_enabled") {
-                        if picker == &serde_json::Value::Bool(false) {
-                            return None;
-                        }
-                    }
-                    Some(id)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    models.sort_by(|a, b| {
+                        let a_pref = if a == "gpt-4o" { 0 } else { 1 };
+                        let b_pref = if b == "gpt-4o" { 0 } else { 1 };
+                        a_pref.cmp(&b_pref).then(a.cmp(b))
+                    });
 
-    // Sort: gpt-4o first, then alphabetically so the list is stable.
-    models.sort_by(|a, b| {
-        let a_pref = if a == "gpt-4o" { 0 } else { 1 };
-        let b_pref = if b == "gpt-4o" { 0 } else { 1 };
-        a_pref.cmp(&b_pref).then(a.cmp(b))
-    });
+                    debug!("Available models: {:?}", models);
+                    return Ok(models);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    warn!("Retrying due to API error ({status}): {body}");
+                }
+                Err(e) => {
+                    warn!("Retrying due to network error: {e}");
+                }
+            }
 
-    debug!("Available models: {:?}", models);
-    Ok(models)
+            retry_attempts += 1;
+            if retry_attempts >= max_retries {
+                return Err(anyhow::anyhow!("Max retries reached for Copilot /models API"));
+            }
+
+            tokio::time::sleep(delay).await;
+            delay *= 2; // Exponential backoff
+        }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

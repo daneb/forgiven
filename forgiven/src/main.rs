@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     tracing::info!("Starting forgiven");
 
     let config = Config::load();
-    let mut editor = Editor::new()?;
+    let mut editor = Editor::new(config)?;
 
     // Open any files passed on the command line
     for path in &files_to_open {
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     }
 
     // Start configured LSP servers (non-fatal if any fail)
-    editor.setup_lsp(&config).await;
+    editor.setup_lsp().await;
 
     editor.run().await?;
 

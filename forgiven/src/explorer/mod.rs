@@ -13,13 +13,11 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__", ".cache", ".idea", ".vscode",
 ];
 
-const SKIP_HIDDEN: bool = true; // skip dotfiles / dot-dirs (except .git already in list)
-
-fn should_skip(name: &str) -> bool {
+fn should_skip(name: &str, show_hidden: bool) -> bool {
     if SKIP_DIRS.contains(&name) {
         return true;
     }
-    if SKIP_HIDDEN && name.starts_with('.') {
+    if !show_hidden && name.starts_with('.') {
         return true;
     }
     false
@@ -81,6 +79,8 @@ pub struct FileExplorer {
     pub root_loaded: bool,
     /// Index into the *flat* visible list produced by `flat_visible()`.
     pub cursor_idx: usize,
+    /// Whether to show hidden files and folders.
+    pub show_hidden: bool,
 }
 
 impl FileExplorer {
@@ -92,6 +92,7 @@ impl FileExplorer {
             root_nodes: Vec::new(),
             root_loaded: false,
             cursor_idx: 0,
+            show_hidden: false,
         }
     }
 
@@ -122,19 +123,27 @@ impl FileExplorer {
     // ── Loading ────────────────────────────────────────────────────────────────
 
     fn load_root(&mut self) {
-        self.root_nodes = load_dir(&self.root_path, 0);
+        self.root_nodes = load_dir(&self.root_path, 0, self.show_hidden);
         self.root_loaded = true;
     }
 
     /// Re-scan the root directory, discarding all cached expand/collapse state.
     /// Call this after files are created or deleted on disk.
     pub fn reload(&mut self) {
-        self.root_nodes = load_dir(&self.root_path, 0);
+        self.root_nodes = load_dir(&self.root_path, 0, self.show_hidden);
         self.root_loaded = true;
         // Keep cursor in bounds after the reload.
         let len = self.flat_visible().len();
         if len > 0 {
             self.cursor_idx = self.cursor_idx.min(len - 1);
+        }
+    }
+
+    /// Toggle visibility of hidden files and folders.
+    pub fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        if self.root_loaded {
+            self.reload();
         }
     }
 
@@ -146,7 +155,7 @@ impl FileExplorer {
             flat.get(flat_idx).map(|n| n.path.clone())
         };
         if let Some(p) = path {
-            toggle_in_list(&mut self.root_nodes, &p);
+            toggle_in_list(&mut self.root_nodes, &p, self.show_hidden);
         }
     }
 
@@ -191,7 +200,7 @@ impl FileExplorer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Load one level of directory entries, sorted (dirs first, then files).
-fn load_dir(path: &Path, depth: usize) -> Vec<FileNode> {
+fn load_dir(path: &Path, depth: usize, show_hidden: bool) -> Vec<FileNode> {
     let mut dirs: Vec<FileNode> = Vec::new();
     let mut files: Vec<FileNode> = Vec::new();
 
@@ -206,7 +215,7 @@ fn load_dir(path: &Path, depth: usize) -> Vec<FileNode> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        if should_skip(&name) {
+        if should_skip(&name, show_hidden) {
             continue;
         }
 
@@ -234,20 +243,20 @@ fn flatten_nodes<'a>(nodes: &'a [FileNode], out: &mut Vec<&'a FileNode>) {
 }
 
 /// Walk the tree and toggle the node whose path matches `target`.
-fn toggle_in_list(nodes: &mut Vec<FileNode>, target: &Path) -> bool {
+fn toggle_in_list(nodes: &mut Vec<FileNode>, target: &Path, show_hidden: bool) -> bool {
     for node in nodes.iter_mut() {
         if node.path == target {
             if node.is_dir {
                 node.is_expanded = !node.is_expanded;
                 if node.is_expanded && !node.children_loaded {
-                    node.children = load_dir(&node.path, node.depth + 1);
+                    node.children = load_dir(&node.path, node.depth + 1, show_hidden);
                     node.children_loaded = true;
                 }
             }
             return true;
         }
         if node.is_dir && node.is_expanded {
-            if toggle_in_list(&mut node.children, target) {
+            if toggle_in_list(&mut node.children, target, show_hidden) {
                 return true;
             }
         }

@@ -147,10 +147,14 @@ pub struct Editor {
     /// Timestamp of the last query/glob change — drives the 300 ms debounce.
     last_search_instant: Option<Instant>,
 
+    // ── Configuration ─────────────────────────────────────────────────────────
+    /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
+    config: Config,
+
 }
 
 impl Editor {
-    pub fn new() -> Result<Self> {
+    pub fn new(config: Config) -> Result<Self> {
         // Set up terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -191,6 +195,7 @@ impl Editor {
             search_state: SearchState::new(),
             search_rx: None,
             last_search_instant: None,
+            config,
         })
     }
 
@@ -227,12 +232,12 @@ impl Editor {
     /// Initialise LSP servers from the loaded config.
     /// Call this once after `new()`, before `run()`.
     /// Failures are non-fatal — the editor keeps working without LSP.
-    pub async fn setup_lsp(&mut self, config: &Config) {
+    pub async fn setup_lsp(&mut self) {
         let workspace_root = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         tracing::info!("LSP workspace root from current_dir: {:?}", workspace_root);
 
-        for server in &config.lsp.servers {
+        for server in &self.config.lsp.servers.clone() {
             let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
             tracing::info!(
                 "Starting LSP server '{}' for language '{}'",
@@ -1020,6 +1025,17 @@ impl Editor {
                 self.agent_panel.toggle_visible();
                 if self.agent_panel.visible {
                     self.mode = Mode::Agent;
+                    // Eagerly load models on first show
+                    if self.agent_panel.available_models.is_empty() {
+                        let preferred = self.config.default_copilot_model.clone();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
+                                    tracing::warn!("Could not fetch model list: {e}");
+                                }
+                            });
+                        });
+                    }
                 } else {
                     self.mode = Mode::Normal;
                 }
@@ -1030,6 +1046,17 @@ impl Editor {
                 }
                 self.agent_panel.focus();
                 self.mode = Mode::Agent;
+                // Eagerly load models on first show
+                if self.agent_panel.available_models.is_empty() {
+                    let preferred = self.config.default_copilot_model.clone();
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
+                                tracing::warn!("Could not fetch model list: {e}");
+                            }
+                        });
+                    });
+                }
             }
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
@@ -1042,6 +1069,15 @@ impl Editor {
             Action::ExplorerFocus => {
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
+            }
+            Action::ExplorerToggleHidden => {
+                self.file_explorer.toggle_hidden();
+                let status = if self.file_explorer.show_hidden {
+                    "Explorer: showing hidden files"
+                } else {
+                    "Explorer: hiding hidden files"
+                };
+                self.set_status(status.to_string());
             }
             // ── Git ───────────────────────────────────────────────────────────
             Action::GitOpen => {
@@ -1523,10 +1559,13 @@ impl Editor {
                     .unwrap_or_else(|_| std::path::PathBuf::from("."));
                 // Submit is async; spawn a task and let the stream_rx handle tokens.
                 let panel = &mut self.agent_panel;
+                let max_rounds = self.config.max_agent_rounds;
+                let warning_threshold = self.config.agent_warning_threshold;
+                let preferred_model = self.config.default_copilot_model.clone();
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
-                let fut = panel.submit(context, project_root);
+                let fut = panel.submit(context, project_root, max_rounds, warning_threshold, &preferred_model);
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process
                 // in the async run() loop.  For now use tokio::task::block_in_place.
@@ -1553,9 +1592,10 @@ impl Editor {
                 // Eagerly load models if not yet fetched (brief one-time network call).
                 if self.agent_panel.available_models.is_empty() {
                     self.set_status("Loading model list…".to_string());
+                    let preferred = self.config.default_copilot_model.clone();
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            if let Err(e) = self.agent_panel.ensure_models().await {
+                            if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
                                 tracing::warn!("Could not fetch model list: {e}");
                             }
                         });
@@ -1565,10 +1605,52 @@ impl Editor {
                 let model = self.agent_panel.selected_model_id().to_string();
                 let n = self.agent_panel.available_models.len();
                 let idx = self.agent_panel.selected_model + 1;
+                
+                // Save the selected model to config
+                self.config.default_copilot_model = model.clone();
+                if let Err(e) = self.config.save() {
+                    tracing::warn!("Failed to save config: {e}");
+                }
+                
                 self.set_status(format!("Agent model → {model}  [{idx}/{n}]  (Ctrl+T to cycle)"));
+            }
+            // Ctrl+Shift+T — refresh model list from API (picks up new releases).
+            KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.set_status("Refreshing model list from API…".to_string());
+                let preferred = self.config.default_copilot_model.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        if let Err(e) = self.agent_panel.refresh_models(&preferred).await {
+                            tracing::warn!("Could not refresh model list: {e}");
+                            self.set_status(format!("Failed to refresh models: {e}"));
+                        } else {
+                            let model = self.agent_panel.selected_model_id().to_string();
+                            let n = self.agent_panel.available_models.len();
+                            self.set_status(format!("Refreshed {n} models, selected: {model}"));
+                        }
+                    });
+                });
             }
             // Regular characters — handle special agent commands before appending to input.
             KeyCode::Char(ch) => {
+                // If awaiting continuation, 'y' approves and 'n' denies.
+                if self.agent_panel.awaiting_continuation {
+                    match ch {
+                        'y' | 'Y' => {
+                            self.agent_panel.approve_continuation();
+                            self.set_status("Continuing agent work...".to_string());
+                        }
+                        'n' | 'N' => {
+                            self.agent_panel.deny_continuation();
+                            self.set_status("Agent stopped by user".to_string());
+                        }
+                        _ => {
+                            // Ignore other keys when awaiting continuation
+                        }
+                    }
+                    return Ok(());
+                }
+                
                 // 'a' with empty input = apply code block from latest reply.
                 if ch == 'a' && self.agent_panel.input.is_empty() {
                     if let Some(code) = self.agent_panel.get_code_to_apply() {
@@ -1623,6 +1705,16 @@ impl Editor {
                         self.open_file(&path)?;
                     }
                 }
+            }
+            // h — toggle hidden files visibility
+            KeyCode::Char('h') => {
+                self.file_explorer.toggle_hidden();
+                let status = if self.file_explorer.show_hidden {
+                    "Explorer: showing hidden files"
+                } else {
+                    "Explorer: hiding hidden files"
+                };
+                self.set_status(status.to_string());
             }
             // n — new file: pre-fill command mode with "e <dir>/" so the user
             //     only needs to type the filename and press Enter.

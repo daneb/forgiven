@@ -1,6 +1,7 @@
 # ADR 0014 — Agent Model Selection: Dynamic Discovery and Ctrl+T Cycling
 
-**Date:** 2026-02-23
+**Date:** 2026-02-23  
+**Updated:** 2026-02-26 (added configurable default and refresh)  
 **Status:** Accepted
 
 ---
@@ -18,6 +19,13 @@ This created two problems:
 2. **No user control**: users had no way to choose a model without recompiling.
    Different models have different strengths — a fast model for quick edits, a
    reasoning model for architectural questions, a coding-specialist for refactors.
+
+3. **No way to pick up new releases**: Once the model list was fetched, there was
+   no way to refresh it when GitHub Copilot released new models without restarting
+   the editor.
+
+4. **No user preference**: The default model was always `gpt-4o` with no way for
+   users to configure their preferred model.
 
 A hardcoded fallback list was considered but rejected because the exact API slug
 strings (e.g. `claude-sonnet-4-5`, `gemini-2.5-pro`) are not reliably
@@ -82,10 +90,44 @@ pub fn selected_model_id(&self) -> &str {
 
 **`cycle_model()`** — advances the index, wrapping at the end of the list.
 
-**`ensure_models()`** — idempotent: fetches the list if empty, no-op otherwise.
-Used by the `Ctrl+T` handler.
+**`ensure_models(preferred_model: &str)`** — idempotent: fetches the list if empty, 
+no-op otherwise. Selects `preferred_model` if available, falls back to `gpt-4o`, 
+then index 0.
 
-### 3. Lazy population strategy
+**`refresh_models(preferred_model: &str)`** — forces a refresh from the API, preserving
+the current selection if still available, otherwise selecting `preferred_model`.
+
+**`set_models(models, preferred_model)`** — internal helper that sets the available
+models and intelligently selects the best default (user preference → gpt-4o → first).
+
+### 3. Configuration: `~/.config/forgiven/config.toml`
+
+Users can now set their preferred default model:
+
+```toml
+# ~/.config/forgiven/config.toml
+default_copilot_model = "claude-sonnet-4-5"
+
+tab_width = 4
+use_spaces = true
+
+[[lsp.servers]]
+language = "rust"
+command = "rust-analyzer"
+```
+
+The `Config` struct now includes:
+```rust
+pub struct Config {
+    pub default_copilot_model: String,  // Defaults to "gpt-4o" if not set
+    // ... other fields
+}
+```
+
+The editor stores config in `Editor.config` and passes `config.default_copilot_model`
+to `ensure_models()` on first use.
+
+### 4. Lazy population strategy
 
 The model list is populated in two places, whichever happens first:
 
@@ -101,7 +143,7 @@ This means:
   synchronously via `tokio::task::block_in_place` (same pattern used by the
   `Enter`/submit handler).
 
-### 4. `Ctrl+T` keybinding
+### 5. `Ctrl+T` keybinding (cycle models)
 
 `Ctrl+M` was the original choice but is **byte `0x0D` (carriage return)** —
 identical to `Enter` in every terminal emulator, even in raw mode. Crossterm
@@ -115,9 +157,10 @@ use in raw mode:
 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
     if self.agent_panel.available_models.is_empty() {
         self.set_status("Loading model list…".to_string());
+        let preferred = self.config.default_copilot_model.clone();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let _ = self.agent_panel.ensure_models().await;
+                let _ = self.agent_panel.ensure_models(&preferred).await;
             });
         });
     }
@@ -129,7 +172,33 @@ KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
 }
 ```
 
-### 5. Model shown in panel title and hint
+### 6. `Ctrl+Shift+T` keybinding (refresh model list)
+
+When GitHub Copilot releases new models, users can refresh the list without
+restarting the editor:
+
+```rust
+KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+    self.set_status("Refreshing model list from API…".to_string());
+    let preferred = self.config.default_copilot_model.clone();
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            if let Err(e) = self.agent_panel.refresh_models(&preferred).await {
+                self.set_status(format!("Failed to refresh models: {e}"));
+            } else {
+                let model = self.agent_panel.selected_model_id().to_string();
+                let n = self.agent_panel.available_models.len();
+                self.set_status(format!("Refreshed {n} models, selected: {model}"));
+            }
+        });
+    });
+}
+```
+
+The refresh preserves the currently selected model if it's still available,
+otherwise falls back to the configured default.
+
+### 7. Model shown in panel title and hint
 
 The agent panel title now includes the active model:
 
@@ -140,10 +209,10 @@ The agent panel title now includes the active model:
 The input box hint is updated to advertise the keybinding:
 
 ```
- Ask Copilot… (Enter=send, Ctrl+T=model, Tab=back)
+ Ask Copilot… (Enter=send, Ctrl+T=model, Ctrl+Shift+T=refresh, Tab=back)
 ```
 
-### 6. Model propagated through the call chain
+### 8. Model propagated through the call chain
 
 The model ID is passed from `submit()` all the way to the HTTP body:
 
@@ -166,10 +235,14 @@ single conversation, so a multi-round task is never split across two models.
   (if needed) plus the `/models` HTTP call — typically 300–700 ms total.
   Subsequent presses are instant. The status bar shows `"Loading model list…"`
   to indicate activity.
-- **Model list per session**: the list is cached in `AgentPanel.available_models`
-  for the lifetime of the process. If Copilot adds new models while the editor
-  is running, a restart is required to see them. A future improvement could
-  refresh the list when the token is renewed.
+- **Configurable default**: Users can set their preferred model in `config.toml`
+  so it's selected by default on first use.
+- **Model refresh**: `Ctrl+Shift+T` refreshes the model list from the API without
+  restarting the editor, picking up newly released models.
+- **Smart fallback**: If the configured default is no longer available (deprecated),
+  the system falls back to `gpt-4o`, then the first available model.
+- **Preserved selection on refresh**: When refreshing, the currently selected model
+  is preserved if it's still available in the new list.
 - **Terminal key constraints**: `Ctrl+C`, `Ctrl+D`, `Ctrl+Z`, `Ctrl+M` (Enter),
   `Ctrl+I` (Tab), `Ctrl+H` (Backspace) are all reserved at the terminal level.
   `Ctrl+T` was chosen as the closest safe letter to the original intent.
