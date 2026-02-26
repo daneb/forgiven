@@ -60,3 +60,21 @@ pulldown-cmark = "0.12"
 
 [dev-dependencies]
 pretty_assertions = "1"
+
+# ── Lint configuration ─────────────────────────────────────────────────────────
+# These are enforced by `cargo clippy` and `cargo build`.
+# In CI (Makefile / GitHub Actions) we pass `-D warnings` to promote all
+# warnings to errors so the build fails on any regression.
+[lints.rust]
+# Forbid unsafe code project-wide.  Any future unsafe block must be explicitly
+# justified and reviewed.
+unsafe_code     = "forbid"
+# Surface dead code and unused imports as warnings locally.
+dead_code       = "warn"
+unused_imports  = "warn"
+
+[lints.clippy]
+# Enable the full default clippy lint set as warnings.
+all      = "warn"
+# Promote the correctness-focused lints to errors — these indicate real bugs.
+correctness = "deny"
