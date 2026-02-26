@@ -64,6 +64,15 @@ pub struct Buffer {
     /// Kept separately from `selection.start` so up/down movement can always
     /// recompute the correct inclusive range without losing the anchor.
     pub visual_line_anchor: Option<usize>,
+
+    /// Current in-file search pattern
+    pub search_pattern: Option<String>,
+
+    /// Cached search matches: (row, col, match_length)
+    pub search_matches: Vec<(usize, usize, usize)>,
+
+    /// Current match index (for n/N navigation)
+    pub current_match_idx: Option<usize>,
 }
 
 impl Buffer {
@@ -81,6 +90,9 @@ impl Buffer {
             scroll_col: 0,
             scroll_row: 0,
             visual_line_anchor: None,
+            search_pattern: None,
+            search_matches: Vec::new(),
+            current_match_idx: None,
         }
     }
 
@@ -126,6 +138,9 @@ impl Buffer {
             scroll_col: 0,
             scroll_row: 0,
             visual_line_anchor: None,
+            search_pattern: None,
+            search_matches: Vec::new(),
+            current_match_idx: None,
         })
     }
 
@@ -848,6 +863,178 @@ impl Buffer {
     pub fn goto_line(&mut self, one_based: usize) {
         self.cursor.row = one_based.saturating_sub(1).min(self.lines.len().saturating_sub(1));
         self.clamp_cursor_col();
+    }
+
+    // -------------------------------------------------------------------------
+    // In-file search and replace
+    // -------------------------------------------------------------------------
+
+    /// Set the search pattern and find all matches in the buffer.
+    /// Returns the number of matches found.
+    pub fn set_search_pattern(&mut self, pattern: String) -> usize {
+        if pattern.is_empty() {
+            self.clear_search();
+            return 0;
+        }
+
+        self.search_pattern = Some(pattern.clone());
+        self.search_matches.clear();
+
+        // Find all occurrences (case-insensitive search)
+        let pattern_lower = pattern.to_lowercase();
+        for (row_idx, line) in self.lines.iter().enumerate() {
+            let line_lower = line.to_lowercase();
+            let mut col = 0;
+            while let Some(pos) = line_lower[col..].find(&pattern_lower) {
+                let match_col = col + pos;
+                self.search_matches.push((row_idx, match_col, pattern.len()));
+                col = match_col + 1;
+            }
+        }
+
+        // Jump to the first match after cursor, or first match overall
+        if !self.search_matches.is_empty() {
+            let current_pos = (self.cursor.row, self.cursor.col);
+            let idx = self.search_matches
+                .iter()
+                .position(|(r, c, _)| (*r, *c) > current_pos)
+                .unwrap_or(0);
+            self.current_match_idx = Some(idx);
+            self.jump_to_current_match();
+        }
+
+        self.search_matches.len()
+    }
+
+    /// Clear the search pattern and matches.
+    pub fn clear_search(&mut self) {
+        self.search_pattern = None;
+        self.search_matches.clear();
+        self.current_match_idx = None;
+    }
+
+    /// Jump to the next search match.
+    pub fn search_next(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+
+        if let Some(idx) = self.current_match_idx {
+            self.current_match_idx = Some((idx + 1) % self.search_matches.len());
+        } else {
+            self.current_match_idx = Some(0);
+        }
+        self.jump_to_current_match();
+    }
+
+    /// Jump to the previous search match.
+    pub fn search_prev(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+
+        if let Some(idx) = self.current_match_idx {
+            self.current_match_idx = Some(if idx == 0 {
+                self.search_matches.len() - 1
+            } else {
+                idx - 1
+            });
+        } else {
+            self.current_match_idx = Some(self.search_matches.len() - 1);
+        }
+        self.jump_to_current_match();
+    }
+
+    /// Move cursor to the current match.
+    fn jump_to_current_match(&mut self) {
+        if let Some(idx) = self.current_match_idx {
+            if let Some(&(row, col, _)) = self.search_matches.get(idx) {
+                self.cursor.row = row;
+                self.cursor.col = col;
+            }
+        }
+    }
+
+    /// Replace the current match with the given text.
+    /// Returns true if a replacement was made.
+    pub fn replace_current(&mut self, replacement: &str) -> bool {
+        if let Some(idx) = self.current_match_idx {
+            if let Some(&(row, col, len)) = self.search_matches.get(idx) {
+                let line = &mut self.lines[row];
+                let chars: Vec<char> = line.chars().collect();
+                
+                if col + len <= chars.len() {
+                    let before: String = chars[..col].iter().collect();
+                    let after: String = chars[col + len..].iter().collect();
+                    *line = format!("{}{}{}", before, replacement, after);
+                    
+                    self.mark_modified();
+                    
+                    // Update match list - need to recalculate
+                    if let Some(pattern) = self.search_pattern.clone() {
+                        self.set_search_pattern(pattern);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Replace all occurrences of the search pattern with the given text.
+    /// Returns the number of replacements made.
+    pub fn replace_all(&mut self, replacement: &str) -> usize {
+        let pattern = match &self.search_pattern {
+            Some(p) => p.clone(),
+            None => return 0,
+        };
+
+        let pattern_lower = pattern.to_lowercase();
+        let mut count = 0;
+
+        for line in &mut self.lines {
+            let mut new_line = String::new();
+            let mut remaining = line.as_str();
+            
+            loop {
+                let remaining_lower = remaining.to_lowercase();
+                match remaining_lower.find(&pattern_lower) {
+                    Some(pos) => {
+                        // Get the actual case-preserved match
+                        let byte_pos = remaining.char_indices()
+                            .nth(remaining_lower[..pos].chars().count())
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        
+                        new_line.push_str(&remaining[..byte_pos]);
+                        new_line.push_str(replacement);
+                        
+                        // Skip past the match
+                        let skip_bytes = remaining.char_indices()
+                            .nth(remaining_lower[..pos].chars().count() + pattern.chars().count())
+                            .map(|(i, _)| i)
+                            .unwrap_or(remaining.len());
+                        
+                        remaining = &remaining[skip_bytes..];
+                        count += 1;
+                    }
+                    None => {
+                        new_line.push_str(remaining);
+                        break;
+                    }
+                }
+            }
+            
+            *line = new_line;
+        }
+
+        if count > 0 {
+            self.mark_modified();
+            // Refresh search matches
+            self.set_search_pattern(pattern);
+        }
+
+        count
     }
 
     /// Ensure cursor is visible with default viewport size

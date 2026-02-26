@@ -17,6 +17,7 @@ pub enum Mode {
     MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
     Search,           // Project-wide ripgrep search overlay (SPC s g)
     Tasks,            // Task tracking panel (SPC t t)
+    InFileSearch,     // In-file search mode (/)
 }
 
 /// An editor action to be executed
@@ -99,6 +100,10 @@ pub enum Action {
     // Task panel
     TasksToggle,            // SPC t t — toggle task panel
     TasksFocus,             // Focus task panel
+    // In-file search
+    InFileSearchStart,      // / — start search in current buffer
+    InFileSearchNext,       // n — jump to next match
+    InFileSearchPrev,       // N — jump to previous match
 }
 
 /// Represents a keybinding tree node
@@ -424,6 +429,11 @@ impl KeyHandler {
 
             // Command mode
             KeyCode::Char(':') => Action::Command,
+
+            // In-file search
+            KeyCode::Char('/') => Action::InFileSearchStart,
+            KeyCode::Char('n') => Action::InFileSearchNext,
+            KeyCode::Char('N') => Action::InFileSearchPrev,
 
             _ => Action::Noop,
         }
