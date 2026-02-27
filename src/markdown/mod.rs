@@ -1,0 +1,423 @@
+//! Markdown → ratatui `Line` renderer.
+//!
+//! Converts a CommonMark string into a `Vec<Line<'static>>` ready for use in
+//! ratatui `Paragraph` widgets.  Used by the agent-panel chat history and the
+//! editor's markdown-preview mode.
+//!
+//! Supported elements
+//! ------------------
+//! Block:  headings (H1–H6), paragraphs, fenced / indented code blocks,
+//!         unordered + ordered lists (nested), block-quotes, horizontal rules.
+//! Inline: **bold**, *italic*, `inline code`, soft/hard breaks.
+//! Extra:  tool-call lines starting with ⚙ are rendered dim (agent panel
+//!         convention) and are not re-wrapped.
+
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Render `content` (CommonMark markdown) into ratatui [`Line`]s that fit
+/// within `width` terminal columns.
+pub fn render(content: &str, width: usize) -> Vec<Line<'static>> {
+    Renderer::new(width).process(content)
+}
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+
+struct Renderer {
+    width: usize,
+    output: Vec<Line<'static>>,
+
+    // ── Inline state ─────────────────────────────────────────────────────────
+    bold: bool,
+    italic: bool,
+    /// Accumulated inline spans for the current block element.
+    pending: Vec<Span<'static>>,
+
+    // ── Block state ──────────────────────────────────────────────────────────
+    heading: Option<HeadingLevel>,
+    in_code_block: bool,
+    code_lang: String,
+
+    // ── List state ───────────────────────────────────────────────────────────
+    /// Stack entry: (is_ordered, current_item_counter).
+    list_stack: Vec<(bool, u64)>,
+    in_item: bool,
+    item_bullet_emitted: bool,
+
+    // ── Blockquote ───────────────────────────────────────────────────────────
+    blockquote_depth: usize,
+
+    // ── Agent-panel tool-line detection ──────────────────────────────────────
+    /// Set to true when the first text in a paragraph starts with ⚙.
+    is_tool_line: bool,
+    /// True when the current paragraph lives inside a list item.
+    paragraph_in_item: bool,
+}
+
+impl Renderer {
+    fn new(width: usize) -> Self {
+        Self {
+            width,
+            output: Vec::new(),
+            bold: false,
+            italic: false,
+            pending: Vec::new(),
+            heading: None,
+            in_code_block: false,
+            code_lang: String::new(),
+            list_stack: Vec::new(),
+            in_item: false,
+            item_bullet_emitted: false,
+            blockquote_depth: 0,
+            is_tool_line: false,
+            paragraph_in_item: false,
+        }
+    }
+
+    // ── Style helpers ─────────────────────────────────────────────────────────
+
+    fn prose_style(&self) -> Style {
+        let mut s = Style::default().fg(Color::White);
+        if self.bold    { s = s.add_modifier(Modifier::BOLD); }
+        if self.italic  { s = s.add_modifier(Modifier::ITALIC); }
+        s
+    }
+
+    /// Append `text` to the pending span list, merging with the last span if
+    /// it carries the same style (keeps the Vec small).
+    fn push_text(&mut self, text: &str) {
+        if text.is_empty() { return; }
+        let style = self.prose_style();
+        if let Some(last) = self.pending.last_mut() {
+            if last.style == style {
+                let mut s = last.content.to_string();
+                s.push_str(text);
+                *last = Span::styled(s, style);
+                return;
+            }
+        }
+        self.pending.push(Span::styled(text.to_string(), style));
+    }
+
+    // ── Heading flush ─────────────────────────────────────────────────────────
+
+    fn flush_heading(&mut self) {
+        let (color, sigil) = match self.heading {
+            Some(HeadingLevel::H1) => (Color::Yellow, "▌"),
+            Some(HeadingLevel::H2) => (Color::Cyan,   "▍"),
+            Some(HeadingLevel::H3) => (Color::Green,  "▎"),
+            _                      => (Color::White,  "▏"),
+        };
+        let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+        let text: String = self.pending.iter().map(|s| s.content.as_ref()).collect();
+        self.output.push(Line::from(vec![
+            Span::styled(format!("  {sigil} {text}"), style),
+        ]));
+        self.output.push(Line::from(""));
+        self.pending.clear();
+        self.heading = None;
+    }
+
+    // ── Paragraph flush ───────────────────────────────────────────────────────
+
+    /// Return the `(first_prefix, rest_prefix)` for the current block context.
+    fn para_prefixes(&mut self) -> (String, String) {
+        if self.in_item && !self.item_bullet_emitted {
+            self.item_bullet_emitted = true;
+            let bullet = self.current_bullet();
+            let cont   = self.item_continuation_indent();
+            (bullet, cont)
+        } else if self.in_item {
+            let cont = self.item_continuation_indent();
+            (cont.clone(), cont)
+        } else if self.blockquote_depth > 0 {
+            let pfx = format!("{}  ", "  │".repeat(self.blockquote_depth));
+            (pfx.clone(), pfx)
+        } else {
+            ("  ".to_string(), "  ".to_string())
+        }
+    }
+
+    /// Flush accumulated inline spans as word-wrapped lines.
+    fn flush_para(&mut self, trail_blank: bool) {
+        if self.pending.is_empty() { return; }
+
+        if self.is_tool_line {
+            // Tool lines: render dim, no re-wrapping.
+            let text: String = self.pending.iter().map(|s| s.content.as_ref()).collect();
+            self.output.push(Line::from(Span::styled(
+                format!("  {}", text.trim()),
+                Style::default().fg(Color::DarkGray),
+            )));
+            self.pending.clear();
+            self.is_tool_line = false;
+            return;
+        }
+
+        let (first, rest) = self.para_prefixes();
+        let wrapped = reflow(std::mem::take(&mut self.pending), self.width, &first, &rest);
+        self.output.extend(wrapped);
+        if trail_blank { self.output.push(Line::from("")); }
+    }
+
+    // ── List helpers ──────────────────────────────────────────────────────────
+
+    fn current_bullet(&self) -> String {
+        if let Some((is_ordered, counter)) = self.list_stack.last() {
+            let depth  = self.list_stack.len().saturating_sub(1);
+            let indent = "    ".repeat(depth);
+            if *is_ordered {
+                format!("  {}{}. ", indent, counter)
+            } else {
+                format!("  {}• ", indent)
+            }
+        } else {
+            "  ".to_string()
+        }
+    }
+
+    fn item_continuation_indent(&self) -> String {
+        if let Some((is_ordered, counter)) = self.list_stack.last() {
+            let depth  = self.list_stack.len().saturating_sub(1);
+            let indent = "    ".repeat(depth);
+            if *is_ordered {
+                let num_width = counter.to_string().len() + 2; // "N. "
+                format!("  {}{}", indent, " ".repeat(num_width))
+            } else {
+                format!("  {}  ", indent) // "• " = 2 chars
+            }
+        } else {
+            "  ".to_string()
+        }
+    }
+
+    // ── Main event processor ──────────────────────────────────────────────────
+
+    fn process(mut self, content: &str) -> Vec<Line<'static>> {
+        let parser = Parser::new_ext(content, Options::all());
+
+        for event in parser {
+            match event {
+                // ── Headings ──────────────────────────────────────────────────
+                Event::Start(Tag::Heading { level, .. }) => {
+                    self.heading = Some(level);
+                }
+                Event::End(TagEnd::Heading(_)) => {
+                    self.flush_heading();
+                }
+
+                // ── Paragraphs ────────────────────────────────────────────────
+                Event::Start(Tag::Paragraph) => {
+                    self.is_tool_line = false;
+                    self.paragraph_in_item = self.in_item;
+                }
+                Event::End(TagEnd::Paragraph) => {
+                    self.flush_para(!self.paragraph_in_item);
+                }
+
+                // ── Code blocks ───────────────────────────────────────────────
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    self.in_code_block = true;
+                    self.code_lang = match kind {
+                        CodeBlockKind::Fenced(lang) => lang.to_string(),
+                        CodeBlockKind::Indented     => String::new(),
+                    };
+                    let header = if self.code_lang.is_empty() {
+                        "  ╭─────────────────────────".to_string()
+                    } else {
+                        format!("  ╭─ {} ", self.code_lang)
+                    };
+                    self.output.push(Line::from(Span::styled(
+                        header,
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    self.in_code_block = false;
+                    self.output.push(Line::from(Span::styled(
+                        "  ╰─────────────────────────".to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    self.output.push(Line::from(""));
+                }
+
+                // ── Lists ─────────────────────────────────────────────────────
+                Event::Start(Tag::List(ordered)) => {
+                    // Initialise one below the start number so the first Item's
+                    // += 1 brings the counter to exactly `start`.
+                    let start = ordered.unwrap_or(1);
+                    self.list_stack.push((ordered.is_some(), start.saturating_sub(1)));
+                }
+                Event::End(TagEnd::List(_)) => {
+                    self.list_stack.pop();
+                    if self.list_stack.is_empty() {
+                        self.output.push(Line::from(""));
+                    }
+                }
+                Event::Start(Tag::Item) => {
+                    self.in_item = true;
+                    self.item_bullet_emitted = false;
+                    // Bump the counter for this level.
+                    if let Some(last) = self.list_stack.last_mut() {
+                        last.1 += 1;
+                    }
+                }
+                Event::End(TagEnd::Item) => {
+                    // Tight list items (no sub-paragraph) leave text in pending.
+                    if !self.pending.is_empty() {
+                        self.flush_para(false);
+                    }
+                    self.in_item = false;
+                    self.item_bullet_emitted = false;
+                }
+
+                // ── Blockquotes ───────────────────────────────────────────────
+                Event::Start(Tag::BlockQuote(_)) => {
+                    self.blockquote_depth += 1;
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
+                    self.output.push(Line::from(""));
+                }
+
+                // ── Inline formatting ─────────────────────────────────────────
+                Event::Start(Tag::Strong)   => { self.bold   = true;  }
+                Event::End(TagEnd::Strong)  => { self.bold   = false; }
+                Event::Start(Tag::Emphasis) => { self.italic = true;  }
+                Event::End(TagEnd::Emphasis)=> { self.italic = false; }
+
+                // ── Leaf events ───────────────────────────────────────────────
+                Event::Code(code) => {
+                    // Inline code span — cyan, backtick-delimited.
+                    self.pending.push(Span::styled(
+                        format!("`{}`", code),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+                Event::Text(text) => {
+                    if self.in_code_block {
+                        // Each newline-separated line of the code block becomes
+                        // a single output line with a │ gutter marker.
+                        for line in text.lines() {
+                            self.output.push(Line::from(Span::styled(
+                                format!("  │ {}", line),
+                                Style::default().fg(Color::Green),
+                            )));
+                        }
+                    } else {
+                        // Detect agent tool-call lines.
+                        if self.pending.is_empty() && text.trim_start().starts_with('⚙') {
+                            self.is_tool_line = true;
+                        }
+                        self.push_text(&text);
+                    }
+                }
+                Event::SoftBreak => {
+                    if !self.in_code_block {
+                        self.push_text(" ");
+                    }
+                }
+                Event::HardBreak => {
+                    if !self.pending.is_empty() {
+                        let (first, rest) = self.para_prefixes();
+                        let wrapped = reflow(
+                            std::mem::take(&mut self.pending),
+                            self.width,
+                            &first,
+                            &rest,
+                        );
+                        self.output.extend(wrapped);
+                    }
+                }
+                Event::Rule => {
+                    self.output.push(Line::from(Span::styled(
+                        "  ──────────────────────────────────".to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    self.output.push(Line::from(""));
+                }
+
+                _ => {}
+            }
+        }
+
+        // Flush any trailing content (e.g. incomplete streaming response).
+        if !self.pending.is_empty() {
+            self.flush_para(false);
+        }
+
+        self.output
+    }
+}
+
+// ── Word-wrap + span reflow ───────────────────────────────────────────────────
+
+/// Reflow styled inline spans into word-wrapped ratatui [`Line`]s.
+///
+/// * `first_prefix` — prepended to the first output line (e.g. `"  • "`).
+/// * `rest_prefix`  — prepended to all continuation lines (must align with
+///   text that follows `first_prefix`).
+///
+/// The prefix counts toward `width`, so text stays within the terminal column
+/// budget.
+fn reflow(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    first_prefix: &str,
+    rest_prefix: &str,
+) -> Vec<Line<'static>> {
+    // Collect (word, style) pairs from all spans.
+    let mut words: Vec<(String, Style)> = Vec::new();
+    for span in &spans {
+        let style = span.style;
+        for word in span.content.split_whitespace() {
+            if !word.is_empty() {
+                words.push((word.to_string(), style));
+            }
+        }
+    }
+
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let first_pfx_len = first_prefix.chars().count();
+    let rest_pfx_len  = rest_prefix.chars().count();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = vec![Span::raw(first_prefix.to_string())];
+    let mut current_len = 0usize;
+    let mut max_len = width.saturating_sub(first_pfx_len).max(8);
+
+    for (word, style) in words {
+        let word_len = word.chars().count();
+        let sep = if current_len > 0 { 1 } else { 0 };
+
+        if current_len > 0 && current_len + sep + word_len > max_len {
+            // Wrap: emit current line, start a new one with rest_prefix.
+            lines.push(Line::from(std::mem::take(&mut current)));
+            current.push(Span::raw(rest_prefix.to_string()));
+            current_len = 0;
+            max_len = width.saturating_sub(rest_pfx_len).max(8);
+        }
+
+        if current_len > 0 {
+            current.push(Span::raw(" ".to_string()));
+            current_len += 1;
+        }
+
+        current.push(Span::styled(word, style));
+        current_len += word_len;
+    }
+
+    if current_len > 0 {
+        lines.push(Line::from(current));
+    }
+
+    lines
+}
