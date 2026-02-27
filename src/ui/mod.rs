@@ -832,7 +832,10 @@ impl UI {
             .border_style(Style::default().fg(Color::LightCyan))
             .title(Span::styled(" Find File ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)))
             .title_bottom(Span::styled(
-                format!(" {} files ", files.len()),
+                format!(
+                    " {} files ",
+                    files.iter().filter(|(p, _)| !p.as_os_str().is_empty()).count()
+                ),
                 Style::default().fg(Color::DarkGray),
             ));
         let query_display = format!("> {query}_");
@@ -847,6 +850,29 @@ impl UI {
         let mut lines: Vec<Line> = Vec::new();
 
         for (idx, (path, match_indices)) in files.iter().enumerate().take(20) {
+            // Sentinels injected by refilter_files() when the query is empty.
+            if path.as_os_str().is_empty() {
+                // Header: "─── Recent ───"
+                lines.push(Line::from(Span::styled(
+                    "  ─── Recent ────────────────────────────────────────────────────────",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Rgb(20, 35, 50))
+                        .add_modifier(Modifier::BOLD),
+                )));
+                continue;
+            }
+            if path.to_str() == Some("\x01") {
+                // Footer: closing divider after recent files.
+                lines.push(Line::from(Span::styled(
+                    "  ────────────────────────────────────────────────────────────────────",
+                    Style::default()
+                        .fg(Color::Rgb(30, 80, 110))
+                        .bg(Color::Rgb(20, 35, 50)),
+                )));
+                continue;
+            }
+
             let display: String = path.strip_prefix(&current_dir)
                 .unwrap_or(path)
                 .to_string_lossy()

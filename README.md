@@ -197,7 +197,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0024)
+│   └── adr/                 # Architecture Decision Records (0001 – 0032)
 └── Cargo.toml
 ```
 
@@ -279,6 +279,14 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0022](docs/adr/0022-markdown-rendering.md) | Markdown Rendering (Agent Panel + Editor Preview) |
 | [0023](docs/adr/0023-which-key-render-timer.md) | Which-Key Popup Render Timer |
 | [0024](docs/adr/0024-project-wide-text-search.md) | Project-wide Text Search |
+| [0025](docs/adr/0025-explorer-hidden-files-toggle.md) | Explorer Hidden Files Toggle |
+| [0026](docs/adr/0026-copilot-stream-resilience.md) | Copilot Stream Resilience |
+| [0027](docs/adr/0027-agent-round-limits-and-continuation-prompts.md) | Agent Round Limits and Continuation Prompts |
+| [0028](docs/adr/0028-model-selection-persistence.md) | Model Selection Persistence |
+| [0029](docs/adr/0029-task-panel-for-work-tracking.md) | Task Panel for Work Tracking |
+| [0030](docs/adr/0030-in-file-search-and-replace.md) | In-File Search and Replace |
+| [0031](docs/adr/0031-agent-task-creation.md) | Agent-Driven Plan Strip |
+| [0032](docs/adr/0032-recent-files-in-file-picker.md) | Recent Files in the Find File Picker |
 
 ---
 
@@ -299,4 +307,4 @@ cargo test
 
 ## License
 
-To be determined.
+MIT — see [LICENSE](LICENSE).

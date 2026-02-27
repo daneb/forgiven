@@ -19,7 +19,7 @@ jobs:
   # ── 1. Formatting + Clippy ──────────────────────────────────────────────────
   lint:
     name: Lint (fmt + clippy)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -92,15 +92,18 @@ jobs:
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            xvfb
 
       - name: Build (release)
         run: cargo build --release
 
-      - name: Run tests
-        # DISPLAY stub lets arboard initialise on headless Linux runners.
-        env:
-          DISPLAY: ":99"
+      - name: Run tests (Linux — Xvfb virtual display for clipboard)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --all
+
+      - name: Run tests (macOS)
+        if: runner.os != 'Linux'
         run: cargo test --all
 
       - name: Upload release binary (macOS only)

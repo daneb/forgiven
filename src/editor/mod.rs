@@ -93,6 +93,9 @@ pub struct Editor {
     /// Fuzzy-filtered results: (path, match-char indices in the display string).
     /// Recomputed whenever file_query or file_all changes.
     file_list: Vec<(PathBuf, Vec<usize>)>,
+
+    /// Most-recently-opened files, most recent first. Capped at 5. Persisted across sessions.
+    recent_files: Vec<PathBuf>,
     
     /// LSP manager for language server protocol support
     lsp_manager: LspManager,
@@ -182,6 +185,7 @@ impl Editor {
             file_all: Vec::new(),
             file_query: String::new(),
             file_list: Vec::new(),
+            recent_files: Self::load_recents(),
             lsp_manager: LspManager::new(),
             current_diagnostics: Vec::new(),
             ghost_text: None,
@@ -232,6 +236,14 @@ impl Editor {
         self.buffers.push(buffer);
         self.current_buffer_idx = self.buffers.len() - 1;
         self.set_status(format!("Opened {}", path.display()));
+
+        // Track in recents using the canonical absolute path for deduplication.
+        if let Ok(abs) = path.canonicalize() {
+            self.recent_files.retain(|p| *p != abs);
+            self.recent_files.insert(0, abs);
+            self.recent_files.truncate(5);
+            let _ = self.save_recents();
+        }
 
         // Notify LSP about opened document if a server is running for this language.
         let language = LspManager::language_from_path(path);
@@ -1545,20 +1557,32 @@ impl Editor {
             }
             KeyCode::Enter => {
                 if let Some((path, _)) = self.file_list.get(self.file_picker_idx) {
-                    let path_clone = path.clone();
-                    self.file_query.clear();
-                    self.mode = Mode::Normal;
-                    self.open_file(&path_clone)?;
+                    if !Self::is_picker_sentinel(path) {
+                        let path_clone = path.clone();
+                        self.file_query.clear();
+                        self.mode = Mode::Normal;
+                        self.open_file(&path_clone)?;
+                    }
                 }
             }
             KeyCode::Up => {
-                if self.file_picker_idx > 0 {
-                    self.file_picker_idx -= 1;
+                let mut idx = self.file_picker_idx;
+                while idx > 0 {
+                    idx -= 1;
+                    if !Self::is_picker_sentinel(&self.file_list[idx].0) {
+                        self.file_picker_idx = idx;
+                        break;
+                    }
                 }
             }
             KeyCode::Down => {
-                if self.file_picker_idx + 1 < self.file_list.len() {
-                    self.file_picker_idx += 1;
+                let mut idx = self.file_picker_idx;
+                while idx + 1 < self.file_list.len() {
+                    idx += 1;
+                    if !Self::is_picker_sentinel(&self.file_list[idx].0) {
+                        self.file_picker_idx = idx;
+                        break;
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -1750,6 +1774,12 @@ impl Editor {
                 .replace('\n', " ");
             for ch in single_line.chars() {
                 self.agent_panel.input_char(ch);
+            }
+        } else if self.mode == Mode::Insert {
+            // In insert mode, paste the text as-is into the current buffer.
+            let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+            if let Some(buf) = self.current_buffer_mut() {
+                buf.insert_text_block(&normalised);
             }
         }
         Ok(())
@@ -2062,11 +2092,35 @@ impl Editor {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         if self.file_query.is_empty() {
-            // No query → show everything, no highlights
-            self.file_list = self.file_all
+            // No query → show recent files (scoped to cwd) first, then all project files.
+            let recents: Vec<PathBuf> = self.recent_files
                 .iter()
-                .map(|p| (p.clone(), vec![]))
+                .filter(|p| p.exists() && p.starts_with(&cwd))
+                .cloned()
                 .collect();
+
+            let mut result: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+
+            if !recents.is_empty() {
+                // PathBuf::new() (empty)  → "─── Recent ───" header sentinel.
+                // PathBuf::from("\x01")   → closing divider sentinel.
+                result.push((PathBuf::new(), vec![]));
+                for p in &recents {
+                    result.push((p.clone(), vec![]));
+                }
+                result.push((PathBuf::from("\x01"), vec![]));
+            }
+
+            for p in &self.file_all {
+                if !recents.contains(p) {
+                    result.push((p.clone(), vec![]));
+                }
+            }
+
+            self.file_list = result;
+            // Place cursor on the first recent file (index 1, skipping the sentinel header).
+            self.file_picker_idx = if recents.is_empty() { 0 } else { 1 };
+            return;
         } else {
             let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self.file_all
                 .iter()
@@ -2089,6 +2143,50 @@ impl Editor {
         } else {
             self.file_picker_idx = self.file_picker_idx.min(self.file_list.len() - 1);
         }
+    }
+
+    // ── File-picker helpers ────────────────────────────────────────────────────
+
+    /// Returns true for the synthetic sentinel entries injected into `file_list`:
+    /// - `PathBuf::new()`       → "─── Recent ───" section header
+    /// - `PathBuf::from("\x01")` → closing divider after the recent section
+    #[inline]
+    fn is_picker_sentinel(path: &PathBuf) -> bool {
+        path.as_os_str().is_empty() || path.to_str() == Some("\x01")
+    }
+
+    // ── Recent files persistence ───────────────────────────────────────────────
+
+    fn recents_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
+        PathBuf::from(home).join(".local/share/forgiven/recent_files.txt")
+    }
+
+    fn load_recents() -> Vec<PathBuf> {
+        let Ok(content) = std::fs::read_to_string(Self::recents_path()) else {
+            return vec![];
+        };
+        content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .take(5)
+            .collect()
+    }
+
+    fn save_recents(&self) -> Result<()> {
+        let path = Self::recents_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = self.recent_files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, text)?;
+        Ok(())
     }
 
     fn scan_files(&mut self) {

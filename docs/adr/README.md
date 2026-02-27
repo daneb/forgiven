@@ -30,6 +30,16 @@ that motivated it, what was decided, and the consequences.
 | [0020](0020-lazygit-integration.md) | LazyGit Integration | Accepted |
 | [0021](0021-render-loop-performance.md) | Render Loop Performance Optimisations | Accepted |
 | [0022](0022-markdown-rendering.md) | Markdown Rendering (Agent Panel + Editor Preview) | Accepted |
+| [0023](0023-which-key-render-timer.md) | Which-Key Popup Render Timer | Accepted |
+| [0024](0024-project-wide-text-search.md) | Project-wide Text Search | Accepted |
+| [0025](0025-explorer-hidden-files-toggle.md) | Explorer Hidden Files Toggle | Accepted |
+| [0026](0026-copilot-stream-resilience.md) | Copilot Stream Resilience | Accepted |
+| [0027](0027-agent-round-limits-and-continuation-prompts.md) | Agent Round Limits and Continuation Prompts | Accepted |
+| [0028](0028-model-selection-persistence.md) | Model Selection Persistence | Accepted |
+| [0029](0029-task-panel-for-work-tracking.md) | Task Panel for Work Tracking | Accepted |
+| [0030](0030-in-file-search-and-replace.md) | In-File Search and Replace | Accepted |
+| [0031](0031-agent-task-creation.md) | Agent-Driven Plan Strip | Accepted |
+| [0032](0032-recent-files-in-file-picker.md) | Recent Files in the Find File Picker | Accepted |
 
 ## What is an ADR?
 
@@ -123,11 +133,3 @@ Preview  ── Esc/q       ──► Normal
 Insert ──── Esc         ──► Normal
 ```
 
-## Planned ADRs (future decisions)
-
-- `0023` — Hover / go-to-definition popup widget
-- `0024` — Configuration system (`~/.config/forgiven/config.toml`) — themes, keybindings, LSP per-language
-- `0025` — File system watcher for live explorer refresh (`notify` crate)
-- `0026` — Agent file attachment picker (`@`-mention files as context)
-- `0027` — Buffer model improvements (line-gap buffer or rope for large files)
-- `0028` — Markdown preview cache (keyed on `lsp_version`, avoid re-rendering unchanged buffers)
