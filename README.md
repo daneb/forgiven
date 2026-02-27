@@ -96,6 +96,8 @@ Which-key popup shows available bindings after a 500 ms pause.
 
 ---
 
+![forgiven editor](main.png)
+
 ## Quick Start
 
 ```bash
@@ -321,6 +323,30 @@ tail -f /tmp/forgiven.log
 # Run tests
 cargo test
 ```
+
+---
+
+## Security & Privacy
+
+forgiven makes **no background network calls**. The only outbound connections
+are to GitHub's official Copilot endpoints and only when you actively use
+Copilot features:
+
+| Endpoint | Triggered by |
+|----------|-------------|
+| `api.github.com/copilot_internal/v2/token` | First Copilot action per session |
+| `api.githubcopilot.com/models` | `Ctrl+T` in agent panel |
+| `api.githubcopilot.com/chat/completions` | Sending a message to the agent |
+
+No telemetry. No analytics. No crash reporting. The agent is sandboxed to your
+project root — it cannot read or write files outside the directory you opened.
+
+The CI pipeline runs `cargo-audit` (CVE scanning), `cargo-deny` (licence
+checks), and GitHub code scanning on every push. `unsafe` code is forbidden
+project-wide via `Cargo.toml`.
+
+Full details — including how to audit the codebase yourself — are in
+[SECURITY.md](SECURITY.md).
 
 ---
 
