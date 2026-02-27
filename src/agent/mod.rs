@@ -535,6 +535,13 @@ Available tools:\n\
 
     pub fn has_code_to_apply(&self) -> bool { self.get_code_to_apply().is_some() }
 
+    /// Return the full text of the most recent assistant message, if any.
+    pub fn last_assistant_reply(&self) -> Option<String> {
+        self.messages.iter().rev()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| m.content.clone())
+    }
+
     async fn ensure_token(&mut self) -> Result<String> {
         if let Some(ref t) = self.token {
             if !t.is_expired() {
@@ -569,19 +576,36 @@ async fn agentic_loop(
 ) {
     let tool_defs = tools::tool_definitions();
 
-    for round in 0..max_rounds {
+    // Use a manual counter so we can extend the limit when the user approves
+    // continuation. A `for round in 0..max_rounds` loop cannot be extended
+    // mid-flight — `continue` at the last iteration simply exits the loop.
+    let mut round = 0usize;
+    let mut effective_max = max_rounds;
+    let mut warned = false; // emit the MaxRoundsWarning only once
+
+    loop {
+        if round >= effective_max {
+            // Only reached if we exhausted all rounds without the model stopping.
+            let _ = tx.send(StreamEvent::Error(format!(
+                "Agent reached maximum rounds ({effective_max}) without completing. \
+                 Consider increasing max_agent_rounds in config."
+            )));
+            return;
+        }
+
         // Report progress
         let _ = tx.send(StreamEvent::RoundProgress {
             current: round + 1,
-            max: max_rounds,
+            max: effective_max,
         });
 
-        // Warn if approaching limit
-        let remaining = max_rounds.saturating_sub(round + 1);
-        if remaining <= warning_threshold && remaining > 0 {
+        // Warn once when approaching the limit
+        let remaining = effective_max.saturating_sub(round + 1);
+        if !warned && remaining <= warning_threshold && remaining > 0 {
+            warned = true;
             let _ = tx.send(StreamEvent::MaxRoundsWarning {
                 current: round + 1,
-                max: max_rounds,
+                max: effective_max,
                 remaining,
             });
         }
@@ -822,26 +846,28 @@ async fn agentic_loop(
 
         // Visual separator between rounds
         let _ = tx.send(StreamEvent::Token("\n".to_string()));
-        
+
+        round += 1;
+
         // Check if we've hit the limit and need user approval to continue
-        if round + 1 >= max_rounds {
+        if round >= effective_max {
             let _ = tx.send(StreamEvent::AwaitingContinuation);
-            
+
             // Wait for user decision (with timeout to avoid hanging forever)
             let decision = tokio::time::timeout(
                 tokio::time::Duration::from_secs(300), // 5 minute timeout
                 cont_rx.recv()
             ).await;
-            
+
             match decision {
                 Ok(Some(true)) => {
-                    // User approved, give them more rounds (another batch)
+                    // Extend the effective limit by another batch of rounds.
                     info!("User approved continuation, extending by {} rounds", max_rounds);
-                    // Just continue the loop; we'll break when no more tool calls
-                    continue;
+                    effective_max += max_rounds;
+                    warned = false; // re-arm the warning for the new batch
                 }
                 Ok(Some(false)) | Ok(None) | Err(_) => {
-                    // User denied, or channel closed, or timeout
+                    // User denied, channel closed, or 5-minute timeout.
                     let _ = tx.send(StreamEvent::Done);
                     return;
                 }
@@ -849,11 +875,6 @@ async fn agentic_loop(
         }
         // Continue loop with tool results appended to messages
     }
-
-    // Only reached if we exhausted all rounds without user stopping
-    let _ = tx.send(StreamEvent::Error(
-        format!("Agent reached maximum rounds ({}) without completing. Consider increasing max_agent_rounds in config.", max_rounds)
-    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -955,6 +976,10 @@ async fn start_chat_stream_with_tools(
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
+                    // 4xx errors (except 429 rate-limit) are permanent — don't retry.
+                    if status.is_client_error() && status.as_u16() != 429 {
+                        return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
+                    }
                     warn!("Retrying due to API error ({status}): {body}");
                 }
                 Err(e) => {
@@ -1030,6 +1055,10 @@ async fn fetch_models(api_token: &str) -> Result<Vec<String>> {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
+                    // 4xx errors (except 429 rate-limit) are permanent — don't retry.
+                    if status.is_client_error() && status.as_u16() != 429 {
+                        return Err(anyhow::anyhow!("/models API error ({status}): {body}"));
+                    }
                     warn!("Retrying due to API error ({status}): {body}");
                 }
                 Err(e) => {
@@ -1073,16 +1102,41 @@ struct TokenResponse {
 
 async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
     let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.github.com/copilot_internal/v2/token")
-        .header("Authorization", format!("token {oauth_token}"))
-        .header("User-Agent", "forgiven/0.1.0")
-        .header("Accept", "application/json")
-        .send().await.context("Failed to reach GitHub API")?;
+    let mut retry_attempts = 0;
+    let max_retries = 3;
+    let mut delay = tokio::time::Duration::from_secs(1);
 
-    let status = resp.status();
-    let body_text = resp.text().await.unwrap_or_default();
-    debug!("Token exchange response ({status}): {body_text}");
+    let (status, body_text) = loop {
+        match client
+            .get("https://api.github.com/copilot_internal/v2/token")
+            .header("Authorization", format!("token {oauth_token}"))
+            .header("User-Agent", "forgiven/0.1.0")
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let s = resp.status();
+                let b = resp.text().await.unwrap_or_default();
+                debug!("Token exchange response ({s}): {b}");
+                // Only retry on server errors or rate limits; fail immediately on 4xx auth errors.
+                if s.is_success() || (s.is_client_error() && s.as_u16() != 429) {
+                    break (s, b);
+                }
+                warn!("Token exchange retrying due to server error ({s})");
+            }
+            Err(e) => {
+                warn!("Token exchange retrying due to network error: {e}");
+            }
+        }
+        retry_attempts += 1;
+        if retry_attempts >= max_retries {
+            return Err(anyhow::anyhow!("Token exchange failed after {max_retries} attempts"));
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    };
+
     if !status.is_success() {
         return Err(anyhow::anyhow!("Token exchange failed ({status}): {body_text}"));
     }

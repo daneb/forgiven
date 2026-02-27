@@ -3,6 +3,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{EnableBracketedPaste, DisableBracketedPaste},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -162,7 +163,7 @@ impl Editor {
         // Set up terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
 
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
@@ -206,9 +207,22 @@ impl Editor {
 
     /// Open a file into a new buffer.
     /// Creates an empty buffer for non-existent files (new file workflow).
+    /// Returns Ok(()) for unsupported binary files, displaying a status message instead of crashing.
     pub fn open_file(&mut self, path: &PathBuf) -> Result<()> {
         let buffer = if path.exists() {
-            Buffer::from_file(path.clone())?
+            match Buffer::from_file(path.clone()) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    self.set_status(format!(
+                        "Cannot open '{}': {}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string()),
+                        e
+                    ));
+                    return Ok(());
+                }
+            }
         } else {
             // New file — create an empty named buffer
             let mut buf = Buffer::new(path.to_string_lossy().as_ref());
@@ -530,9 +544,19 @@ impl Editor {
 
             // ── Input (blocks up to 50 ms) ─────────────────────────────────────
             if event::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key)?;
-                    needs_render = true;
+                match event::read()? {
+                    Event::Key(key) => {
+                        self.handle_key(key)?;
+                        needs_render = true;
+                    }
+                    // Bracketed paste: the terminal wraps pasted text in escape sequences
+                    // so it arrives as a single Event::Paste(String) instead of a stream
+                    // of KeyCode::Char / KeyCode::Enter events.
+                    Event::Paste(text) => {
+                        self.handle_paste(text)?;
+                        needs_render = true;
+                    }
+                    _ => {}
                 }
             }
 
@@ -1671,6 +1695,18 @@ impl Editor {
                     return Ok(());
                 }
                 
+                // 'y' with empty input = yank the last assistant reply to the system clipboard.
+                if ch == 'y' && self.agent_panel.input.is_empty() {
+                    if let Some(text) = self.agent_panel.last_assistant_reply() {
+                        let len = text.lines().count();
+                        self.sync_system_clipboard(&text);
+                        self.set_status(format!("Copied {} lines to clipboard", len));
+                    } else {
+                        self.set_status("No reply to copy".to_string());
+                    }
+                    return Ok(());
+                }
+
                 // 'a' with empty input = apply code block from latest reply.
                 if ch == 'a' && self.agent_panel.input.is_empty() {
                     if let Some(code) = self.agent_panel.get_code_to_apply() {
@@ -1693,6 +1729,28 @@ impl Editor {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Paste handling ─────────────────────────────────────────────────────────
+
+    /// Handle a bracketed-paste event.
+    ///
+    /// In Agent mode the pasted text is appended to the input buffer as a single
+    /// line — newlines are collapsed to spaces so a multi-line paste doesn't
+    /// accidentally trigger multiple submits.  The user still presses Enter to send.
+    fn handle_paste(&mut self, text: String) -> Result<()> {
+        if self.mode == Mode::Agent {
+            // Collapse newlines/carriage-returns to a single space so the whole
+            // paste lands on one line without triggering submission.
+            let single_line = text
+                .replace("\r\n", " ")
+                .replace('\r', " ")
+                .replace('\n', " ");
+            for ch in single_line.chars() {
+                self.agent_panel.input_char(ch);
+            }
         }
         Ok(())
     }
@@ -2611,7 +2669,7 @@ impl Editor {
     /// Clean up terminal state before exit
     fn cleanup(&mut self) -> Result<()> {
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(self.terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
         Ok(())
     }
