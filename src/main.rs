@@ -96,11 +96,6 @@ async fn main() -> Result<()> {
         editor.open_file(path)?;
     }
 
-    // If no file was given, start with a scratch buffer
-    if files_to_open.is_empty() {
-        editor.open_scratch();
-    }
-
     // Start configured LSP servers (non-fatal if any fail)
     editor.setup_lsp().await;
 

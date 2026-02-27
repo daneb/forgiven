@@ -482,11 +482,80 @@ impl UI {
                 }
             }
         } else {
-            // No buffer open
-            let text = vec![Line::from("No buffer open")];
-            let paragraph = Paragraph::new(text);
-            frame.render_widget(paragraph, area);
+            // No buffer open — show the welcome screen.
+            Self::render_welcome(frame, area);
         }
+    }
+
+    /// Render the welcome / splash screen shown when no buffer is open.
+    fn render_welcome(frame: &mut Frame, area: Rect) {
+        #[rustfmt::skip]
+        const CROSS: &[&str] = &[
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "           ━━━━━━━━━━━━━━━━━━━━╋╋╋━━━━━━━━━━━━━━━━━━━━",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+        ];
+        #[rustfmt::skip]
+        const WORDMARK: &[&str] = &[
+            "███████╗ ██████╗ ██████╗  ██████╗ ██╗██╗   ██╗███████╗███╗   ██╗",
+            "██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██║██║   ██║██╔════╝████╗  ██║",
+            "█████╗  ██║   ██║██████╔╝██║  ███╗██║██║   ██║█████╗  ██╔██╗ ██║",
+            "██╔══╝  ██║   ██║██╔══██╗██║   ██║██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║",
+            "██║     ╚██████╔╝██║  ██║╚██████╔╝██║ ╚████╔╝ ███████╗██║ ╚████║",
+            "╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝",
+        ];
+        const TAGLINE: &str = "an AI-first terminal code editor  ·  MIT License";
+        const HINTS: &str = "SPC f f  open file    SPC e e  explorer    SPC a a  agent";
+        // Width of the widest logo line (WORDMARK row 1 = 64 display columns).
+        const LOGO_W: usize = 64;
+
+        let area_h = area.height as usize;
+        let area_w = area.width as usize;
+
+        // Total logo height: cross + blank + wordmark + blank + tagline + blank + hints.
+        let logo_h = CROSS.len() + 1 + WORDMARK.len() + 1 + 1 + 1 + 1;
+        let top_pad = area_h.saturating_sub(logo_h) / 2;
+        let left_pad = area_w.saturating_sub(LOGO_W) / 2;
+
+        let cross_style  = Style::default().fg(Color::Yellow);
+        let word_style   = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let dim_style    = Style::default().fg(Color::DarkGray);
+
+        let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+
+        for s in CROSS {
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(left_pad), *s),
+                cross_style,
+            )));
+        }
+        lines.push(Line::from(""));
+        for s in WORDMARK {
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(left_pad), *s),
+                word_style,
+            )));
+        }
+        lines.push(Line::from(""));
+        let tag_pad = area_w.saturating_sub(TAGLINE.len()) / 2;
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", " ".repeat(tag_pad), TAGLINE),
+            dim_style,
+        )));
+        lines.push(Line::from(""));
+        let hint_pad = area_w.saturating_sub(HINTS.len()) / 2;
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", " ".repeat(hint_pad), HINTS),
+            dim_style,
+        )));
+
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     /// Render a pre-highlighted line (from syntect) with gutter marker, optional selection

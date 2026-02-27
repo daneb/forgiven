@@ -321,13 +321,6 @@ impl Editor {
         }
     }
 
-    /// Create a scratch buffer (unnamed, not tied to a file)
-    pub fn open_scratch(&mut self) {
-        let buffer = Buffer::new("*scratch*");
-        self.buffers.push(buffer);
-        self.current_buffer_idx = self.buffers.len() - 1;
-    }
-
     /// Get the currently active buffer
     pub fn current_buffer(&self) -> Option<&Buffer> {
         self.buffers.get(self.current_buffer_idx)
