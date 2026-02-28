@@ -227,22 +227,31 @@ impl Renderer {
                         CodeBlockKind::Fenced(lang) => lang.to_string(),
                         CodeBlockKind::Indented     => String::new(),
                     };
-                    let header = if self.code_lang.is_empty() {
-                        "  ╭─────────────────────────".to_string()
+                    let (header, color) = if self.code_lang == "mermaid" {
+                        ("  ╭─ mermaid diagram ─".to_string(), Color::Yellow)
+                    } else if self.code_lang.is_empty() {
+                        ("  ╭─────────────────────────".to_string(), Color::DarkGray)
                     } else {
-                        format!("  ╭─ {} ", self.code_lang)
+                        (format!("  ╭─ {} ", self.code_lang), Color::DarkGray)
                     };
                     self.output.push(Line::from(Span::styled(
                         header,
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(color),
                     )));
                 }
                 Event::End(TagEnd::CodeBlock) => {
+                    let is_mermaid = self.code_lang == "mermaid";
                     self.in_code_block = false;
                     self.output.push(Line::from(Span::styled(
                         "  ╰─────────────────────────".to_string(),
                         Style::default().fg(Color::DarkGray),
                     )));
+                    if is_mermaid {
+                        self.output.push(Line::from(Span::styled(
+                            "  diagram · open in a browser to render".to_string(),
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        )));
+                    }
                     self.output.push(Line::from(""));
                 }
 
@@ -303,10 +312,15 @@ impl Renderer {
                     if self.in_code_block {
                         // Each newline-separated line of the code block becomes
                         // a single output line with a │ gutter marker.
+                        let code_color = if self.code_lang == "mermaid" {
+                            Color::DarkGray
+                        } else {
+                            Color::Green
+                        };
                         for line in text.lines() {
                             self.output.push(Line::from(Span::styled(
                                 format!("  │ {}", line),
-                                Style::default().fg(Color::Green),
+                                Style::default().fg(code_color),
                             )));
                         }
                     } else {

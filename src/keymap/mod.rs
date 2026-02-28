@@ -94,6 +94,7 @@ pub enum Action {
     GitOpen,    // SPC g g — open lazygit
     // Markdown preview
     MarkdownPreviewToggle,  // SPC m p — toggle markdown preview for .md buffers
+    MarkdownOpenBrowser,    // SPC m b — render current buffer to HTML and open in browser
     // Project-wide text search
     SearchOpen,             // SPC s g — open the project search overlay
     // In-file search
@@ -217,6 +218,7 @@ impl KeyHandler {
         // SPC m - Markdown
         let mut md_node = KeyNode::new("markdown");
         md_node.children.insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
+        md_node.children.insert('b', KeyNode::leaf("open in browser", Action::MarkdownOpenBrowser));
         tree.insert('m', md_node);
 
         // SPC s - Search

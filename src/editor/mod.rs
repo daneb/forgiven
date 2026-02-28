@@ -1129,6 +1129,9 @@ impl Editor {
                     self.set_status("Markdown preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string());
                 }
             }
+            Action::MarkdownOpenBrowser => {
+                self.open_markdown_in_browser();
+            }
             // ── Project-wide text search ──────────────────────────────────────
             Action::SearchOpen => {
                 self.search_state = SearchState::new();
@@ -2813,6 +2816,96 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    /// Render the current buffer as HTML and open it in the system browser.
+    ///
+    /// Writes a self-contained HTML file to the OS temp directory and spawns
+    /// the platform opener (`open` on macOS, `xdg-open` on Linux).  The opener
+    /// runs detached — the TUI stays alive and no suspend/restore is needed.
+    fn open_markdown_in_browser(&mut self) {
+        let content = match self.current_buffer() {
+            Some(buf) => buf.lines().join("\n"),
+            None => {
+                self.set_status("No buffer open".to_string());
+                return;
+            }
+        };
+
+        let file_stem = self
+            .current_buffer()
+            .and_then(|b| b.file_path.as_ref())
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("preview")
+            .to_string();
+
+        // ── Render markdown → HTML body ───────────────────────────────────────
+        let parser = pulldown_cmark::Parser::new_ext(&content, pulldown_cmark::Options::all());
+        let mut body = String::new();
+        pulldown_cmark::html::push_html(&mut body, parser);
+
+        // ── Wrap in a minimal, readable HTML page ─────────────────────────────
+        // The script converts pulldown-cmark's  <pre><code class="language-mermaid">
+        // output into <div class="mermaid"> elements, then loads Mermaid.js to
+        // render them.
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {{ max-width: 800px; margin: 40px auto; padding: 0 20px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          line-height: 1.6; color: #222; }}
+  pre  {{ background: #f5f5f5; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+  code {{ font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }}
+  pre code {{ background: none; padding: 0; }}
+  blockquote {{ border-left: 4px solid #ddd; margin: 0; padding-left: 1em; color: #555; }}
+  img  {{ max-width: 100%; }}
+  h1,h2 {{ border-bottom: 1px solid #eee; padding-bottom: 0.3em; }}
+</style>
+</head>
+<body>
+{body}
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  document.querySelectorAll('pre > code.language-mermaid').forEach(function(code) {{
+    var div = document.createElement('div');
+    div.className = 'mermaid';
+    div.textContent = code.textContent;
+    code.parentNode.replaceWith(div);
+  }});
+  mermaid.initialize({{ startOnLoad: false }});
+  mermaid.run();
+</script>
+</body>
+</html>"#,
+            title = file_stem,
+            body = body,
+        );
+
+        // ── Write temp file ───────────────────────────────────────────────────
+        let path = std::env::temp_dir().join(format!("forgiven_{file_stem}.html"));
+        if let Err(e) = std::fs::write(&path, &html) {
+            self.set_status(format!("Failed to write temp file: {e}"));
+            return;
+        }
+
+        // ── Spawn platform opener (detached) ──────────────────────────────────
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(target_os = "linux")]
+        let opener = "xdg-open";
+        #[cfg(target_os = "windows")]
+        let opener = "explorer";
+
+        match std::process::Command::new(opener).arg(&path).spawn() {
+            Ok(_) => self.set_status(format!("Opened in browser: {}", path.display())),
+            Err(e) => self.set_status(format!("Failed to open browser: {e}")),
+        }
     }
 }
 
