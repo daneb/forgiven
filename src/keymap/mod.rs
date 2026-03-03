@@ -17,6 +17,9 @@ pub enum Mode {
     MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
     Search,           // Project-wide ripgrep search overlay (SPC s g)
     InFileSearch,     // In-file search mode (/)
+    RenameFile,       // Rename popup: user edits a filename from the explorer
+    DeleteFile,       // Confirmation popup: y=delete, n/Esc=cancel
+    ApplyDiff,        // Full-screen diff preview before applying agent code block
 }
 
 /// An editor action to be executed

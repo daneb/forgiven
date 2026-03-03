@@ -175,6 +175,17 @@ impl Buffer {
         Ok(())
     }
 
+    /// Replace entire buffer content in-memory (used by apply-diff).
+    /// Clamps cursor, increments lsp_version, marks modified.
+    pub fn replace_all_lines(&mut self, new_lines: Vec<String>) {
+        self.lines = if new_lines.is_empty() { vec![String::new()] } else { new_lines };
+        self.is_modified = true;
+        self.lsp_version += 1;
+        self.cursor.row = self.cursor.row.min(self.lines.len().saturating_sub(1));
+        let row = self.cursor.row;
+        self.cursor.col = self.cursor.col.min(self.lines[row].len());
+    }
+
     /// Save the buffer back to its associated file
     pub fn save(&mut self) -> anyhow::Result<()> {
         let path = self

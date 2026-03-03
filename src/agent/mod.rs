@@ -51,6 +51,65 @@ impl Role {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Think-block splitting
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A segment of an assistant reply split on `<think>` / `</think>` tags.
+#[derive(Debug)]
+pub enum ContentSegment {
+    /// Chain-of-thought reasoning — render as plain dim text, no markdown.
+    Thinking(String),
+    /// Normal reply content — render as formatted markdown.
+    Normal(String),
+}
+
+/// Split `content` on `<think>` / `</think>` into alternating [`ContentSegment`]s.
+///
+/// An unclosed `<think>` (common mid-stream before `</think>` has arrived)
+/// produces a trailing `Thinking` segment from the open tag to end-of-string.
+pub fn split_thinking(content: &str) -> Vec<ContentSegment> {
+    let mut segments = Vec::new();
+    let mut remaining = content;
+
+    while !remaining.is_empty() {
+        match remaining.find("<think>") {
+            Some(start) => {
+                let before = &remaining[..start];
+                if !before.trim().is_empty() {
+                    segments.push(ContentSegment::Normal(before.to_owned()));
+                }
+                let after_open = &remaining[start + 7..]; // skip "<think>"
+                match after_open.find("</think>") {
+                    Some(end) => {
+                        let thinking = after_open[..end].trim().to_owned();
+                        if !thinking.is_empty() {
+                            segments.push(ContentSegment::Thinking(thinking));
+                        }
+                        remaining = &after_open[end + 8..]; // skip "</think>"
+                    }
+                    None => {
+                        // Unclosed tag — rest is in-progress thinking (streaming).
+                        let thinking = after_open.trim().to_owned();
+                        if !thinking.is_empty() {
+                            segments.push(ContentSegment::Thinking(thinking));
+                        }
+                        break;
+                    }
+                }
+            }
+            None => {
+                if !remaining.trim().is_empty() {
+                    segments.push(ContentSegment::Normal(remaining.to_owned()));
+                }
+                break;
+            }
+        }
+    }
+
+    segments
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Agent panel state
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -225,6 +284,7 @@ impl AgentPanel {
     pub fn blur(&mut self)  { self.focused = false; }
     pub fn input_char(&mut self, ch: char) { self.input.push(ch); }
     pub fn input_backspace(&mut self) { self.input.pop(); }
+    pub fn input_newline(&mut self) { self.input.push('\n'); }
 
     /// Submit input, launching the agentic tool-calling loop in the background.
     pub async fn submit(
@@ -534,6 +594,65 @@ Available tools:\n\
     }
 
     pub fn has_code_to_apply(&self) -> bool { self.get_code_to_apply().is_some() }
+
+    /// Returns (path_hint, code_content) for the first code block.
+    /// path_hint resolution order:
+    ///   1. Fence info string tokens containing '/' or '\' (not http)
+    ///   2. Backtick-quoted tokens in up to 3 prose lines before the fence
+    pub fn extract_first_code_block_with_path(
+        text: &str,
+    ) -> Option<(Option<std::path::PathBuf>, String)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut in_block = false;
+        let mut current: Vec<&str> = Vec::new();
+        let mut path_hint: Option<std::path::PathBuf> = None;
+
+        for (idx, &line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                if in_block {
+                    while current.last().map(|l: &&str| l.trim().is_empty()).unwrap_or(false) {
+                        current.pop();
+                    }
+                    if !current.is_empty() {
+                        return Some((path_hint, current.join("\n")));
+                    }
+                    return None;
+                } else {
+                    in_block = true;
+                    let info = trimmed.trim_start_matches('`').trim();
+                    // Check fence info string for a path-like token
+                    path_hint = info.split_whitespace()
+                        .find(|t| (t.contains('/') || t.contains('\\')) && !t.starts_with("http"))
+                        .map(std::path::PathBuf::from);
+                    // Fall back: scan up to 3 preceding prose lines for `backtick/path`
+                    if path_hint.is_none() {
+                        'outer: for &prev in lines[..idx].iter().rev().take(3) {
+                            let parts: Vec<&str> = prev.split('`').collect();
+                            for chunk in parts.iter().skip(1).step_by(2) {
+                                if (chunk.contains('/') || chunk.contains('\\'))
+                                    && !chunk.starts_with("http")
+                                    && !chunk.is_empty()
+                                {
+                                    path_hint = Some(std::path::PathBuf::from(chunk));
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if in_block {
+                current.push(line);
+            }
+        }
+        None
+    }
+
+    pub fn get_apply_candidate(&self) -> Option<(Option<std::path::PathBuf>, String)> {
+        self.messages.iter().rev()
+            .find(|m| m.role == Role::Assistant)
+            .and_then(|m| Self::extract_first_code_block_with_path(&m.content))
+    }
 
     /// Return the full text of the most recent assistant message, if any.
     pub fn last_assistant_reply(&self) -> Option<String> {

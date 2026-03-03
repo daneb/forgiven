@@ -40,6 +40,11 @@ that motivated it, what was decided, and the consequences.
 | [0030](0030-in-file-search-and-replace.md) | In-File Search and Replace | Accepted |
 | [0031](0031-agent-task-creation.md) | Agent-Driven Plan Strip | Accepted |
 | [0032](0032-recent-files-in-file-picker.md) | Recent Files in the Find File Picker | Accepted |
+| [0033](0033-mermaid-and-markdown-browser-export.md) | Mermaid Diagrams and Markdown Browser Export | Accepted |
+| [0034](0034-explorer-file-deletion.md) | Explorer File Deletion | Accepted |
+| [0035](0035-agent-apply-diff.md) | Agent Apply-Diff Overlay | Accepted |
+| [0036](0036-multi-line-agent-input.md) | Multi-line Agent Panel Input | Accepted |
+| [0037](0037-think-block-rendering.md) | Think-Block Rendering in the Agent Panel | Accepted |
 
 ## What is an ADR?
 
@@ -108,22 +113,39 @@ The format used here follows the lightweight template:
 
 ```
 Normal ──── i/a/I/A/o/O ──► Insert
-       ──── v           ──► Visual      (charwise, extend with h/j/k/l/w/b/0/$)
-       ──── V           ──► VisualLine  (linewise, extend with j/k/G/g)
-       ──── :           ──► Command  (:e path, :w, :q, :wq, :q!, copilot status/auth)
+       ──── v           ──► Visual       (charwise, extend with h/j/k/l/w/b/0/$)
+       ──── V           ──► VisualLine   (linewise, extend with j/k/G/g)
+       ──── :           ──► Command      (:e path, :w, :q, :wq, :q!, copilot status/auth)
+       ──── /           ──► InFileSearch (type pattern, Enter=search, Esc=cancel)
        ──── SPC b b     ──► PickBuffer
-       ──── SPC f f     ──► PickFile  (fuzzy search)
-       ──── SPC f n     ──► Command   (pre-filled "e " for new file)
+       ──── SPC f f     ──► PickFile     (fuzzy search)
+       ──── SPC f n     ──► Command      (pre-filled "e " for new file)
        ──── SPC a a/f   ──► Agent
        ──── SPC e e/f   ──► Explorer
+       ──── SPC m p     ──► MarkdownPreview
 
 Explorer ── Esc/Tab     ──► Normal
          ── Enter/l     ──► (opens file → Normal) or (toggles dir)
-         ── n           ──► Command  (pre-filled "e <dir>/" for new file)
-         ── r           ──► reload tree from disk
+         ── n           ──► Command      (pre-filled "e <dir>/" for new file)
+         ── r           ──► RenameFile   (inline popup)
+         ── d           ──► DeleteFile   (confirmation popup)
+         ── h           ──► (toggle hidden files, stays in Explorer)
+         ── R           ──► (reload tree from disk, stays in Explorer)
+
+RenameFile ── Enter     ──► Explorer  (rename confirmed)
+           ── Esc       ──► Explorer  (cancelled)
+
+DeleteFile ── y/Y       ──► Explorer  (deleted)
+           ── n/N/Esc   ──► Explorer  (cancelled)
 
 Agent    ── Esc/Tab     ──► Normal
          ── Ctrl+T      ──► cycle model (loads /models list on first press)
+         ── a (empty)   ──► ApplyDiff  (when a code block is present)
+
+ApplyDiff ── y/Enter    ──► Normal     (change applied to file or buffer)
+          ── n/Esc      ──► Agent      (discarded)
+          ── j/k        ──► (scroll down/up one line)
+          ── Ctrl+D/U   ──► (scroll down/up half-page)
 
 Preview  ── Esc/q       ──► Normal
          ── j/k         ──► scroll down/up one line

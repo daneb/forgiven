@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
-use arboard;
 use crate::agent::AgentPanel;
 use crate::buffer::Buffer;
 use crate::config::Config;
@@ -36,6 +35,14 @@ enum ClipboardType {
     Linewise,
     /// Produced by `yw`/`y$`/visual-y etc — paste inserts inline at cursor.
     Charwise,
+}
+
+/// A line in an LCS-based unified diff.
+#[derive(Debug, Clone)]
+pub enum DiffLine {
+    Context(String),
+    Added(String),
+    Removed(String),
 }
 
 /// Cached syntax-highlight spans for the visible viewport.
@@ -155,6 +162,22 @@ pub struct Editor {
     /// Text typed so far while in Mode::InFileSearch (the `/` prompt).
     in_file_search_buffer: String,
 
+    // ── Explorer rename popup ─────────────────────────────────────────────────
+    /// Filename being edited while in Mode::RenameFile.
+    rename_buffer: String,
+    /// Absolute path of the entry being renamed.
+    rename_source: Option<std::path::PathBuf>,
+
+    // ── Explorer delete confirmation popup ────────────────────────────────────
+    /// Path of the entry pending deletion (Mode::DeleteFile).
+    delete_confirm_path: Option<std::path::PathBuf>,
+
+    // ── Apply-diff overlay (Mode::ApplyDiff) ──────────────────────────────────
+    apply_diff_path: Option<std::path::PathBuf>,
+    apply_diff_content: Option<String>,
+    apply_diff_lines: Vec<DiffLine>,
+    apply_diff_scroll: usize,
+
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
     config: Config,
@@ -205,6 +228,13 @@ impl Editor {
             search_rx: None,
             last_search_instant: None,
             in_file_search_buffer: String::new(),
+            rename_buffer: String::new(),
+            rename_source: None,
+            delete_confirm_path: None,
+            apply_diff_path: None,
+            apply_diff_content: None,
+            apply_diff_lines: Vec::new(),
+            apply_diff_scroll: 0,
             config,
         })
     }
@@ -733,6 +763,35 @@ impl Editor {
         let hl_ref = highlighted_lines.as_deref();
         let preview_ref = preview_lines_owned.as_deref();
         let search_ref = if mode == Mode::Search { Some(&self.search_state) } else { None };
+        let rename_buf_owned = if mode == Mode::RenameFile {
+            Some(self.rename_buffer.clone())
+        } else {
+            None
+        };
+        let rename_buf = rename_buf_owned.as_deref();
+
+        let delete_path_owned = if mode == Mode::DeleteFile {
+            self.delete_confirm_path.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        let delete_name = delete_path_owned.as_deref();
+
+        let apply_diff_target_owned: Option<String> = if mode == Mode::ApplyDiff {
+            Some(self.apply_diff_path.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unsaved buffer)".to_string()))
+        } else {
+            None
+        };
+        let apply_diff_view = apply_diff_target_owned.as_ref().map(|t| crate::ui::ApplyDiffView {
+            target: t.as_str(),
+            lines: &self.apply_diff_lines,
+            scroll: self.apply_diff_scroll,
+        });
 
         self.terminal.draw(|frame| {
             UI::render(
@@ -752,10 +811,61 @@ impl Editor {
                 explorer_ref,
                 preview_ref,
                 search_ref,
+                rename_buf,
+                delete_name,
+                apply_diff_view.as_ref(),
             );
         })?;
 
         Ok(())
+    }
+
+    /// Cycle focus left-to-right through visible panels: Explorer → Editor → Agent → (wrap).
+    /// Panels that are not currently visible are skipped.
+    fn cycle_panel_focus(&mut self) {
+        let current: u8 = match self.mode {
+            Mode::Explorer => 0,
+            Mode::Agent => 2,
+            _ => 1,
+        };
+
+        // Build ordered list of visible panel indices (explorer=0, editor=1, agent=2).
+        let mut visible: Vec<u8> = vec![1]; // editor is always present
+        if self.file_explorer.visible {
+            visible.insert(0, 0);
+        }
+        if self.agent_panel.visible {
+            visible.push(2);
+        }
+
+        if visible.len() < 2 {
+            return;
+        }
+
+        let pos = visible.iter().position(|&p| p == current).unwrap_or(0);
+        let next = visible[(pos + 1) % visible.len()];
+
+        // Blur the panel losing focus.
+        match current {
+            0 => self.file_explorer.blur(),
+            2 => self.agent_panel.blur(),
+            _ => {}
+        }
+
+        // Focus the panel gaining focus.
+        match next {
+            0 => {
+                self.file_explorer.focus();
+                self.mode = Mode::Explorer;
+            }
+            2 => {
+                self.agent_panel.focus();
+                self.mode = Mode::Agent;
+            }
+            _ => {
+                self.mode = Mode::Normal;
+            }
+        }
     }
 
     /// Handle a key press
@@ -772,6 +882,15 @@ impl Editor {
             self.status_message = None;
         }
 
+        // Global: Ctrl+W cycles visible panels (Explorer → Editor → Agent → wrap).
+        // Skip in modes that capture text input or show modal overlays.
+        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if !matches!(self.mode, Mode::Command | Mode::PickBuffer | Mode::PickFile | Mode::InFileSearch | Mode::RenameFile | Mode::DeleteFile | Mode::ApplyDiff) {
+                self.cycle_panel_focus();
+                return Ok(());
+            }
+        }
+
         match self.mode {
             Mode::Normal => self.handle_normal_mode(key)?,
             Mode::Insert => self.handle_insert_mode(key)?,
@@ -785,6 +904,9 @@ impl Editor {
             Mode::MarkdownPreview => self.handle_preview_mode(key)?,
             Mode::Search => self.handle_search_mode(key)?,
             Mode::InFileSearch => self.handle_in_file_search_mode(key)?,
+            Mode::RenameFile => self.handle_rename_mode(key)?,
+            Mode::DeleteFile => self.handle_delete_mode(key)?,
+            Mode::ApplyDiff => self.handle_apply_diff_mode(key)?,
         }
 
         Ok(())
@@ -1607,6 +1729,10 @@ impl Editor {
                 self.agent_panel.blur();
                 self.mode = Mode::Normal;
             }
+            // Alt+Enter — insert a newline into the multi-line input.
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agent_panel.input_newline();
+            }
             // Enter — submit the input.
             KeyCode::Enter => {
                 // Snapshot current buffer content as context, including its path
@@ -1727,20 +1853,35 @@ impl Editor {
                     return Ok(());
                 }
 
-                // 'a' with empty input = apply code block from latest reply.
+                // 'a' with empty input = open apply-diff overlay.
                 if ch == 'a' && self.agent_panel.input.is_empty() {
-                    if let Some(code) = self.agent_panel.get_code_to_apply() {
-                        let line_count = code.lines().count();
-                        if let Some(buf) = self.current_buffer_mut() {
-                            buf.insert_text_block(&code);
-                        }
-                        // Return focus to the editor so the user can see the applied code.
-                        self.agent_panel.blur();
-                        self.mode = Mode::Normal;
-                        self.set_status(format!(
-                            "Applied {} lines from Copilot (Tab or SPC-a-a to return)",
-                            line_count
-                        ));
+                    if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate() {
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        let (resolved_path, current_content) = if let Some(hint) = path_hint {
+                            let abs = cwd.join(&hint);
+                            let content = self.buffers.iter()
+                                .find(|b| b.file_path.as_ref().map(|fp|
+                                    fp.canonicalize().unwrap_or_else(|_| fp.clone()) ==
+                                    abs.canonicalize().unwrap_or_else(|_| abs.clone())
+                                ).unwrap_or(false))
+                                .map(|b| b.lines().join("\n"))
+                                .or_else(|| if abs.exists() { std::fs::read_to_string(&abs).ok() } else { None })
+                                .unwrap_or_default();
+                            (Some(abs), content)
+                        } else {
+                            let (path, content) = self.current_buffer()
+                                .map(|b| (b.file_path.clone(), b.lines().join("\n")))
+                                .unwrap_or_default();
+                            (path, content)
+                        };
+                        let old: Vec<String> = current_content.lines().map(str::to_string).collect();
+                        let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
+                        self.apply_diff_lines = lcs_diff(&old, &new);
+                        self.apply_diff_path = resolved_path;
+                        self.apply_diff_content = Some(proposed_code);
+                        self.apply_diff_scroll = 0;
+                        self.mode = Mode::ApplyDiff;
                     } else {
                         self.set_status("No code block in latest reply to apply".to_string());
                     }
@@ -1757,18 +1898,13 @@ impl Editor {
 
     /// Handle a bracketed-paste event.
     ///
-    /// In Agent mode the pasted text is appended to the input buffer as a single
-    /// line — newlines are collapsed to spaces so a multi-line paste doesn't
-    /// accidentally trigger multiple submits.  The user still presses Enter to send.
+    /// In Agent mode newlines are preserved so multi-line pastes work correctly.
+    /// The user still presses Enter to send.
     fn handle_paste(&mut self, text: String) -> Result<()> {
         if self.mode == Mode::Agent {
-            // Collapse newlines/carriage-returns to a single space so the whole
-            // paste lands on one line without triggering submission.
-            let single_line = text
-                .replace("\r\n", " ")
-                .replace('\r', " ")
-                .replace('\n', " ");
-            for ch in single_line.chars() {
+            // Preserve line breaks so multi-line pastes work in the agent input.
+            let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+            for ch in normalised.chars() {
                 self.agent_panel.input_char(ch);
             }
         } else if self.mode == Mode::Insert {
@@ -1847,12 +1983,236 @@ impl Editor {
                 self.command_buffer = prefill;
                 self.mode = Mode::Command;
             }
-            // r — reload / refresh the file tree from disk.
+            // r — rename selected entry (falls back to reload when nothing is selected).
+            // R — reload / refresh the file tree from disk.
             KeyCode::Char('r') => {
+                if let Some(path) = self.file_explorer.selected_path() {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.rename_source = Some(path);
+                    self.rename_buffer = name;
+                    self.file_explorer.blur();
+                    self.mode = Mode::RenameFile;
+                } else {
+                    self.file_explorer.reload();
+                    self.set_status("Explorer refreshed".to_string());
+                }
+            }
+            KeyCode::Char('R') => {
                 self.file_explorer.reload();
                 self.set_status("Explorer refreshed".to_string());
             }
+            // d — delete selected entry (with confirmation popup).
+            KeyCode::Char('d') => {
+                if let Some(path) = self.file_explorer.selected_path() {
+                    self.delete_confirm_path = Some(path);
+                    self.file_explorer.blur();
+                    self.mode = Mode::DeleteFile;
+                }
+            }
             _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Rename popup mode key handling ───────────────────────────────────────
+
+    fn handle_rename_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.rename_source = None;
+                self.rename_buffer.clear();
+                self.file_explorer.focus();
+                self.mode = Mode::Explorer;
+            }
+            KeyCode::Enter => {
+                self.do_rename()?;
+            }
+            KeyCode::Backspace => {
+                self.rename_buffer.pop();
+            }
+            KeyCode::Char(c) if c != '/' && c != '\\' => {
+                self.rename_buffer.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn do_rename(&mut self) -> Result<()> {
+        let new_name = self.rename_buffer.trim().to_string();
+        if new_name.is_empty() {
+            self.set_status("Rename cancelled: empty name".into());
+            self.rename_source = None;
+            self.rename_buffer.clear();
+            self.file_explorer.focus();
+            self.mode = Mode::Explorer;
+            return Ok(());
+        }
+
+        if let Some(src) = self.rename_source.take() {
+            let dst = src.parent()
+                .map(|p| p.join(&new_name))
+                .ok_or_else(|| anyhow::anyhow!("No parent directory"))?;
+
+            if dst.exists() {
+                self.set_status(format!("Rename failed: '{}' already exists", new_name));
+                self.rename_source = Some(src); // keep popup open so user can retry
+                return Ok(());
+            }
+
+            std::fs::rename(&src, &dst)?;
+
+            // Update any open buffer whose path matches the old path
+            for buf in &mut self.buffers {
+                if buf.file_path.as_deref() == Some(&src) {
+                    buf.file_path = Some(dst.clone());
+                }
+            }
+
+            // Refresh the explorer tree
+            self.file_explorer.reload();
+
+            let old_name = src.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            self.rename_buffer.clear();
+            self.file_explorer.focus();
+            self.mode = Mode::Explorer;
+            self.set_status(format!("Renamed '{}' → '{}'", old_name, new_name));
+        }
+        Ok(())
+    }
+
+    // ── Delete confirmation popup mode key handling ───────────────────────────
+
+    fn handle_delete_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.do_delete()?;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.delete_confirm_path = None;
+                self.file_explorer.focus();
+                self.mode = Mode::Explorer;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn do_delete(&mut self) -> Result<()> {
+        if let Some(path) = self.delete_confirm_path.take() {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+
+            // Close any open buffers under the deleted path (handles dirs too)
+            self.buffers.retain(|buf| {
+                buf.file_path.as_ref().map_or(true, |p| !p.starts_with(&path))
+            });
+            if self.current_buffer_idx >= self.buffers.len() {
+                self.current_buffer_idx = self.buffers.len().saturating_sub(1);
+            }
+
+            self.file_explorer.reload();
+
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            self.file_explorer.focus();
+            self.mode = Mode::Explorer;
+            self.set_status(format!("Deleted '{}'", name));
+        }
+        Ok(())
+    }
+
+    // ── Apply-diff mode ───────────────────────────────────────────────────────
+
+    fn clear_apply_diff(&mut self) {
+        self.apply_diff_path = None;
+        self.apply_diff_content = None;
+        self.apply_diff_lines.clear();
+        self.apply_diff_scroll = 0;
+    }
+
+    fn handle_apply_diff_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => self.do_apply_diff()?,
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.clear_apply_diff();
+                self.agent_panel.focus();
+                self.mode = Mode::Agent;
+                self.set_status("Apply discarded".to_string());
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(20);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(20);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn do_apply_diff(&mut self) -> Result<()> {
+        let content = match self.apply_diff_content.take() {
+            Some(c) => c,
+            None => {
+                self.clear_apply_diff();
+                self.mode = Mode::Normal;
+                return Ok(());
+            }
+        };
+        let path = self.apply_diff_path.take();
+        self.apply_diff_lines.clear();
+        self.apply_diff_scroll = 0;
+        match &path {
+            Some(p) => {
+                if let Some(parent) = p.parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                let to_write = if content.ends_with('\n') {
+                    content.clone()
+                } else {
+                    format!("{content}\n")
+                };
+                std::fs::write(p, &to_write)?;
+                let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+                for buf in &mut self.buffers {
+                    let matches = buf.file_path.as_ref()
+                        .map(|fp| fp.canonicalize().unwrap_or_else(|_| fp.clone()) == canon)
+                        .unwrap_or(false);
+                    if matches {
+                        let _ = buf.reload_from_disk();
+                    }
+                }
+                self.mode = Mode::Normal;
+                self.set_status(format!("Applied to {}", p.display()));
+            }
+            None => {
+                let new_lines: Vec<String> = content.lines().map(str::to_string).collect();
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.replace_all_lines(new_lines);
+                }
+                self.mode = Mode::Normal;
+                self.set_status("Applied to unsaved buffer".to_string());
+            }
         }
         Ok(())
     }
@@ -2907,6 +3267,47 @@ impl Editor {
             Err(e) => self.set_status(format!("Failed to open browser: {e}")),
         }
     }
+}
+
+/// Compute a line-level LCS diff between two slices of strings.
+/// Falls back to a simple all-removed / all-added output for very large inputs.
+fn lcs_diff(old: &[String], new: &[String]) -> Vec<DiffLine> {
+    const CAP: usize = 2000;
+    if old.len() > CAP || new.len() > CAP {
+        let mut r = Vec::with_capacity(old.len() + new.len());
+        for l in old { r.push(DiffLine::Removed(l.clone())); }
+        for l in new { r.push(DiffLine::Added(l.clone())); }
+        return r;
+    }
+    let (m, n) = (old.len(), new.len());
+    let mut dp = vec![0u32; (m + 1) * (n + 1)];
+    let idx = |i: usize, j: usize| i * (n + 1) + j;
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[idx(i, j)] = if old[i - 1] == new[j - 1] {
+                dp[idx(i - 1, j - 1)] + 1
+            } else {
+                dp[idx(i - 1, j)].max(dp[idx(i, j - 1)])
+            };
+        }
+    }
+    let mut result = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && old[i - 1] == new[j - 1] {
+            result.push(DiffLine::Context(old[i - 1].clone()));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[idx(i, j - 1)] >= dp[idx(i - 1, j)]) {
+            result.push(DiffLine::Added(new[j - 1].clone()));
+            j -= 1;
+        } else {
+            result.push(DiffLine::Removed(old[i - 1].clone()));
+            i -= 1;
+        }
+    }
+    result.reverse();
+    result
 }
 
 impl Drop for Editor {

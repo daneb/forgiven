@@ -32,6 +32,10 @@ by Emacs / Spacemacs key philosophy and Vim modal editing.
 - **Visual / Visual-Line** — character and line-wise selection with yank/delete
 - **Command** — colon commands (`:w`, `:q`, `:wq`, `:q!`, `:e <file>`, `:bn`, `:bp`)
 - **PickBuffer / PickFile** — fuzzy-style buffer and file pickers
+- **Explorer** — file tree navigation with create / rename / delete
+- **RenameFile** — inline name editor with confirmation (`Enter`) or cancel (`Esc`)
+- **DeleteFile** — delete confirmation popup (`y` = confirm, `n`/`Esc` = cancel)
+- **InFileSearch** — `/` search with `n`/`N` next/prev match navigation
 
 ### Navigation & editing
 - `h/j/k/l`, arrows, `w/b`, `0/^/$`, `gg/G`
@@ -50,9 +54,9 @@ Which-key popup shows available bindings after a 500 ms pause.
 | `SPC q` | `q` | Quit |
 | `SPC l` | `h/d/r/f/s` | LSP hover / definition / rename / references / symbols |
 | `SPC a` | `a/f` | Toggle / focus agent panel |
-| `SPC e` | `e/f` | Toggle / focus file explorer |
+| `SPC e` | `e/f/h` | Toggle / focus file explorer / toggle hidden files |
 | `SPC g` | `g` | Open lazygit |
-| `SPC m` | `p` | Markdown preview toggle |
+| `SPC m` | `p/b` | Markdown preview toggle / open in browser |
 | `SPC s` | `g` | Search text in project (ripgrep) |
 
 ### Language Server Protocol
@@ -62,8 +66,10 @@ Which-key popup shows available bindings after a 500 ms pause.
 
 ### GitHub Copilot integration
 - Ghost-text inline completions (streamed, Tab to accept)
-- **Agent chat panel** (`SPC a a`) — streaming SSE responses, code-apply, scrollable
-  history with full CommonMark rendering
+- **Agent chat panel** (`SPC a a`) — streaming SSE responses, scrollable history with
+  full CommonMark rendering
+- **Diff+apply** (`a` in Agent mode) — full-screen LCS diff overlay targeting the correct
+  file; `y`/`Enter` to apply, `n`/`Esc` to discard
 
 ### Syntax highlighting
 - `syntect` with Base16 Ocean Dark theme; highlights the visible viewport only
@@ -71,8 +77,14 @@ Which-key popup shows available bindings after a 500 ms pause.
 
 ### File explorer
 - Left-sidebar tree (`SPC e e`); lazy directory loading
-- `Enter` expands dirs / opens files; `Esc/Tab` blurs back to editor
-- Hides `target/`, `node_modules/`, `dist/`, `build/` and dotfiles
+- `j`/`k` or arrows navigate; `Enter`/`l` expands a dir or opens a file
+- `n` — new file (pre-fills Command mode with the target directory path)
+- `r` — rename selected entry (inline popup, `Enter` confirms, `Esc` cancels)
+- `d` — delete selected entry (confirmation popup, `y` confirms, `n`/`Esc` cancels)
+- `h` — toggle hidden files (`SPC e h` from Normal mode)
+- `R` — reload/refresh the tree from disk
+- `Esc`/`Tab` — blur explorer and return to editor
+- Hides `target/`, `node_modules/`, `dist/`, `build/` and dotfiles by default
 
 ### Project-wide search (`SPC s g`)
 
@@ -83,11 +95,18 @@ Which-key popup shows available bindings after a 500 ms pause.
 - `↑`/`↓` or `j`/`k` navigate the list; `Enter` opens the file at the matched line
 - `Esc` closes the panel and returns to Normal mode
 
-### Markdown (`SPC m p`)
-- Toggle a read-only rendered preview for any buffer
+### In-file search (`/`)
+- `/` enters search mode; type a pattern and press `Enter` to highlight all matches
+- `n` / `N` jump to next / previous match in Normal mode
+- `Esc` cancels the search prompt without running
+
+### Markdown (`SPC m p` / `SPC m b`)
+- `SPC m p` — toggle a read-only rendered preview for any buffer
 - Full CommonMark: headings, bold/italic, inline code, fenced code blocks, lists,
-  blockquotes, horizontal rules
-- Available for any buffer; status bar shows `PREVIEW` in Magenta
+  blockquotes, horizontal rules; Mermaid blocks shown with a hint to open in browser
+- `SPC m b` — render the current buffer to HTML and open in the system browser;
+  Mermaid diagrams are rendered via Mermaid.js (CDN)
+- Status bar shows `PREVIEW` in Magenta when preview is active
 
 ### Other
 - lazygit full-screen overlay (`SPC g g`)
@@ -143,6 +162,8 @@ cargo build --release
 | `p/P` | Paste after / before cursor |
 | `u/Ctrl+R` | Undo / redo |
 | `v/V` | Visual / Visual-line selection |
+| `/` | In-file search (enter `InFileSearch` mode) |
+| `n/N` | Next / previous search match |
 | `:` | Command mode |
 | `SPC` | Leader key (see table above) |
 
@@ -163,6 +184,53 @@ cargo build --release
 | `y` | Yank selection |
 | `d/x` | Delete selection |
 | `Esc` | Cancel |
+
+### File explorer (`Mode::Explorer`)
+
+| Key | Action |
+|-----|--------|
+| `j/k` or `↓/↑` | Move cursor down / up |
+| `Enter` or `l` | Expand directory / open file (returns to Normal mode) |
+| `n` | New file — pre-fills Command mode with `e <dir>/` |
+| `r` | Rename selected entry (opens rename popup) |
+| `d` | Delete selected entry (opens confirmation popup) |
+| `h` | Toggle hidden files visibility |
+| `R` | Reload / refresh tree from disk |
+| `Esc` or `Tab` | Blur explorer, return to editor |
+
+### Rename popup (`Mode::RenameFile`)
+
+| Key | Action |
+|-----|--------|
+| *(type)* | Edit the filename |
+| `Backspace` | Delete last character |
+| `Enter` | Confirm rename |
+| `Esc` | Cancel, return to explorer |
+
+### Delete confirmation (`Mode::DeleteFile`)
+
+| Key | Action |
+|-----|--------|
+| `y` or `Y` | Confirm deletion (permanent) |
+| `n`, `N` or `Esc` | Cancel, return to explorer |
+
+### In-file search (`Mode::InFileSearch`)
+
+| Key | Action |
+|-----|--------|
+| *(type)* | Build search pattern |
+| `Backspace` | Delete last character |
+| `Enter` | Run search, return to Normal mode; `n`/`N` jump between matches |
+| `Esc` | Cancel, return to Normal mode |
+
+### Markdown preview (`Mode::MarkdownPreview`)
+
+| Key | Action |
+|-----|--------|
+| `j/k` or `↓/↑` | Scroll down / up one line |
+| `Ctrl+D` / `Ctrl+U` | Scroll down / up half-page |
+| `g` / `G` | Jump to top / bottom |
+| `q` or `Esc` | Exit preview, return to Normal mode |
 
 ### Agent panel (`Mode::Agent`)
 
@@ -218,7 +286,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0032)
+│   └── adr/                 # Architecture Decision Records (0001 – 0035)
 └── Cargo.toml
 ```
 
@@ -308,6 +376,11 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0030](docs/adr/0030-in-file-search-and-replace.md) | In-File Search and Replace |
 | [0031](docs/adr/0031-agent-task-creation.md) | Agent-Driven Plan Strip |
 | [0032](docs/adr/0032-recent-files-in-file-picker.md) | Recent Files in the Find File Picker |
+| [0033](docs/adr/0033-mermaid-and-markdown-browser-export.md) | Mermaid Diagrams and Markdown Browser Export |
+| [0034](docs/adr/0034-explorer-file-deletion.md) | Explorer File Deletion |
+| [0035](docs/adr/0035-agent-apply-diff.md) | Agent Apply-Diff Overlay |
+| [0036](docs/adr/0036-multi-line-agent-input.md) | Multi-line Agent Panel Input |
+| [0037](docs/adr/0037-think-block-rendering.md) | Think-Block Rendering in the Agent Panel |
 
 ---
 

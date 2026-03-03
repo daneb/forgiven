@@ -2,17 +2,25 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use std::path::PathBuf;
 use lsp_types::Diagnostic;
 
-use crate::agent::{AgentPanel, AgentTask, Role};
+use crate::agent::{AgentPanel, AgentTask, ContentSegment, Role, split_thinking};
 use crate::buffer::{Cursor, Selection};
+use crate::editor::DiffLine;
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchState, SearchFocus, SearchStatus};
+
+/// Data for the full-screen apply-diff overlay (Mode::ApplyDiff).
+pub struct ApplyDiffView<'a> {
+    pub target: &'a str,
+    pub lines: &'a [DiffLine],
+    pub scroll: usize,
+}
 
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
@@ -51,8 +59,21 @@ impl UI {
         preview_lines: Option<&[Line<'static>]>,
         // Project-wide search overlay (Mode::Search only).
         search_state: Option<&SearchState>,
+        // Rename popup filename buffer (Mode::RenameFile only).
+        rename_buffer: Option<&str>,
+        // Delete confirmation name (Mode::DeleteFile only).
+        delete_name: Option<&str>,
+        // Apply-diff overlay data (Mode::ApplyDiff only).
+        apply_diff: Option<&ApplyDiffView<'_>>,
     ) {
         let size = frame.area();
+
+        if mode == Mode::ApplyDiff {
+            if let Some(view) = apply_diff {
+                Self::render_apply_diff_overlay(frame, view, size);
+            }
+            return;
+        }
 
         // If in PickBuffer mode, show buffer picker
         if mode == Mode::PickBuffer {
@@ -153,6 +174,16 @@ impl UI {
             }
         }
 
+        // Render rename popup if active
+        if let Some(name) = rename_buffer {
+            Self::render_rename_popup(frame, name, size);
+        }
+
+        // Render delete confirmation popup if active
+        if let Some(name) = delete_name {
+            Self::render_delete_popup(frame, name, size);
+        }
+
     }
 
     /// Render the Copilot Chat / agent panel on the right side.
@@ -164,18 +195,19 @@ impl UI {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Compute input box height: expand as the user types, up to 5 text lines (7 rows).
+        // Compute input box height: expand as the user types, up to 10 text lines.
         // content_width = panel width minus 2 border columns.
-        // We calculate how many wrapped lines the current input occupies, then add 2 for borders.
+        // We calculate how many display rows the current input occupies, accounting for
+        // both explicit newlines (\n) and word-wrap within each logical line.
         let content_width = area.width.saturating_sub(2) as usize;
-        let text_len = panel.input.chars().count() + 1; // +1 for the trailing cursor char
-        let wrapped_lines = if content_width > 0 {
-            (text_len + content_width - 1) / content_width
-        } else {
-            1
-        };
-        // At least 1 text line; at most 5 text lines to keep history visible.
-        let input_text_lines = (wrapped_lines.max(1).min(5)) as u16;
+        let explicit_lines: Vec<&str> = panel.input.split('\n').collect();
+        let total_wrapped: usize = explicit_lines.iter().enumerate().map(|(i, line)| {
+            // Add 1 to the last line for the trailing cursor character.
+            let len = line.chars().count() + if i == explicit_lines.len() - 1 { 1 } else { 0 };
+            if content_width > 0 { ((len + content_width - 1) / content_width).max(1) } else { 1 }
+        }).sum();
+        // At least 1 text line; at most 10 text lines to keep history visible.
+        let input_text_lines = (total_wrapped.max(1).min(10)) as u16;
         let input_height = input_text_lines + 2; // +2 for top/bottom borders
 
         // Task strip height: 0 when empty, otherwise tasks + 2 border rows (capped at 8).
@@ -222,9 +254,9 @@ impl UI {
             lines.push(Line::from(vec![
                 Span::styled(format!("╔ {label} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
             ]));
-            // Render via the markdown renderer (handles headings, bold, code blocks,
-            // lists, tool-call lines starting with ⚙, etc.)
-            lines.extend(crate::markdown::render(&msg.content, content_width));
+            // Render via the think-aware renderer: thinking blocks are shown as
+            // plain dim text; everything else goes through the markdown renderer.
+            lines.extend(render_message_content(&msg.content, content_width));
             lines.push(Line::from(""));
         }
 
@@ -234,7 +266,7 @@ impl UI {
                 Span::styled("╔ Copilot ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::styled("▋", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
             ]));
-            lines.extend(crate::markdown::render(partial, content_width));
+            lines.extend(render_message_content(partial, content_width));
         }
 
         // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
@@ -283,9 +315,9 @@ impl UI {
         };
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Enter=send, Ctrl+T=model, Tab=back) ".to_string()
+            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+T=model, Tab=back) ".to_string()
         } else if panel.has_code_to_apply() && panel.input.is_empty() {
-            " Message Copilot… | [a] apply  Ctrl+T=model ".to_string()
+            " Message Copilot… | [a] diff+apply  Ctrl+T=model ".to_string()
         } else {
             " Message Copilot… (Ctrl+T=model) ".to_string()
         };
@@ -1196,6 +1228,9 @@ impl UI {
             Mode::MarkdownPreview => "PREVIEW",
             Mode::Search => "SEARCH",
             Mode::InFileSearch => "SEARCH",
+            Mode::RenameFile => "RENAME",
+            Mode::DeleteFile => "DELETE",
+            Mode::ApplyDiff => "DIFF",
         };
 
         let mode_color = match mode {
@@ -1211,6 +1246,9 @@ impl UI {
             Mode::MarkdownPreview => Color::Magenta,
             Mode::Search => Color::LightRed,
             Mode::InFileSearch => Color::LightRed,
+            Mode::RenameFile => Color::Yellow,
+            Mode::DeleteFile => Color::Red,
+            Mode::ApplyDiff => Color::Cyan,
         };
 
         let mut spans = vec![
@@ -1288,4 +1326,184 @@ impl UI {
         frame.render_widget(paragraph, area);
     }
 
+    /// Render the centred delete confirmation popup (Mode::DeleteFile).
+    fn render_delete_popup(frame: &mut Frame, name: &str, area: Rect) {
+        let popup_width = 52.min(area.width);
+        let popup_height = 3u16;
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let display = format!(" Delete '{}'?  [y/N] ", name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" Delete ");
+        frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
+    /// Render the centred rename popup (Mode::RenameFile).
+    fn render_rename_popup(frame: &mut Frame, rename_buffer: &str, area: Rect) {
+        let popup_width = 50.min(area.width);
+        let popup_height = 3u16;
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let display = format!(" {}_", rename_buffer); // trailing _ acts as cursor
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Rename ");
+        frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
+    /// Render the full-screen apply-diff overlay (Mode::ApplyDiff).
+    fn render_apply_diff_overlay(frame: &mut Frame, view: &ApplyDiffView<'_>, area: Rect) {
+        frame.render_widget(Clear, area);
+
+        let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 3 };
+        let body_area = Rect {
+            x: area.x,
+            y: area.y + 3,
+            width: area.width,
+            height: area.height.saturating_sub(3),
+        };
+
+        let title = format!(" Apply diff → {} ", view.target);
+        let hints = "  [y/Enter] apply   [n/Esc] discard   [j/k] scroll   [Ctrl+D/U] half-page ";
+        let header_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                " Apply Diff ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+        let header_para = Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(hints, Style::default().fg(Color::DarkGray))),
+        ])
+        .block(header_block);
+        frame.render_widget(header_para, header_area);
+
+        let visible_h = body_area.height as usize;
+        let total = view.lines.len();
+        let scroll = view.scroll.min(total.saturating_sub(1));
+        let diff_lines: Vec<Line<'static>> = view
+            .lines
+            .iter()
+            .skip(scroll)
+            .take(visible_h)
+            .map(|dl| match dl {
+                DiffLine::Added(s) => Line::from(Span::styled(
+                    format!("+ {s}"),
+                    Style::default().fg(Color::Green),
+                )),
+                DiffLine::Removed(s) => Line::from(Span::styled(
+                    format!("- {s}"),
+                    Style::default().fg(Color::Red),
+                )),
+                DiffLine::Context(s) => Line::from(Span::styled(
+                    format!("  {s}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(diff_lines), body_area);
+
+        if total > visible_h {
+            let indicator = format!(" {}/{} ", scroll + 1, total);
+            let w = indicator.len() as u16;
+            if w < body_area.width {
+                let ind = Rect {
+                    x: body_area.x + body_area.width - w,
+                    y: body_area.y + body_area.height.saturating_sub(1),
+                    width: w,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        indicator,
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    ind,
+                );
+            }
+        }
+    }
+
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Think-aware message renderer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render an assistant message with `<think>` blocks styled as plain dim text
+/// and everything else rendered as formatted markdown.
+///
+/// Thinking blocks get a `◌ thinking` header and word-wrapped dim-gray text;
+/// the actual reply beneath is passed unchanged through the markdown renderer.
+fn render_message_content(content: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for segment in split_thinking(content) {
+        match segment {
+            ContentSegment::Thinking(text) => {
+                // Header line.
+                lines.push(Line::from(vec![Span::styled(
+                    "◌ thinking",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )]));
+                // Plain word-wrap — no markdown parsing inside thinking blocks.
+                for paragraph in text.split('\n') {
+                    if paragraph.trim().is_empty() {
+                        lines.push(Line::from(""));
+                        continue;
+                    }
+                    let mut col = 0usize;
+                    let mut current = String::new();
+                    for word in paragraph.split_whitespace() {
+                        let wlen = word.chars().count();
+                        if col > 0 && width > 0 && col + 1 + wlen > width {
+                            lines.push(Line::from(vec![Span::styled(
+                                current.clone(),
+                                Style::default().fg(Color::DarkGray),
+                            )]));
+                            current = word.to_owned();
+                            col = wlen;
+                        } else {
+                            if col > 0 {
+                                current.push(' ');
+                                col += 1;
+                            }
+                            current.push_str(word);
+                            col += wlen;
+                        }
+                    }
+                    if !current.is_empty() {
+                        lines.push(Line::from(vec![Span::styled(
+                            current,
+                            Style::default().fg(Color::DarkGray),
+                        )]));
+                    }
+                }
+                // Spacer between thinking block and the answer.
+                lines.push(Line::from(""));
+            }
+            ContentSegment::Normal(text) => {
+                lines.extend(crate::markdown::render(&text, width));
+            }
+        }
+    }
+
+    lines
 }
