@@ -42,11 +42,7 @@ impl EditHistory {
         if self.past.len() >= MAX_SNAPSHOTS {
             self.past.remove(0);
         }
-        self.past.push(BufferSnapshot {
-            lines: lines.to_vec(),
-            cursor_row,
-            cursor_col,
-        });
+        self.past.push(BufferSnapshot { lines: lines.to_vec(), cursor_row, cursor_col });
         self.future.clear();
     }
 
@@ -75,11 +71,7 @@ impl EditHistory {
         if self.future.len() >= MAX_SNAPSHOTS {
             self.future.remove(0);
         }
-        self.future.push(BufferSnapshot {
-            lines: current_lines.to_vec(),
-            cursor_row,
-            cursor_col,
-        });
+        self.future.push(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
         Some(snap)
     }
 
@@ -96,11 +88,7 @@ impl EditHistory {
         if self.past.len() >= MAX_SNAPSHOTS {
             self.past.remove(0);
         }
-        self.past.push(BufferSnapshot {
-            lines: current_lines.to_vec(),
-            cursor_row,
-            cursor_col,
-        });
+        self.past.push(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
         Some(snap)
     }
 }

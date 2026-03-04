@@ -86,7 +86,7 @@ pub fn split_thinking(content: &str) -> Vec<ContentSegment> {
                             segments.push(ContentSegment::Thinking(thinking));
                         }
                         remaining = &after_open[end + 8..]; // skip "</think>"
-                    }
+                    },
                     None => {
                         // Unclosed tag — rest is in-progress thinking (streaming).
                         let thinking = after_open.trim().to_owned();
@@ -94,15 +94,15 @@ pub fn split_thinking(content: &str) -> Vec<ContentSegment> {
                             segments.push(ContentSegment::Thinking(thinking));
                         }
                         break;
-                    }
+                    },
                 }
-            }
+            },
             None => {
                 if !remaining.trim().is_empty() {
                     segments.push(ContentSegment::Normal(remaining.to_owned()));
                 }
                 break;
-            }
+            },
         }
     }
 
@@ -137,8 +137,9 @@ pub struct AgentPanel {
     pub pending_reloads: Vec<String>,
     /// Planned steps for the current agent session (shown as a strip in the panel).
     pub tasks: Vec<AgentTask>,
-    /// Model IDs fetched from GET /models (lazily populated on first submit).
-    pub available_models: Vec<String>,
+    /// Models fetched from GET /models (lazily populated on first submit).
+    /// Each entry holds the API `id` (sent in requests) and human-readable `name` (shown in UI).
+    pub available_models: Vec<ModelVersion>,
     /// Index into available_models for the currently selected model.
     pub selected_model: usize,
     /// Current agentic loop round (for UI display).
@@ -147,30 +148,98 @@ pub struct AgentPanel {
     pub max_rounds: usize,
     /// Whether the agent is paused waiting for user to approve continuation.
     pub awaiting_continuation: bool,
+    /// Live status of the background Copilot task (shown in the panel title).
+    pub status: AgentStatus,
+    /// Token counts from the last API response (0 = not yet received).
+    pub last_prompt_tokens: u32,
+    pub last_completion_tokens: u32,
+}
+
+/// A model returned by the Copilot `/models` endpoint.
+/// `id` is the API alias (e.g. "gpt-4o"); `version` is the pinned build sent in requests
+/// (e.g. "gpt-4o-2024-11-20"); `name` is the human-readable display label.
+#[derive(Debug, Clone)]
+pub struct ModelVersion {
+    pub id: String,
+    pub version: String,
+    pub name: String,
+}
+
+/// What the Copilot background task is actively doing right now.
+/// Used to render a live status indicator in the agent panel title.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum AgentStatus {
+    #[default]
+    Idle,
+    /// API request sent for `round`; waiting for the first token.
+    WaitingForResponse { round: usize },
+    /// Tokens are actively streaming in for `round`.
+    Streaming { round: usize },
+    /// A tool is executing synchronously between rounds.
+    CallingTool { round: usize, name: String },
+}
+
+impl AgentStatus {
+    /// Short label shown in the panel title.
+    pub fn label(&self, max_rounds: usize) -> Option<String> {
+        match self {
+            AgentStatus::Idle => None,
+            AgentStatus::WaitingForResponse { round } => {
+                Some(format!("waiting… [{round}/{max_rounds}]"))
+            },
+            AgentStatus::Streaming { round } => Some(format!("streaming [{round}/{max_rounds}]")),
+            AgentStatus::CallingTool { round, name } => {
+                Some(format!("{name} [{round}/{max_rounds}]"))
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Token(String),
-    ToolStart { name: String, args_summary: String },
-    ToolDone { name: String, result_summary: String },
+    ToolStart {
+        name: String,
+        args_summary: String,
+    },
+    ToolDone {
+        name: String,
+        result_summary: String,
+    },
     /// A file was successfully written or edited by a tool.
     /// The path is project-relative (as passed to the tool).
-    FileModified { path: String },
+    FileModified {
+        path: String,
+    },
     /// A task was created by the agent via the create_task tool.
-    TaskCreated { title: String },
+    TaskCreated {
+        title: String,
+    },
     /// A task was marked done by the agent via the complete_task tool.
-    TaskCompleted { title: String },
+    TaskCompleted {
+        title: String,
+    },
     /// Progress indicator: current round and max rounds.
-    RoundProgress { current: usize, max: usize },
+    RoundProgress {
+        current: usize,
+        max: usize,
+    },
     /// Warning that the max rounds limit is approaching.
     /// The loop will pause after this round and wait for user input.
-    MaxRoundsWarning { current: usize, max: usize, remaining: usize },
+    MaxRoundsWarning {
+        current: usize,
+        max: usize,
+        remaining: usize,
+    },
     /// Request user decision on whether to continue.
     /// The loop is paused and waiting for a response via the continuation channel.
     AwaitingContinuation,
     Done,
     Error(String),
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -208,16 +277,45 @@ impl AgentPanel {
             current_round: 0,
             max_rounds: 20,
             awaiting_continuation: false,
+            status: AgentStatus::Idle,
+            last_prompt_tokens: 0,
+            last_completion_tokens: 0,
         }
     }
 
-    /// The model ID string to send in API requests.
+    /// The pinned model version to send in API requests.
+    /// Using `version` (e.g. "gpt-4o-2024-11-20") rather than the alias `id` ("gpt-4o")
+    /// ensures the Copilot API routes to the exact build, not an internal default.
     /// Falls back to "gpt-4o" before the models list has been fetched.
     pub fn selected_model_id(&self) -> &str {
         if self.available_models.is_empty() {
             return "gpt-4o";
         }
-        &self.available_models[self.selected_model.min(self.available_models.len() - 1)]
+        &self.available_models[self.selected_model.min(self.available_models.len() - 1)].id
+    }
+
+    /// The human-readable display name for the selected model (shown in the UI).
+    pub fn selected_model_display(&self) -> &str {
+        if self.available_models.is_empty() {
+            return "gpt-4o";
+        }
+        &self.available_models[self.selected_model.min(self.available_models.len() - 1)].name
+    }
+
+    /// Returns the known context-window size (in tokens) for the selected model.
+    pub fn context_window_size(&self) -> u32 {
+        let id = self.selected_model_id();
+        if id.starts_with("gpt-4o")
+            || id.starts_with("gpt-4")
+            || id.starts_with("o1")
+            || id.starts_with("o3")
+        {
+            128_000
+        } else if id.starts_with("claude") {
+            200_000
+        } else {
+            128_000
+        }
     }
 
     /// Advance to the next model in the list (wraps around).
@@ -237,7 +335,7 @@ impl AgentPanel {
         match fetch_models(&api_token).await {
             Ok(models) if !models.is_empty() => {
                 self.set_models(models, preferred_model);
-            }
+            },
             Ok(_) => warn!("Copilot /models returned an empty list"),
             Err(e) => return Err(e),
         }
@@ -247,8 +345,8 @@ impl AgentPanel {
     /// Refresh the model list from the API, preserving the current selection if possible.
     /// Use this to pick up newly released models or remove deprecated ones.
     pub async fn refresh_models(&mut self, preferred_model: &str) -> Result<()> {
-        let current_model = if !self.available_models.is_empty() {
-            Some(self.available_models[self.selected_model].clone())
+        let current_id = if !self.available_models.is_empty() {
+            Some(self.available_models[self.selected_model].id.clone())
         } else {
             None
         };
@@ -256,10 +354,14 @@ impl AgentPanel {
         let api_token = self.ensure_token().await?;
         match fetch_models(&api_token).await {
             Ok(models) if !models.is_empty() => {
-                let preferred = current_model.as_deref().unwrap_or(preferred_model);
+                let preferred = current_id.as_deref().unwrap_or(preferred_model);
                 self.set_models(models, preferred);
-                info!("Refreshed model list, selected: {}", self.selected_model_id());
-            }
+                info!(
+                    "Refreshed model list, selected: {} ({})",
+                    self.selected_model_display(),
+                    self.selected_model_id()
+                );
+            },
             Ok(_) => warn!("Copilot /models returned an empty list"),
             Err(e) => return Err(e),
         }
@@ -267,10 +369,20 @@ impl AgentPanel {
     }
 
     /// Set the available models and select the preferred one (or fallback).
-    fn set_models(&mut self, models: Vec<String>, preferred_model: &str) {
-        let default_idx = models.iter().position(|m| m == preferred_model)
-            .or_else(|| models.iter().position(|m| m == "gpt-4o"))
-            .unwrap_or(0);
+    /// Matches `preferred_model` against `id` first, then `version` (so configs that stored
+    /// a versioned ID like "gpt-4o-2024-11-20" still resolve correctly).
+    fn set_models(&mut self, models: Vec<ModelVersion>, preferred_model: &str) {
+        let found =
+            models.iter().position(|m| m.id == preferred_model || m.version == preferred_model);
+        if found.is_none() && !preferred_model.is_empty() {
+            warn!(
+                "Preferred model '{}' not found in model list; falling back. Available ids: {:?}",
+                preferred_model,
+                models.iter().map(|m| &m.id).collect::<Vec<_>>()
+            );
+        }
+        let default_idx =
+            found.or_else(|| models.iter().position(|m| m.id == "gpt-4o")).unwrap_or(0);
         self.available_models = models;
         self.selected_model = default_idx;
     }
@@ -280,11 +392,34 @@ impl AgentPanel {
         self.focused = self.visible;
     }
 
-    pub fn focus(&mut self) { self.focused = true; }
-    pub fn blur(&mut self)  { self.focused = false; }
-    pub fn input_char(&mut self, ch: char) { self.input.push(ch); }
-    pub fn input_backspace(&mut self) { self.input.pop(); }
-    pub fn input_newline(&mut self) { self.input.push('\n'); }
+    pub fn focus(&mut self) {
+        self.focused = true;
+    }
+    pub fn blur(&mut self) {
+        self.focused = false;
+    }
+    pub fn input_char(&mut self, ch: char) {
+        self.input.push(ch);
+    }
+    pub fn input_backspace(&mut self) {
+        self.input.pop();
+    }
+    pub fn input_newline(&mut self) {
+        self.input.push('\n');
+    }
+
+    /// Clear conversation history and insert a visual divider showing the new model.
+    /// Called when the user switches models via Ctrl+T so the new model receives a
+    /// clean context — not the prior conversation from a different model.
+    pub fn new_conversation(&mut self, model_name: &str) {
+        self.messages.clear();
+        self.tasks.clear();
+        self.streaming_reply = None;
+        self.messages.push(ChatMessage {
+            role: Role::System,
+            content: format!("── New conversation · {model_name} ──"),
+        });
+    }
 
     /// Submit input, launching the agentic tool-calling loop in the background.
     pub async fn submit(
@@ -357,12 +492,16 @@ Available tools:\n\
             )
         };
 
-        let mut send_messages: Vec<serde_json::Value> = vec![
-            serde_json::json!({ "role": "system", "content": system }),
-        ];
+        let mut send_messages: Vec<serde_json::Value> =
+            vec![serde_json::json!({ "role": "system", "content": system })];
 
         let history_start = self.messages.len().saturating_sub(20);
         for msg in &self.messages[history_start..] {
+            // Skip System-role entries — they are display-only dividers inserted by
+            // new_conversation() and must not be forwarded to the API as context.
+            if matches!(msg.role, Role::System) {
+                continue;
+            }
             send_messages.push(serde_json::json!({
                 "role": msg.role.as_str(),
                 "content": msg.content
@@ -385,13 +524,15 @@ Available tools:\n\
                     info!("Fetched {} models from Copilot API", models.len());
                     // Select user's preferred model from config
                     self.set_models(models, preferred_model);
-                }
+                },
                 Ok(_) => warn!("Copilot /models returned an empty list"),
                 Err(e) => warn!("Could not fetch Copilot model list: {e}"),
             }
         }
 
         let model_id = self.selected_model_id().to_string();
+
+        self.status = AgentStatus::WaitingForResponse { round: 1 };
 
         let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(rx);
@@ -423,12 +564,21 @@ Available tools:\n\
                 match rx.try_recv() {
                     Ok(StreamEvent::Token(t)) => {
                         active = true;
-                        if let Some(r) = self.streaming_reply.as_mut() { r.push_str(&t); }
+                        self.status = AgentStatus::Streaming { round: self.current_round };
+                        if let Some(r) = self.streaming_reply.as_mut() {
+                            r.push_str(&t);
+                        }
                         token_count += 1;
-                        if token_count >= MAX_TOKENS_PER_FRAME { break; }
-                    }
+                        if token_count >= MAX_TOKENS_PER_FRAME {
+                            break;
+                        }
+                    },
                     Ok(StreamEvent::ToolStart { name, args_summary }) => {
                         active = true;
+                        self.status = AgentStatus::CallingTool {
+                            round: self.current_round,
+                            name: name.clone(),
+                        };
                         // Task lifecycle tools are shown in the plan strip — skip them here.
                         if !matches!(name.as_str(), "create_task" | "complete_task") {
                             // Double newline = paragraph break in CommonMark, so each
@@ -436,37 +586,39 @@ Available tools:\n\
                             let line = format!("\n\n⚙  {name}({args_summary})");
                             match self.streaming_reply.as_mut() {
                                 Some(r) => r.push_str(&line),
-                                None    => self.streaming_reply = Some(line),
+                                None => self.streaming_reply = Some(line),
                             }
                         }
-                    }
+                    },
                     Ok(StreamEvent::ToolDone { name, result_summary }) => {
                         active = true;
+                        self.status = AgentStatus::WaitingForResponse { round: self.current_round };
                         if !matches!(name.as_str(), "create_task" | "complete_task") {
                             if let Some(r) = self.streaming_reply.as_mut() {
                                 r.push_str(&format!(" → {result_summary}"));
                             }
                         }
-                    }
+                    },
                     Ok(StreamEvent::FileModified { path }) => {
                         active = true;
                         self.pending_reloads.push(path);
-                    }
+                    },
                     Ok(StreamEvent::TaskCreated { title }) => {
                         active = true;
                         self.tasks.push(AgentTask { title, done: false });
-                    }
+                    },
                     Ok(StreamEvent::TaskCompleted { title }) => {
                         active = true;
                         if let Some(t) = self.tasks.iter_mut().find(|t| t.title == title) {
                             t.done = true;
                         }
-                    }
+                    },
                     Ok(StreamEvent::RoundProgress { current, max }) => {
                         active = true;
                         self.current_round = current;
                         self.max_rounds = max;
-                    }
+                        self.status = AgentStatus::WaitingForResponse { round: current };
+                    },
                     Ok(StreamEvent::MaxRoundsWarning { current, max, remaining }) => {
                         active = true;
                         let warning = format!(
@@ -476,7 +628,7 @@ Available tools:\n\
                         if let Some(r) = self.streaming_reply.as_mut() {
                             r.push_str(&warning);
                         }
-                    }
+                    },
                     Ok(StreamEvent::AwaitingContinuation) => {
                         active = true;
                         self.awaiting_continuation = true;
@@ -486,14 +638,16 @@ Available tools:\n\
                         } else {
                             self.streaming_reply = Some(prompt.to_string());
                         }
-                    }
+                    },
+                    Ok(StreamEvent::Usage { prompt_tokens, completion_tokens }) => {
+                        self.last_prompt_tokens = prompt_tokens;
+                        self.last_completion_tokens = completion_tokens;
+                    },
                     Ok(StreamEvent::Done) => {
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
-                                self.messages.push(ChatMessage {
-                                    role: Role::Assistant,
-                                    content: text,
-                                });
+                                self.messages
+                                    .push(ChatMessage { role: Role::Assistant, content: text });
                             }
                         }
                         self.scroll = 0;
@@ -501,8 +655,9 @@ Available tools:\n\
                         self.continuation_tx = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
+                        self.status = AgentStatus::Idle;
                         break;
-                    }
+                    },
                     Ok(StreamEvent::Error(e)) => {
                         warn!("Copilot Chat stream error: {}", e);
                         self.messages.push(ChatMessage {
@@ -514,8 +669,9 @@ Available tools:\n\
                         self.continuation_tx = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
+                        self.status = AgentStatus::Idle;
                         break;
-                    }
+                    },
                     Err(_) => break,
                 }
             }
@@ -557,10 +713,16 @@ Available tools:\n\
         }
     }
 
-    pub fn scroll_up(&mut self)       { self.scroll += 3; }
-    pub fn scroll_down(&mut self)     { self.scroll = self.scroll.saturating_sub(3); }
+    pub fn scroll_up(&mut self) {
+        self.scroll += 3;
+    }
+    pub fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_sub(3);
+    }
     #[allow(dead_code)]
-    pub fn scroll_to_bottom(&mut self) { self.scroll = 0; }
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = 0;
+    }
 
     // ── Code extraction ───────────────────────────────────────────────────────
 
@@ -574,7 +736,9 @@ Available tools:\n\
                     while current.last().map(|l: &&str| l.trim().is_empty()).unwrap_or(false) {
                         current.pop();
                     }
-                    if !current.is_empty() { blocks.push(current.join("\n")); }
+                    if !current.is_empty() {
+                        blocks.push(current.join("\n"));
+                    }
                     current.clear();
                     in_block = false;
                 } else {
@@ -588,12 +752,16 @@ Available tools:\n\
     }
 
     pub fn get_code_to_apply(&self) -> Option<String> {
-        self.messages.iter().rev()
+        self.messages
+            .iter()
+            .rev()
             .find(|m| m.role == Role::Assistant)
             .and_then(|m| Self::extract_code_blocks(&m.content).into_iter().next())
     }
 
-    pub fn has_code_to_apply(&self) -> bool { self.get_code_to_apply().is_some() }
+    pub fn has_code_to_apply(&self) -> bool {
+        self.get_code_to_apply().is_some()
+    }
 
     /// Returns (path_hint, code_content) for the first code block.
     /// path_hint resolution order:
@@ -622,7 +790,8 @@ Available tools:\n\
                     in_block = true;
                     let info = trimmed.trim_start_matches('`').trim();
                     // Check fence info string for a path-like token
-                    path_hint = info.split_whitespace()
+                    path_hint = info
+                        .split_whitespace()
                         .find(|t| (t.contains('/') || t.contains('\\')) && !t.starts_with("http"))
                         .map(std::path::PathBuf::from);
                     // Fall back: scan up to 3 preceding prose lines for `backtick/path`
@@ -649,16 +818,16 @@ Available tools:\n\
     }
 
     pub fn get_apply_candidate(&self) -> Option<(Option<std::path::PathBuf>, String)> {
-        self.messages.iter().rev()
+        self.messages
+            .iter()
+            .rev()
             .find(|m| m.role == Role::Assistant)
             .and_then(|m| Self::extract_first_code_block_with_path(&m.content))
     }
 
     /// Return the full text of the most recent assistant message, if any.
     pub fn last_assistant_reply(&self) -> Option<String> {
-        self.messages.iter().rev()
-            .find(|m| m.role == Role::Assistant)
-            .map(|m| m.content.clone())
+        self.messages.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.content.clone())
     }
 
     async fn ensure_token(&mut self) -> Result<String> {
@@ -683,6 +852,7 @@ Available tools:\n\
 // Agentic loop (runs in a background tokio task)
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn agentic_loop(
     api_token: String,
     mut messages: Vec<serde_json::Value>,
@@ -713,10 +883,7 @@ async fn agentic_loop(
         }
 
         // Report progress
-        let _ = tx.send(StreamEvent::RoundProgress {
-            current: round + 1,
-            max: effective_max,
-        });
+        let _ = tx.send(StreamEvent::RoundProgress { current: round + 1, max: effective_max });
 
         // Warn once when approaching the limit
         let remaining = effective_max.saturating_sub(round + 1);
@@ -735,9 +902,14 @@ async fn agentic_loop(
             messages.clone(),
             tool_defs.clone(),
             &model_id,
-        ).await {
-            Ok(r)  => r,
-            Err(e) => { let _ = tx.send(StreamEvent::Error(format!("{e}"))); return; }
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                return;
+            },
         };
 
         // ── Parse the SSE stream ──────────────────────────────────────────────
@@ -751,17 +923,18 @@ async fn agentic_loop(
             // Wrap stream read in timeout to detect stalled connections
             let item = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
-                byte_stream.next()
-            ).await {
+                byte_stream.next(),
+            )
+            .await
+            {
                 Ok(Some(result)) => result,
                 Ok(None) => break 'sse, // Stream ended normally
                 Err(_) => {
                     warn!("Stream timeout after {STREAM_TIMEOUT_SECS}s with no data");
-                    let _ = tx.send(StreamEvent::Error(
-                        "Stream stalled - no data received".to_string()
-                    ));
+                    let _ = tx
+                        .send(StreamEvent::Error("Stream stalled - no data received".to_string()));
                     break 'sse;
-                }
+                },
             };
 
             match item {
@@ -771,14 +944,22 @@ async fn agentic_loop(
                         let line = sse_buf[..pos].trim().to_string();
                         sse_buf.drain(..=pos);
 
-                        if line == "data: [DONE]" { break 'sse; }
+                        if line == "data: [DONE]" {
+                            break 'sse;
+                        }
 
                         if let Some(json_str) = line.strip_prefix("data: ") {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                // Log the actual model the API used on the first chunk (may differ from what we requested).
+                                if text_buf.is_empty() && partial_tools.is_empty() {
+                                    if let Some(actual) = val.get("model").and_then(|v| v.as_str())
+                                    {
+                                        info!("[stream] API routed request to model={actual:?}  (requested={model_id:?})");
+                                    }
+                                }
                                 // Text content delta
-                                if let Some(content) = val
-                                    .pointer("/choices/0/delta/content")
-                                    .and_then(|v| v.as_str())
+                                if let Some(content) =
+                                    val.pointer("/choices/0/delta/content").and_then(|v| v.as_str())
                                 {
                                     if !content.is_empty() {
                                         text_buf.push_str(content);
@@ -792,37 +973,74 @@ async fn agentic_loop(
                                     .and_then(|v| v.as_array())
                                 {
                                     for tc_val in tc_arr {
-                                        let idx = tc_val.get("index")
+                                        let idx = tc_val
+                                            .get("index")
                                             .and_then(|v| v.as_u64())
-                                            .unwrap_or(0) as usize;
+                                            .unwrap_or(0)
+                                            as usize;
                                         let entry = partial_tools.entry(idx).or_default();
 
-                                        if let Some(id) = tc_val.get("id").and_then(|v| v.as_str()) {
-                                            if !id.is_empty() { entry.id = id.to_string(); }
+                                        if let Some(id) = tc_val.get("id").and_then(|v| v.as_str())
+                                        {
+                                            if !id.is_empty() {
+                                                entry.id = id.to_string();
+                                            }
                                         }
-                                        if let Some(name) = tc_val.pointer("/function/name").and_then(|v| v.as_str()) {
-                                            if !name.is_empty() { entry.name = name.to_string(); }
+                                        if let Some(name) = tc_val
+                                            .pointer("/function/name")
+                                            .and_then(|v| v.as_str())
+                                        {
+                                            if !name.is_empty() {
+                                                entry.name = name.to_string();
+                                            }
                                         }
-                                        if let Some(chunk) = tc_val.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                                        if let Some(chunk) = tc_val
+                                            .pointer("/function/arguments")
+                                            .and_then(|v| v.as_str())
+                                        {
                                             entry.arguments.push_str(chunk);
                                         }
+                                    }
+                                }
+
+                                // Usage chunk (emitted by OpenAI-compatible APIs when stream_options.include_usage=true)
+                                if let Some(usage) = val.get("usage").filter(|v| !v.is_null()) {
+                                    let p = usage
+                                        .get("prompt_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as u32;
+                                    let c = usage
+                                        .get("completion_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as u32;
+                                    if p > 0 || c > 0 {
+                                        let _ = tx.send(StreamEvent::Usage {
+                                            prompt_tokens: p,
+                                            completion_tokens: c,
+                                        });
                                     }
                                 }
                             }
                         }
                     }
-                }
+                },
                 Err(e) => {
                     warn!("Stream error, attempting to process buffered data: {e}");
                     // Try to salvage any complete lines from the buffer
                     while let Some(pos) = sse_buf.find('\n') {
                         let line = sse_buf[..pos].trim().to_string();
                         sse_buf.drain(..=pos);
-                        if line == "data: [DONE]" { break; }
+                        if line == "data: [DONE]" {
+                            break;
+                        }
                         if let Some(json_str) = line.strip_prefix("data: ") {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
                                 // Process any text content
-                                if let Some(content) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+                                if let Some(content) =
+                                    val.pointer("/choices/0/delta/content").and_then(|v| v.as_str())
+                                {
                                     if !content.is_empty() {
                                         text_buf.push_str(content);
                                     }
@@ -832,7 +1050,7 @@ async fn agentic_loop(
                     }
                     let _ = tx.send(StreamEvent::Error(format!("{e}")));
                     return;
-                }
+                },
             }
         }
 
@@ -842,28 +1060,43 @@ async fn agentic_loop(
             // Split by newlines and process any complete SSE events
             for line in sse_buf.lines() {
                 let line = line.trim();
-                if line == "data: [DONE]" { break; }
+                if line == "data: [DONE]" {
+                    break;
+                }
                 if let Some(json_str) = line.strip_prefix("data: ") {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
                         // Process text content delta
-                        if let Some(content) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+                        if let Some(content) =
+                            val.pointer("/choices/0/delta/content").and_then(|v| v.as_str())
+                        {
                             if !content.is_empty() {
                                 text_buf.push_str(content);
                                 let _ = tx.send(StreamEvent::Token(content.to_string()));
                             }
                         }
                         // Process tool call deltas
-                        if let Some(tc_arr) = val.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array()) {
+                        if let Some(tc_arr) =
+                            val.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array())
+                        {
                             for tc_val in tc_arr {
-                                let idx = tc_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                let idx = tc_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
+                                    as usize;
                                 let entry = partial_tools.entry(idx).or_default();
                                 if let Some(id) = tc_val.get("id").and_then(|v| v.as_str()) {
-                                    if !id.is_empty() { entry.id = id.to_string(); }
+                                    if !id.is_empty() {
+                                        entry.id = id.to_string();
+                                    }
                                 }
-                                if let Some(name) = tc_val.pointer("/function/name").and_then(|v| v.as_str()) {
-                                    if !name.is_empty() { entry.name = name.to_string(); }
+                                if let Some(name) =
+                                    tc_val.pointer("/function/name").and_then(|v| v.as_str())
+                                {
+                                    if !name.is_empty() {
+                                        entry.name = name.to_string();
+                                    }
                                 }
-                                if let Some(chunk) = tc_val.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                                if let Some(chunk) =
+                                    tc_val.pointer("/function/arguments").and_then(|v| v.as_str())
+                                {
                                     entry.arguments.push_str(chunk);
                                 }
                             }
@@ -886,13 +1119,16 @@ async fn agentic_loop(
         let mut sorted: Vec<(usize, tools::PartialToolCall)> = partial_tools.into_iter().collect();
         sorted.sort_by_key(|(idx, _)| *idx);
 
-        let tool_calls_json: Vec<serde_json::Value> = sorted.iter().map(|(_, tc)| {
-            serde_json::json!({
-                "id": tc.id,
-                "type": "function",
-                "function": { "name": tc.name, "arguments": tc.arguments }
+        let tool_calls_json: Vec<serde_json::Value> = sorted
+            .iter()
+            .map(|(_, tc)| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments }
+                })
             })
-        }).collect();
+            .collect();
 
         messages.push(serde_json::json!({
             "role": "assistant",
@@ -945,14 +1181,19 @@ async fn agentic_loop(
             let result_summary = {
                 // Skip header lines like "src/foo.rs (42 lines)" or "path:"
                 // and show the first meaningful content line instead.
-                let meaningful = result.lines()
+                let meaningful = result
+                    .lines()
                     .find(|l| {
                         let t = l.trim();
-                        !t.is_empty() && !t.ends_with(':') && !t.contains('(') || t.starts_with("error")
+                        !t.is_empty() && !t.ends_with(':') && !t.contains('(')
+                            || t.starts_with("error")
                     })
                     .unwrap_or_else(|| result.lines().next().unwrap_or("ok"));
-                if meaningful.len() > 120 { format!("{}…", &meaningful[..120]) }
-                else { meaningful.to_string() }
+                if meaningful.len() > 120 {
+                    format!("{}…", &meaningful[..120])
+                } else {
+                    meaningful.to_string()
+                }
             };
             let _ = tx.send(StreamEvent::ToolDone { name: call.name.clone(), result_summary });
 
@@ -975,8 +1216,9 @@ async fn agentic_loop(
             // Wait for user decision (with timeout to avoid hanging forever)
             let decision = tokio::time::timeout(
                 tokio::time::Duration::from_secs(300), // 5 minute timeout
-                cont_rx.recv()
-            ).await;
+                cont_rx.recv(),
+            )
+            .await;
 
             match decision {
                 Ok(Some(true)) => {
@@ -984,12 +1226,12 @@ async fn agentic_loop(
                     info!("User approved continuation, extending by {} rounds", max_rounds);
                     effective_max += max_rounds;
                     warned = false; // re-arm the warning for the new batch
-                }
+                },
                 Ok(Some(false)) | Ok(None) | Err(_) => {
                     // User denied, channel closed, or 5-minute timeout.
                     let _ = tx.send(StreamEvent::Done);
                     return;
-                }
+                },
             }
         }
         // Continue loop with tool results appended to messages
@@ -1008,6 +1250,7 @@ fn build_project_tree(root: &std::path::Path, max_depth: usize) -> String {
     out
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn tree_recursive(
     root: &std::path::Path,
     path: &std::path::Path,
@@ -1030,10 +1273,7 @@ fn tree_recursive(
         if name.starts_with('.') {
             continue; // skip hidden
         }
-        if matches!(
-            name.as_str(),
-            "target" | "node_modules" | "dist" | "build" | ".git"
-        ) {
+        if matches!(name.as_str(), "target" | "node_modules" | "dist" | "build" | ".git") {
             continue;
         }
         let indent = "  ".repeat(depth);
@@ -1056,143 +1296,190 @@ async fn start_chat_stream_with_tools(
     tools: serde_json::Value,
     model_id: &str,
 ) -> Result<reqwest::Response> {
+    info!("Sending completion request with model_id={model_id:?}");
     let body = serde_json::json!({
         "model": model_id,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
         "stream": true,
+        "stream_options": { "include_usage": true },
         "n": 1,
         "temperature": 0.1,
         "max_tokens": 4096
     });
 
     let client = reqwest::Client::new();
-        let mut retry_attempts = 0;
-        let max_retries = 5;
-        let mut delay = tokio::time::Duration::from_secs(1);
+    let mut retry_attempts = 0;
+    let max_retries = 5;
+    let mut delay = tokio::time::Duration::from_secs(1);
 
-        loop {
-            let resp = client
-                .post("https://api.githubcopilot.com/chat/completions")
-                .header("Authorization", format!("Bearer {api_token}"))
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .header("Copilot-Integration-Id", "vscode-chat")
-                .header("editor-version", "forgiven/0.1.0")
-                .header("editor-plugin-version", "forgiven-copilot/0.1.0")
-                .header("openai-intent", "conversation-panel")
-                .header("User-Agent", "forgiven/0.1.0")
-                .json(&body)
-                .send()
-                .await;
+    loop {
+        let resp = client
+            .post("https://api.githubcopilot.com/chat/completions")
+            .header("Authorization", format!("Bearer {api_token}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("Copilot-Integration-Id", "vscode-chat")
+            .header("editor-version", "forgiven/0.1.0")
+            .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+            .header("openai-intent", "conversation-panel")
+            .header("User-Agent", "forgiven/0.1.0")
+            .json(&body)
+            .send()
+            .await;
 
-            match resp {
-                Ok(response) if response.status().is_success() => {
-                    info!("Copilot Chat stream started ({})", response.status());
-                    return Ok(response);
+        match resp {
+            Ok(response) if response.status().is_success() => {
+                info!("Copilot Chat stream started ({})", response.status());
+                return Ok(response);
+            },
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                // 4xx errors (except 429 rate-limit) are permanent — don't retry.
+                if status.is_client_error() && status.as_u16() != 429 {
+                    return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
                 }
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    // 4xx errors (except 429 rate-limit) are permanent — don't retry.
-                    if status.is_client_error() && status.as_u16() != 429 {
-                        return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
-                    }
-                    warn!("Retrying due to API error ({status}): {body}");
-                }
-                Err(e) => {
-                    warn!("Retrying due to network error: {e}");
-                }
-            }
-
-            retry_attempts += 1;
-            if retry_attempts >= max_retries {
-                return Err(anyhow::anyhow!("Max retries reached for Copilot Chat API"));
-            }
-
-            tokio::time::sleep(delay).await;
-            delay *= 2; // Exponential backoff
+                warn!("Retrying due to API error ({status}): {body}");
+            },
+            Err(e) => {
+                warn!("Retrying due to network error: {e}");
+            },
         }
+
+        retry_attempts += 1;
+        if retry_attempts >= max_retries {
+            return Err(anyhow::anyhow!("Max retries reached for Copilot Chat API"));
+        }
+
+        tokio::time::sleep(delay).await;
+        delay *= 2; // Exponential backoff
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch the list of chat-capable model IDs from the Copilot `/models` endpoint.
-/// Returns the IDs sorted with preferred models first (gpt-4o, then others).
-async fn fetch_models(api_token: &str) -> Result<Vec<String>> {
+/// Fetch chat-capable models from the Copilot `/models` endpoint.
+/// Returns `ModelVersion` pairs (id + display name) sorted with gpt-4o first, then alphabetically by id.
+async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
     let client = reqwest::Client::new();
-        let mut retry_attempts = 0;
-        let max_retries = 5;
-        let mut delay = tokio::time::Duration::from_secs(1);
+    let mut retry_attempts = 0;
+    let max_retries = 5;
+    let mut delay = tokio::time::Duration::from_secs(1);
 
-        loop {
-            let resp = client
-                .get("https://api.githubcopilot.com/models")
-                .header("Authorization", format!("Bearer {api_token}"))
-                .header("User-Agent", "forgiven/0.1.0")
-                .header("Copilot-Integration-Id", "vscode-chat")
-                .header("editor-version", "forgiven/0.1.0")
-                .send()
-                .await;
+    loop {
+        let resp = client
+            .get("https://api.githubcopilot.com/models")
+            .header("Authorization", format!("Bearer {api_token}"))
+            .header("User-Agent", "forgiven/0.1.0")
+            .header("Copilot-Integration-Id", "vscode-chat")
+            .header("editor-version", "forgiven/0.1.0")
+            .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+            .send()
+            .await;
 
-            match resp {
-                Ok(response) if response.status().is_success() => {
-                    let body: serde_json::Value = response.json().await.context("/models response is not JSON")?;
-                    let mut models: Vec<String> = body
-                        .get("data")
-                        .and_then(|d| d.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| {
-                                    let id = v.get("id")?.as_str()?.to_string();
-                                    if id.contains("embed") || id.contains("whisper") || id.contains("tts") || id.contains("dall") {
+        match resp {
+            Ok(response) if response.status().is_success() => {
+                let body: serde_json::Value =
+                    response.json().await.context("/models response is not JSON")?;
+
+                // Log every model entry from the raw response so mismatches are diagnosable.
+                if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
+                    for v in arr {
+                        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+                        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                        let version = v.get("version").and_then(|x| x.as_str()).unwrap_or("?");
+                        let cap_type =
+                            v.pointer("/capabilities/type").and_then(|x| x.as_str()).unwrap_or("?");
+                        info!("[models] id={id:?} name={name:?} version={version:?} cap_type={cap_type:?}");
+                    }
+                }
+
+                let mut models: Vec<ModelVersion> = body
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                let id = v.get("id")?.as_str()?.to_string();
+                                // Filter models that don't support /chat/completions.
+                                // Embedding, TTS, image, and codex/code-completion models all fail with
+                                // unsupported_api_for_model when sent to the chat endpoint.
+                                if id.contains("embed")
+                                    || id.contains("whisper")
+                                    || id.contains("tts")
+                                    || id.contains("dall")
+                                    || id.contains("codex")
+                                {
+                                    return None;
+                                }
+                                // Also filter by capabilities.type if present: only keep "chat" models.
+                                if let Some(cap_type) =
+                                    v.pointer("/capabilities/type").and_then(|x| x.as_str())
+                                {
+                                    if cap_type != "chat" {
                                         return None;
                                     }
-                                    if let Some(picker) = v.get("model_picker_enabled") {
-                                        if picker == &serde_json::Value::Bool(false) {
-                                            return None;
-                                        }
-                                    }
-                                    Some(id)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                                }
+                                // `version` is the pinned build string; fall back to id if absent.
+                                let version = v
+                                    .get("version")
+                                    .and_then(|x| x.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or(&id)
+                                    .to_string();
+                                // Use the human-readable `name` for display; fall back to the id.
+                                let name = v
+                                    .get("name")
+                                    .and_then(|x| x.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or(&id)
+                                    .to_string();
+                                Some(ModelVersion { id, version, name })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                    models.sort_by(|a, b| {
-                        let a_pref = if a == "gpt-4o" { 0 } else { 1 };
-                        let b_pref = if b == "gpt-4o" { 0 } else { 1 };
-                        a_pref.cmp(&b_pref).then(a.cmp(b))
-                    });
+                models.sort_by(|a, b| {
+                    let a_pref = if a.id == "gpt-4o" { 0 } else { 1 };
+                    let b_pref = if b.id == "gpt-4o" { 0 } else { 1 };
+                    a_pref.cmp(&b_pref).then(a.id.cmp(&b.id))
+                });
+                // The API sometimes returns duplicate IDs; deduplicate after sorting.
+                models.dedup_by(|a, b| a.id == b.id);
 
-                    debug!("Available models: {:?}", models);
-                    return Ok(models);
+                info!(
+                    "Filtered+sorted model list: {:?}",
+                    models.iter().map(|m| format!("{} ({})", m.name, m.id)).collect::<Vec<_>>()
+                );
+                return Ok(models);
+            },
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                // 4xx errors (except 429 rate-limit) are permanent — don't retry.
+                if status.is_client_error() && status.as_u16() != 429 {
+                    return Err(anyhow::anyhow!("/models API error ({status}): {body}"));
                 }
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    // 4xx errors (except 429 rate-limit) are permanent — don't retry.
-                    if status.is_client_error() && status.as_u16() != 429 {
-                        return Err(anyhow::anyhow!("/models API error ({status}): {body}"));
-                    }
-                    warn!("Retrying due to API error ({status}): {body}");
-                }
-                Err(e) => {
-                    warn!("Retrying due to network error: {e}");
-                }
-            }
-
-            retry_attempts += 1;
-            if retry_attempts >= max_retries {
-                return Err(anyhow::anyhow!("Max retries reached for Copilot /models API"));
-            }
-
-            tokio::time::sleep(delay).await;
-            delay *= 2; // Exponential backoff
+                warn!("Retrying due to API error ({status}): {body}");
+            },
+            Err(e) => {
+                warn!("Retrying due to network error: {e}");
+            },
         }
+
+        retry_attempts += 1;
+        if retry_attempts >= max_retries {
+            return Err(anyhow::anyhow!("Max retries reached for Copilot /models API"));
+        }
+
+        tokio::time::sleep(delay).await;
+        delay *= 2; // Exponential backoff
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1202,9 +1489,9 @@ async fn fetch_models(api_token: &str) -> Result<Vec<String>> {
 fn load_oauth_token() -> Result<String> {
     let home = std::env::var("HOME").context("HOME not set")?;
     let path = format!("{home}/.config/github-copilot/apps.json");
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("Cannot read {path}"))?;
-    let val: serde_json::Value = serde_json::from_str(&raw).context("apps.json is not valid JSON")?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("Cannot read {path}"))?;
+    let val: serde_json::Value =
+        serde_json::from_str(&raw).context("apps.json is not valid JSON")?;
     val.as_object()
         .and_then(|m| m.values().next())
         .and_then(|e| e.get("oauth_token"))
@@ -1243,10 +1530,10 @@ async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
                     break (s, b);
                 }
                 warn!("Token exchange retrying due to server error ({s})");
-            }
+            },
             Err(e) => {
                 warn!("Token exchange retrying due to network error: {e}");
-            }
+            },
         }
         retry_attempts += 1;
         if retry_attempts >= max_retries {
@@ -1264,18 +1551,21 @@ async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
         .with_context(|| format!("Token response is not JSON: {body_text}"))?;
     info!("Token response keys: {:?}", val.as_object().map(|o| o.keys().collect::<Vec<_>>()));
 
-    let token_str = val.get("token").and_then(|v| v.as_str())
-        .with_context(|| format!("No 'token' field in response: {body_text}"))?.to_string();
+    let token_str = val
+        .get("token")
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("No 'token' field in response: {body_text}"))?
+        .to_string();
     let expires_at_str = val.get("expires_at").and_then(|v| v.as_str()).map(|s| s.to_string());
     debug!("Copilot API token acquired (expires_at={:?})", expires_at_str);
 
     let tr = TokenResponse { token: token_str, expires_at: expires_at_str };
-    let expires_at = tr.expires_at.as_deref().and_then(chrono_unix_from_iso)
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() + 1800).unwrap_or(1800)
-        });
+    let expires_at = tr.expires_at.as_deref().and_then(chrono_unix_from_iso).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() + 1800)
+            .unwrap_or(1800)
+    });
 
     Ok(CopilotApiToken { token: tr.token, expires_at })
 }
@@ -1283,12 +1573,24 @@ async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
 fn chrono_unix_from_iso(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('Z');
     let s = if let Some(pos) = s.find('+') { &s[..pos] } else { s };
-    let s = if let Some(pos) = s.rfind('-') { if pos > 10 { &s[..pos] } else { s } } else { s };
+    let s = if let Some(pos) = s.rfind('-') {
+        if pos > 10 {
+            &s[..pos]
+        } else {
+            s
+        }
+    } else {
+        s
+    };
     let parts: Vec<&str> = s.splitn(2, 'T').collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
     let date: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
     let time: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
-    if date.len() < 3 || time.len() < 3 { return None; }
+    if date.len() < 3 || time.len() < 3 {
+        return None;
+    }
     let y = date[0].saturating_sub(1970);
     let days = y * 365 + y / 4 + days_before_month(date[1], date[0]) + date[2] - 1;
     Some(days * 86400 + time[0] * 3600 + time[1] * 60 + time[2])
@@ -1296,11 +1598,18 @@ fn chrono_unix_from_iso(s: &str) -> Option<u64> {
 
 fn days_before_month(month: u64, year: u64) -> u64 {
     let dim = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 1 } else { 0 };
+    let leap = if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+    {
+        1
+    } else {
+        0
+    };
     let mut total = 0;
     for m in 1..month.min(13) {
         total += dim[m as usize];
-        if m == 2 { total += leap; }
+        if m == 2 {
+            total += leap;
+        }
     }
     total
 }

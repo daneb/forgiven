@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use lsp_server::{Message, Request, Response, Notification, RequestId};
+use lsp_server::{Message, Notification, Request, RequestId, Response};
 use lsp_types::*;
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Write};
@@ -15,12 +15,19 @@ use url::Url;
 /// Messages sent from LSP client to editor
 #[derive(Debug, Clone)]
 pub enum LspNotificationMsg {
-    Diagnostics { uri: Uri, diagnostics: Vec<Diagnostic> },
+    Diagnostics {
+        uri: Uri,
+        diagnostics: Vec<Diagnostic>,
+    },
     Initialized,
     #[allow(dead_code)]
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// Human-readable message from the server (e.g. Copilot auth instructions).
-    ShowMessage { message: String },
+    ShowMessage {
+        message: String,
+    },
 }
 
 /// Stored diagnostic information
@@ -125,16 +132,18 @@ impl LspClient {
             .env("PATH", &augmented_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())   // capture so we can log it (null would block the child)
+            .stderr(Stdio::piped()) // capture so we can log it (null would block the child)
             .spawn()
-            .with_context(|| format!("Failed to spawn LSP server '{}' (PATH={})", command, augmented_path))?;
+            .with_context(|| {
+                format!("Failed to spawn LSP server '{}' (PATH={})", command, augmented_path)
+            })?;
 
-        let child_stdin = process.stdin.take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get child stdin"))?;
-        let child_stdout = process.stdout.take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get child stdout"))?;
-        let child_stderr = process.stderr.take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get child stderr"))?;
+        let child_stdin =
+            process.stdin.take().ok_or_else(|| anyhow::anyhow!("Failed to get child stdin"))?;
+        let child_stdout =
+            process.stdout.take().ok_or_else(|| anyhow::anyhow!("Failed to get child stdout"))?;
+        let child_stderr =
+            process.stderr.take().ok_or_else(|| anyhow::anyhow!("Failed to get child stderr"))?;
 
         // Stderr logger thread — drain the child's stderr so it never blocks,
         // and forward each line to tracing so it shows up in forgiven.log.
@@ -174,15 +183,15 @@ impl LspClient {
                         if reader_tx.send(msg).is_err() {
                             break; // main thread dropped the receiver
                         }
-                    }
+                    },
                     Ok(None) => {
                         info!("LSP server closed connection (EOF)");
                         break;
-                    }
+                    },
                     Err(e) => {
                         error!("LSP read error: {}", e);
                         break;
-                    }
+                    },
                 }
             }
             debug!("LSP reader thread exiting");
@@ -191,18 +200,22 @@ impl LspClient {
         // Canonicalize to resolve symlinks / relative components — Url::from_file_path
         // requires a true absolute path (e.g. /private/... on macOS, not /tmp/...).
         let canonical_root = match workspace_root.canonicalize() {
-            Ok(p) => { info!("Workspace root (canonical): {:?}", p); p }
+            Ok(p) => {
+                info!("Workspace root (canonical): {:?}", p);
+                p
+            },
             Err(e) => {
                 warn!("canonicalize({:?}) failed: {} — using raw path", workspace_root, e);
                 workspace_root.clone()
-            }
+            },
         };
-        let workspace_url = Url::from_file_path(&canonical_root)
-            .map_err(|_| anyhow::anyhow!(
+        let workspace_url = Url::from_file_path(&canonical_root).map_err(|_| {
+            anyhow::anyhow!(
                 "Url::from_file_path failed for {:?} (is_absolute={})",
                 canonical_root,
                 canonical_root.is_absolute()
-            ))?;
+            )
+        })?;
         let workspace_uri = Uri::from_str(workspace_url.as_str())
             .map_err(|e| anyhow::anyhow!("Failed to create URI: {}", e))?;
 
@@ -258,9 +271,7 @@ impl LspClient {
                         link_support: Some(false),
                         ..Default::default()
                     }),
-                    references: Some(ReferenceClientCapabilities {
-                        ..Default::default()
-                    }),
+                    references: Some(ReferenceClientCapabilities { ..Default::default() }),
                     rename: Some(RenameClientCapabilities {
                         prepare_support: Some(false),
                         ..Default::default()
@@ -282,17 +293,15 @@ impl LspClient {
         let request_id = self.send_request_id::<request::Initialize>(params)?;
 
         // Await the response with a timeout so a slow/crashed server can't hang the editor.
-        let response = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.wait_for_response(request_id),
-        )
-        .await
-        .context("LSP initialization timed out after 10 seconds")?
-        .context("LSP initialization failed")?;
+        let response =
+            tokio::time::timeout(Duration::from_secs(10), self.wait_for_response(request_id))
+                .await
+                .context("LSP initialization timed out after 10 seconds")?
+                .context("LSP initialization failed")?;
 
         if let Some(result) = response.result {
-            let init_result: InitializeResult = serde_json::from_value(result)
-                .context("Failed to parse InitializeResult")?;
+            let init_result: InitializeResult =
+                serde_json::from_value(result).context("Failed to parse InitializeResult")?;
             self.capabilities = Some(init_result.capabilities);
             info!("LSP server initialized successfully");
         } else if let Some(err) = response.error {
@@ -318,11 +327,8 @@ impl LspClient {
         self.next_request_id += 1;
         let request_id = RequestId::from(id);
 
-        let request = Request::new(
-            request_id.clone(),
-            R::METHOD.to_string(),
-            serde_json::to_value(params)?,
-        );
+        let request =
+            Request::new(request_id.clone(), R::METHOD.to_string(), serde_json::to_value(params)?);
         self.writer_tx
             .send(Message::Request(request))
             .map_err(|_| anyhow::anyhow!("LSP writer channel closed"))?;
@@ -341,11 +347,8 @@ impl LspClient {
         self.next_request_id += 1;
         let request_id = RequestId::from(id);
 
-        let request = Request::new(
-            request_id.clone(),
-            R::METHOD.to_string(),
-            serde_json::to_value(params)?,
-        );
+        let request =
+            Request::new(request_id.clone(), R::METHOD.to_string(), serde_json::to_value(params)?);
 
         let (tx, rx) = oneshot::channel();
         self.pending_requests.insert(request_id, tx);
@@ -363,10 +366,7 @@ impl LspClient {
     where
         N: lsp_types::notification::Notification,
     {
-        let notification = Notification::new(
-            N::METHOD.to_string(),
-            serde_json::to_value(params)?,
-        );
+        let notification = Notification::new(N::METHOD.to_string(), serde_json::to_value(params)?);
         self.writer_tx
             .send(Message::Notification(notification))
             .map_err(|_| anyhow::anyhow!("LSP writer channel closed"))?;
@@ -382,7 +382,10 @@ impl LspClient {
     /// Other messages are processed/routed while waiting.
     async fn wait_for_response(&mut self, target_id: RequestId) -> Result<Response> {
         loop {
-            let msg = self.reader_rx.recv().await
+            let msg = self
+                .reader_rx
+                .recv()
+                .await
                 .ok_or_else(|| anyhow::anyhow!("LSP server disconnected (channel closed)"))?;
 
             match msg {
@@ -396,11 +399,11 @@ impl LspClient {
                             error!("LSP error for pending request {:?}: {:?}", resp.id, err);
                         }
                     }
-                }
+                },
                 Message::Notification(notif) => self.handle_notification(notif),
                 Message::Request(req) => {
                     warn!("Received unexpected request from LSP server: {}", req.method);
-                }
+                },
             }
         }
     }
@@ -425,11 +428,11 @@ impl LspClient {
                             error!("LSP error response: {:?}", err);
                         }
                     }
-                }
+                },
                 Ok(Message::Notification(notif)) => self.handle_notification(notif),
                 Ok(Message::Request(req)) => {
                     warn!("Unexpected request from LSP server: {}", req.method);
-                }
+                },
                 Err(_) => break, // channel empty
             }
             count += 1;
@@ -491,12 +494,7 @@ impl LspClient {
 
     pub fn did_open(&mut self, uri: Uri, language_id: String, text: String) -> Result<()> {
         self.notify::<notification::DidOpenTextDocument>(DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri,
-                language_id,
-                version: 0,
-                text,
-            },
+            text_document: TextDocumentItem { uri, language_id, version: 0, text },
         })
     }
 
@@ -584,9 +582,7 @@ impl LspClient {
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
-            context: ReferenceContext {
-                include_declaration: true,
-            },
+            context: ReferenceContext { include_declaration: true },
         })
     }
 
@@ -608,10 +604,7 @@ impl LspClient {
     }
 
     #[allow(dead_code)]
-    pub fn document_symbols(
-        &mut self,
-        uri: Uri,
-    ) -> Result<oneshot::Receiver<serde_json::Value>> {
+    pub fn document_symbols(&mut self, uri: Uri) -> Result<oneshot::Receiver<serde_json::Value>> {
         self.send_request::<request::DocumentSymbolRequest>(DocumentSymbolParams {
             text_document: TextDocumentIdentifier { uri },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -685,11 +678,8 @@ impl LspClient {
         self.next_request_id += 1;
         let request_id = RequestId::from(id);
 
-        let request = Request::new(
-            request_id.clone(),
-            "textDocument/inlineCompletion".to_string(),
-            params,
-        );
+        let request =
+            Request::new(request_id.clone(), "textDocument/inlineCompletion".to_string(), params);
 
         let (tx, rx) = oneshot::channel();
         self.pending_requests.insert(request_id, tx);
@@ -810,17 +800,17 @@ impl LspManager {
             match self.notification_rx.try_recv() {
                 Ok(LspNotificationMsg::Diagnostics { uri, diagnostics }) => {
                     self.diagnostics.insert(uri, diagnostics);
-                }
+                },
                 Ok(LspNotificationMsg::Initialized) => {
                     info!("LSP client initialized");
-                }
+                },
                 Ok(LspNotificationMsg::Error { message }) => {
                     error!("LSP error: {}", message);
-                }
+                },
                 Ok(LspNotificationMsg::ShowMessage { message }) => {
                     info!("LSP message: {}", message);
                     self.pending_messages.push(message);
-                }
+                },
                 Err(_) => break,
             }
             count += 1;
@@ -841,7 +831,7 @@ impl LspManager {
     }
 
     /// Get all diagnostics across all files.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::mutable_key_type)]
     pub fn get_all_diagnostics(&self) -> &HashMap<Uri, Vec<Diagnostic>> {
         &self.diagnostics
     }
@@ -850,15 +840,14 @@ impl LspManager {
     // Utility helpers
     // -------------------------------------------------------------------------
 
-    pub fn path_to_uri(path: &PathBuf) -> Result<Uri> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    pub fn path_to_uri(path: &std::path::Path) -> Result<Uri> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let url = Url::from_file_path(&canonical)
             .map_err(|_| anyhow::anyhow!("Invalid file path: {:?}", canonical))?;
-        Uri::from_str(url.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to create URI: {}", e))
+        Uri::from_str(url.as_str()).map_err(|e| anyhow::anyhow!("Failed to create URI: {}", e))
     }
 
-    pub fn language_from_path(path: &PathBuf) -> String {
+    pub fn language_from_path(path: &std::path::Path) -> String {
         path.extension()
             .and_then(|e| e.to_str())
             .map(|ext| match ext {
@@ -899,20 +888,16 @@ impl Default for LspManager {
 /// The spec allows either `InlineCompletionList { items: [...] }` or a bare array `[...]`.
 /// Each item has an `insertText` field (string or `{ value: string }`).
 pub fn parse_first_inline_completion(value: serde_json::Value) -> Option<String> {
-    let items = value
-        .get("items")
-        .and_then(|v| v.as_array())
-        .or_else(|| value.as_array())?;
+    let items = value.get("items").and_then(|v| v.as_array()).or_else(|| value.as_array())?;
 
     let item = items.first()?;
 
     // insertText may be a plain string or { value: "..." }
-    item.get("insertText")
-        .and_then(|v| {
-            if let Some(s) = v.as_str() {
-                Some(s.to_string())
-            } else {
-                v.get("value").and_then(|s| s.as_str()).map(|s| s.to_string())
-            }
-        })
+    item.get("insertText").and_then(|v| {
+        if let Some(s) = v.as_str() {
+            Some(s.to_string())
+        } else {
+            v.get("value").and_then(|s| s.as_str()).map(|s| s.to_string())
+        }
+    })
 }

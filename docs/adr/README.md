@@ -45,6 +45,9 @@ that motivated it, what was decided, and the consequences.
 | [0035](0035-agent-apply-diff.md) | Agent Apply-Diff Overlay | Accepted |
 | [0036](0036-multi-line-agent-input.md) | Multi-line Agent Panel Input | Accepted |
 | [0037](0037-think-block-rendering.md) | Think-Block Rendering in the Agent Panel | Accepted |
+| [0038](0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter | Accepted |
+| [0039](0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title | Accepted |
+| [0040](0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title | Accepted |
 
 ## What is an ADR?
 

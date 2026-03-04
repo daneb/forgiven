@@ -9,8 +9,16 @@ use std::path::{Path, PathBuf};
 // ── Skip list ──────────────────────────────────────────────────────────────────
 
 const SKIP_DIRS: &[&str] = &[
-    ".git", "target", "node_modules", "dist", "build", ".next",
-    "__pycache__", ".cache", ".idea", ".vscode",
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".cache",
+    ".idea",
+    ".vscode",
 ];
 
 fn should_skip(name: &str, show_hidden: bool) -> bool {
@@ -176,9 +184,7 @@ impl FileExplorer {
     #[allow(dead_code)]
     pub fn selected_file(&self) -> Option<PathBuf> {
         let flat = self.flat_visible();
-        flat.get(self.cursor_idx).and_then(|n| {
-            if n.is_dir { None } else { Some(n.path.clone()) }
-        })
+        flat.get(self.cursor_idx).and_then(|n| if n.is_dir { None } else { Some(n.path.clone()) })
     }
 
     /// Return the path selected by the cursor regardless of type.
@@ -211,9 +217,7 @@ fn load_dir(path: &Path, depth: usize, show_hidden: bool) -> Vec<FileNode> {
 
     for entry in entries.flatten() {
         let p = entry.path();
-        let name = p.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
 
         if should_skip(&name, show_hidden) {
             continue;
@@ -243,7 +247,7 @@ fn flatten_nodes<'a>(nodes: &'a [FileNode], out: &mut Vec<&'a FileNode>) {
 }
 
 /// Walk the tree and toggle the node whose path matches `target`.
-fn toggle_in_list(nodes: &mut Vec<FileNode>, target: &Path, show_hidden: bool) -> bool {
+fn toggle_in_list(nodes: &mut [FileNode], target: &Path, show_hidden: bool) -> bool {
     for node in nodes.iter_mut() {
         if node.path == target {
             if node.is_dir {
@@ -255,10 +259,11 @@ fn toggle_in_list(nodes: &mut Vec<FileNode>, target: &Path, show_hidden: bool) -
             }
             return true;
         }
-        if node.is_dir && node.is_expanded {
-            if toggle_in_list(&mut node.children, target, show_hidden) {
-                return true;
-            }
+        if node.is_dir
+            && node.is_expanded
+            && toggle_in_list(&mut node.children, target, show_hidden)
+        {
+            return true;
         }
     }
     false

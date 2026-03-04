@@ -381,6 +381,9 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0035](docs/adr/0035-agent-apply-diff.md) | Agent Apply-Diff Overlay |
 | [0036](docs/adr/0036-multi-line-agent-input.md) | Multi-line Agent Panel Input |
 | [0037](docs/adr/0037-think-block-rendering.md) | Think-Block Rendering in the Agent Panel |
+| [0038](docs/adr/0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter |
+| [0039](docs/adr/0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title |
+| [0040](docs/adr/0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title |
 
 ---
 

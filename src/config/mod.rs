@@ -54,11 +54,21 @@ pub struct Config {
     pub agent_warning_threshold: usize,
 }
 
-fn default_tab_width() -> usize { 4 }
-fn default_use_spaces() -> bool { true }
-fn default_copilot_model() -> String { "gpt-4o".to_string() }
-fn default_max_agent_rounds() -> usize { 20 }
-fn default_agent_warning_threshold() -> usize { 3 }
+fn default_tab_width() -> usize {
+    4
+}
+fn default_use_spaces() -> bool {
+    true
+}
+fn default_copilot_model() -> String {
+    "gpt-4o".to_string()
+}
+fn default_max_agent_rounds() -> usize {
+    20
+}
+fn default_agent_warning_threshold() -> usize {
+    3
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -93,20 +103,19 @@ impl Config {
             Err(e) => {
                 warn!("Failed to parse config {:?}: {}", path, e);
                 Self::default()
-            }
+            },
         }
     }
 
     /// Save the current config to `~/.config/forgiven/config.toml`.
     /// Creates the directory if it doesn't exist.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = Self::config_path()
-            .ok_or("HOME environment variable not set")?;
-        
+        let path = Self::config_path().ok_or("HOME environment variable not set")?;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let toml_string = toml::to_string_pretty(self)?;
         std::fs::write(&path, toml_string)?;
         Ok(())

@@ -1,3 +1,4 @@
+use lsp_types::Diagnostic;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,14 +7,13 @@ use ratatui::{
     Frame,
 };
 use std::path::PathBuf;
-use lsp_types::Diagnostic;
 
-use crate::agent::{AgentPanel, AgentTask, ContentSegment, Role, split_thinking};
+use crate::agent::{split_thinking, AgentPanel, AgentTask, ContentSegment, Role};
 use crate::buffer::{Cursor, Selection};
 use crate::editor::DiffLine;
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
-use crate::search::{SearchState, SearchFocus, SearchStatus};
+use crate::search::{SearchFocus, SearchState, SearchStatus};
 
 /// Data for the full-screen apply-diff overlay (Mode::ApplyDiff).
 pub struct ApplyDiffView<'a> {
@@ -34,7 +34,8 @@ pub struct UI;
 
 impl UI {
     /// Render the entire UI
-    #[allow(clippy::too_many_arguments)]    pub fn render(
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
         frame: &mut Frame,
         buffer_data: Option<&BufferData>,
         mode: Mode,
@@ -100,43 +101,48 @@ impl UI {
         let agent_visible = agent_panel.map(|p| p.visible).unwrap_or(false);
         let left_sidebar_visible = explorer_visible;
 
-        let (left_sidebar_area, content_area, agent_area) = match (left_sidebar_visible, agent_visible) {
-            (true, true) => {
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(25), Constraint::Min(1), Constraint::Percentage(35)])
-                    .split(size);
-                (Some(cols[0]), cols[1], Some(cols[2]))
-            }
-            (true, false) => {
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(25), Constraint::Min(1)])
-                    .split(size);
-                (Some(cols[0]), cols[1], None)
-            }
-            (false, true) => {
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                    .split(size);
-                (None, cols[0], Some(cols[1]))
-            }
-            (false, false) => (None, size, None),
-        };
+        let (left_sidebar_area, content_area, agent_area) =
+            match (left_sidebar_visible, agent_visible) {
+                (true, true) => {
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(25),
+                            Constraint::Min(1),
+                            Constraint::Percentage(35),
+                        ])
+                        .split(size);
+                    (Some(cols[0]), cols[1], Some(cols[2]))
+                },
+                (true, false) => {
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(25), Constraint::Min(1)])
+                        .split(size);
+                    (Some(cols[0]), cols[1], None)
+                },
+                (false, true) => {
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .split(size);
+                    (None, cols[0], Some(cols[1]))
+                },
+                (false, false) => (None, size, None),
+            };
         let editor_area = content_area;
 
         // ── Vertical layout (buffer + status) inside editor_area ─────────────
         let constraints = if which_key_options.is_some() {
             vec![
-                Constraint::Min(1),         // Main buffer area
-                Constraint::Length(10),     // Which-key popup
-                Constraint::Length(1),      // Status line
+                Constraint::Min(1),     // Main buffer area
+                Constraint::Length(10), // Which-key popup
+                Constraint::Length(1),  // Status line
             ]
         } else {
             vec![
-                Constraint::Min(1),         // Main buffer area
-                Constraint::Length(1),      // Status line
+                Constraint::Min(1),    // Main buffer area
+                Constraint::Length(1), // Status line
             ]
         };
 
@@ -146,19 +152,37 @@ impl UI {
             .split(editor_area);
 
         let main_area = chunks[0];
-        let status_area = if which_key_options.is_some() {
+        let status_area = if let Some(wk) = which_key_options {
             let which_key_area = chunks[1];
-            Self::render_which_key(frame, which_key_options.unwrap(), which_key_area);
+            Self::render_which_key(frame, wk, which_key_area);
             chunks[2]
         } else {
             chunks[1]
         };
 
         // Render buffer content
-        Self::render_buffer(frame, buffer_data, mode, main_area, diagnostics, ghost_text, highlighted_lines, preview_lines);
+        Self::render_buffer(
+            frame,
+            buffer_data,
+            mode,
+            main_area,
+            diagnostics,
+            ghost_text,
+            highlighted_lines,
+            preview_lines,
+        );
 
         // Render status line
-        Self::render_status_line(frame, buffer_data, mode, status_message, command_buffer, key_sequence, status_area, diagnostics);
+        Self::render_status_line(
+            frame,
+            buffer_data,
+            mode,
+            status_message,
+            command_buffer,
+            key_sequence,
+            status_area,
+            diagnostics,
+        );
 
         // Render agent panel if visible
         if let (Some(panel), Some(area)) = (agent_panel, agent_area) {
@@ -183,7 +207,6 @@ impl UI {
         if let Some(name) = delete_name {
             Self::render_delete_popup(frame, name, size);
         }
-
     }
 
     /// Render the Copilot Chat / agent panel on the right side.
@@ -201,21 +224,26 @@ impl UI {
         // both explicit newlines (\n) and word-wrap within each logical line.
         let content_width = area.width.saturating_sub(2) as usize;
         let explicit_lines: Vec<&str> = panel.input.split('\n').collect();
-        let total_wrapped: usize = explicit_lines.iter().enumerate().map(|(i, line)| {
-            // Add 1 to the last line for the trailing cursor character.
-            let len = line.chars().count() + if i == explicit_lines.len() - 1 { 1 } else { 0 };
-            if content_width > 0 { ((len + content_width - 1) / content_width).max(1) } else { 1 }
-        }).sum();
+        let total_wrapped: usize = explicit_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                // Add 1 to the last line for the trailing cursor character.
+                let len = line.chars().count() + if i == explicit_lines.len() - 1 { 1 } else { 0 };
+                if content_width > 0 {
+                    len.div_ceil(content_width).max(1)
+                } else {
+                    1
+                }
+            })
+            .sum();
         // At least 1 text line; at most 10 text lines to keep history visible.
-        let input_text_lines = (total_wrapped.max(1).min(10)) as u16;
+        let input_text_lines = total_wrapped.clamp(1, 10) as u16;
         let input_height = input_text_lines + 2; // +2 for top/bottom borders
 
         // Task strip height: 0 when empty, otherwise tasks + 2 border rows (capped at 8).
-        let task_strip_height = if panel.tasks.is_empty() {
-            0
-        } else {
-            (panel.tasks.len() as u16 + 2).min(8)
-        };
+        let task_strip_height =
+            if panel.tasks.is_empty() { 0 } else { (panel.tasks.len() as u16 + 2).min(8) };
 
         // Split area vertically: history (top) + [task strip] + input (dynamic bottom).
         let vchunks = if task_strip_height > 0 {
@@ -235,25 +263,33 @@ impl UI {
         };
 
         let history_area = vchunks[0];
-        let (task_area, input_area) = if task_strip_height > 0 {
-            (Some(vchunks[1]), vchunks[2])
-        } else {
-            (None, vchunks[1])
-        };
+        let (task_area, input_area) =
+            if task_strip_height > 0 { (Some(vchunks[1]), vchunks[2]) } else { (None, vchunks[1]) };
 
         // ── Chat history ──────────────────────────────────────────────────────
         let mut lines: Vec<Line> = Vec::new();
         let content_width = history_area.width.saturating_sub(4) as usize;
 
         for msg in &panel.messages {
+            // System-role messages are display-only dividers (e.g. model-switch notices).
+            // Render them as a plain dim separator line rather than a chat bubble.
+            if matches!(msg.role, Role::System) {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}  ", msg.content),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                )]));
+                lines.push(Line::from(""));
+                continue;
+            }
             let (label, color) = match msg.role {
                 Role::User => ("You", Color::Green),
                 Role::Assistant => ("Copilot", Color::Cyan),
-                Role::System => ("System", Color::DarkGray),
+                Role::System => unreachable!(),
             };
-            lines.push(Line::from(vec![
-                Span::styled(format!("╔ {label} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("╔ {label} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )]));
             // Render via the think-aware renderer: thinking blocks are shown as
             // plain dim text; everything else goes through the markdown renderer.
             lines.extend(render_message_content(&msg.content, content_width));
@@ -263,8 +299,14 @@ impl UI {
         // Show in-progress streaming reply.
         if let Some(ref partial) = panel.streaming_reply {
             lines.push(Line::from(vec![
-                Span::styled("╔ Copilot ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled("▋", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    "╔ Copilot ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "▋",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+                ),
             ]));
             lines.extend(render_message_content(partial, content_width));
         }
@@ -282,24 +324,46 @@ impl UI {
         let start = end.saturating_sub(visible_height);
         let visible_lines = lines[start..end].to_vec();
 
-        // Build a title that shows the active model and scroll position.
-        let model_label = panel.selected_model_id();
-        let history_title = if scroll > 0 {
+        // Build a title that shows the active model, live status, and scroll position.
+        let model_label = panel.selected_model_display();
+        let status_suffix =
+            panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
+        let scroll_suffix = if scroll > 0 {
             let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
-            format!(" Copilot Chat [{model_label}]  ↑ scrolled ({pct}%)  ↑/↓ to navigate ")
+            format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ")
         } else if total > visible_height {
-            format!(" Copilot Chat [{model_label}]  (↑ to scroll up) ")
+            "  (↑ to scroll up) ".to_string()
         } else {
-            format!(" Copilot Chat [{model_label}] ")
+            " ".to_string()
         };
 
-        let history_block = Block::default()
-            .title(history_title)
-            .borders(Borders::ALL)
-            .border_style(border_style);
-        let history_para = Paragraph::new(visible_lines)
-            .block(history_block)
-            .wrap(Wrap { trim: false });
+        let token_span = if panel.last_prompt_tokens > 0 {
+            let window = panel.context_window_size();
+            let pct = panel.last_prompt_tokens * 100 / window;
+            let color = if pct >= 80 {
+                Color::Red
+            } else if pct >= 50 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            let k_used = panel.last_prompt_tokens as f32 / 1000.0;
+            let k_total = window as f32 / 1000.0;
+            Span::styled(format!("  {k_used:.1}k/{k_total:.0}k"), Style::default().fg(color))
+        } else {
+            Span::raw("")
+        };
+
+        let title_line = Line::from(vec![
+            Span::raw(format!(" Copilot Chat [{model_label}]")),
+            token_span,
+            Span::raw(format!("{status_suffix}{scroll_suffix}")),
+        ]);
+
+        let history_block =
+            Block::default().title(title_line).borders(Borders::ALL).border_style(border_style);
+        let history_para =
+            Paragraph::new(visible_lines).block(history_block).wrap(Wrap { trim: false });
         frame.render_widget(history_para, history_area);
 
         // ── Task strip ────────────────────────────────────────────────────────
@@ -309,7 +373,7 @@ impl UI {
 
         // ── Input box ─────────────────────────────────────────────────────────
         let input_text = if focused {
-            format!("{}_", panel.input)  // trailing cursor block
+            format!("{}_", panel.input) // trailing cursor block
         } else {
             panel.input.clone()
         };
@@ -322,10 +386,8 @@ impl UI {
             " Message Copilot… (Ctrl+T=model) ".to_string()
         };
         let hint = hint.as_str();
-        let input_block = Block::default()
-            .title(hint)
-            .borders(Borders::ALL)
-            .border_style(border_style);
+        let input_block =
+            Block::default().title(hint).borders(Borders::ALL).border_style(border_style);
         let input_para = Paragraph::new(input_text)
             .block(input_block)
             .style(Style::default().fg(Color::White))
@@ -347,11 +409,7 @@ impl UI {
 
         // Scroll so the cursor is always visible.
         let cursor = explorer.cursor_idx;
-        let scroll = if cursor >= visible_height {
-            cursor - visible_height + 1
-        } else {
-            0
-        };
+        let scroll = if cursor >= visible_height { cursor - visible_height + 1 } else { 0 };
 
         let mut lines: Vec<Line> = Vec::new();
         for (i, node) in flat.iter().enumerate().skip(scroll).take(visible_height) {
@@ -359,7 +417,11 @@ impl UI {
 
             let indent = "  ".repeat(node.depth);
             let icon = if node.is_dir {
-                if node.is_expanded { "▼ " } else { "▶ " }
+                if node.is_expanded {
+                    "▼ "
+                } else {
+                    "▶ "
+                }
             } else {
                 "  "
             };
@@ -381,7 +443,8 @@ impl UI {
             lines.push(Line::from(""));
         }
 
-        let root_name = explorer.root_path
+        let root_name = explorer
+            .root_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "/".to_string());
@@ -402,31 +465,33 @@ impl UI {
         // Find the first incomplete task — shown in yellow as "current".
         let current_idx = tasks.iter().position(|t| !t.done);
 
-        let lines: Vec<Line> = tasks.iter().enumerate().map(|(i, task)| {
-            let (icon, style) = if task.done {
-                ("✓", Style::default().fg(Color::DarkGray))
-            } else if Some(i) == current_idx {
-                ("⊙", Style::default().fg(Color::Yellow))
-            } else {
-                ("○", Style::default().fg(Color::White))
-            };
-            Line::from(vec![
-                Span::styled(format!("  {} ", icon), style),
-                Span::styled(task.title.clone(), style),
-            ])
-        }).collect();
+        let lines: Vec<Line> = tasks
+            .iter()
+            .enumerate()
+            .map(|(i, task)| {
+                let (icon, style) = if task.done {
+                    ("✓", Style::default().fg(Color::DarkGray))
+                } else if Some(i) == current_idx {
+                    ("⊙", Style::default().fg(Color::Yellow))
+                } else {
+                    ("○", Style::default().fg(Color::White))
+                };
+                Line::from(vec![
+                    Span::styled(format!("  {} ", icon), style),
+                    Span::styled(task.title.clone(), style),
+                ])
+            })
+            .collect();
 
         let title = format!(" Plan ({}/{}) ", done, total);
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(border_style);
+        let block = Block::default().title(title).borders(Borders::ALL).border_style(border_style);
 
         let para = Paragraph::new(lines).block(block);
         frame.render_widget(para, area);
     }
 
     /// Render the buffer content
+    #[allow(clippy::too_many_arguments)]
     fn render_buffer(
         frame: &mut Frame,
         buffer_data: Option<&BufferData>,
@@ -441,11 +506,7 @@ impl UI {
         if let Some(md_lines) = preview_lines {
             let viewport_height = area.height as usize;
             // Slice to viewport height; pad with blank lines below.
-            let mut visible: Vec<Line> = md_lines
-                .iter()
-                .take(viewport_height)
-                .cloned()
-                .collect();
+            let mut visible: Vec<Line> = md_lines.iter().take(viewport_height).cloned().collect();
             while visible.len() < viewport_height {
                 visible.push(Line::from(Span::styled("~", Style::default().fg(Color::DarkGray))));
             }
@@ -468,7 +529,8 @@ impl UI {
             for row in start_line..end_line {
                 if let Some(line_text) = lines.get(row) {
                     // Check if this line has any diagnostics
-                    let has_diagnostic = diagnostics.iter().any(|d| d.range.start.line as usize == row);
+                    let has_diagnostic =
+                        diagnostics.iter().any(|d| d.range.start.line as usize == row);
                     // Only inject ghost text on the row/col it was requested for.
                     let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
                         if row == ghost_row && cursor.col == ghost_col {
@@ -479,10 +541,28 @@ impl UI {
                     });
                     // Use pre-highlighted spans when available, fall back to plain text.
                     let line_idx = row - start_line;
-                    let line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
-                        Self::render_highlighted_line(spans, *scroll_col, viewport_width, has_diagnostic, row_ghost, selection, row)
+                    let line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx))
+                    {
+                        Self::render_highlighted_line(
+                            spans,
+                            *scroll_col,
+                            viewport_width,
+                            has_diagnostic,
+                            row_ghost,
+                            selection,
+                            row,
+                        )
                     } else {
-                        Self::render_line(line_text, *scroll_col, viewport_width, row, selection, *scroll_row, has_diagnostic, row_ghost)
+                        Self::render_line(
+                            line_text,
+                            *scroll_col,
+                            viewport_width,
+                            row,
+                            selection,
+                            *scroll_row,
+                            has_diagnostic,
+                            row_ghost,
+                        )
                     };
                     visible_lines.push(line);
                 } else {
@@ -492,7 +572,8 @@ impl UI {
 
             // Fill remaining lines with ~
             for _ in visible_lines.len()..viewport_height {
-                visible_lines.push(Line::from(Span::styled("~", Style::default().fg(Color::DarkGray))));
+                visible_lines
+                    .push(Line::from(Span::styled("~", Style::default().fg(Color::DarkGray))));
             }
 
             let paragraph = Paragraph::new(visible_lines);
@@ -555,9 +636,9 @@ impl UI {
         let top_pad = area_h.saturating_sub(logo_h) / 2;
         let left_pad = area_w.saturating_sub(LOGO_W) / 2;
 
-        let cross_style  = Style::default().fg(Color::Yellow);
-        let word_style   = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-        let dim_style    = Style::default().fg(Color::DarkGray);
+        let cross_style = Style::default().fg(Color::Yellow);
+        let word_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let dim_style = Style::default().fg(Color::DarkGray);
 
         let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
 
@@ -686,7 +767,7 @@ impl UI {
                             } else {
                                 true // row > start.row && row < end.row (already checked)
                             }
-                        }
+                        },
                         None => false,
                     };
 
@@ -710,6 +791,7 @@ impl UI {
     }
 
     /// Render a single line with optional selection highlighting and ghost text.
+    #[allow(clippy::too_many_arguments)]
     fn render_line(
         line_text: &str,
         scroll_col: usize,
@@ -725,9 +807,7 @@ impl UI {
 
         // Prepare diagnostic marker if present
         let diag_marker = if has_diagnostic {
-            vec![
-                Span::styled("● ", Style::default().fg(Color::Red)),
-            ]
+            vec![Span::styled("● ", Style::default().fg(Color::Red))]
         } else {
             vec![Span::raw("  ")]
         };
@@ -773,10 +853,7 @@ impl UI {
             let mut line_spans = diag_marker;
             line_spans.extend(spans);
             if let Some(g) = ghost {
-                line_spans.push(Span::styled(
-                    g.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
+                line_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
             }
             Line::from(line_spans)
         } else {
@@ -790,10 +867,7 @@ impl UI {
             let mut line_spans = diag_marker;
             line_spans.push(Span::raw(visible_text));
             if let Some(g) = ghost {
-                line_spans.push(Span::styled(
-                    g.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
+                line_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
             }
             Line::from(line_spans)
         }
@@ -860,7 +934,7 @@ impl UI {
             // Center the picker
             let picker_width = 60.min(area.width);
             let picker_height = (buffers.len() + 6).min(area.height as usize);
-            
+
             let horizontal = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -922,8 +996,8 @@ impl UI {
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // query input
-                Constraint::Min(1),     // results
+                Constraint::Length(3), // query input
+                Constraint::Min(1),    // results
             ])
             .split(picker_area);
 
@@ -931,7 +1005,10 @@ impl UI {
         let query_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::LightCyan))
-            .title(Span::styled(" Find File ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                " Find File ",
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ))
             .title_bottom(Span::styled(
                 format!(
                     " {} files ",
@@ -940,11 +1017,9 @@ impl UI {
                 Style::default().fg(Color::DarkGray),
             ));
         let query_display = format!("> {query}_");
-        let query_para = Paragraph::new(Span::styled(
-            query_display,
-            Style::default().fg(Color::White),
-        ))
-        .block(query_block);
+        let query_para =
+            Paragraph::new(Span::styled(query_display, Style::default().fg(Color::White)))
+                .block(query_block);
         frame.render_widget(query_para, inner[0]);
 
         // ── Results list ────────────────────────────────────────────────────────
@@ -967,17 +1042,13 @@ impl UI {
                 // Footer: closing divider after recent files.
                 lines.push(Line::from(Span::styled(
                     "  ────────────────────────────────────────────────────────────────────",
-                    Style::default()
-                        .fg(Color::Rgb(30, 80, 110))
-                        .bg(Color::Rgb(20, 35, 50)),
+                    Style::default().fg(Color::Rgb(30, 80, 110)).bg(Color::Rgb(20, 35, 50)),
                 )));
                 continue;
             }
 
-            let display: String = path.strip_prefix(&current_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
+            let display: String =
+                path.strip_prefix(&current_dir).unwrap_or(path).to_string_lossy().to_string();
 
             let is_selected = idx == *selected_idx;
             let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
@@ -995,7 +1066,11 @@ impl UI {
                 // Build multi-span line with matched chars highlighted in yellow
                 let mut spans: Vec<Span> = vec![Span::styled(
                     prefix.to_string(),
-                    Style::default().bg(bg).fg(if is_selected { Color::White } else { Color::Reset }),
+                    Style::default().bg(bg).fg(if is_selected {
+                        Color::White
+                    } else {
+                        Color::Reset
+                    }),
                 )];
                 let chars: Vec<char> = display.chars().collect();
                 let mut ci = 0;
@@ -1050,7 +1125,7 @@ impl UI {
     /// Render the project-wide ripgrep search overlay (Mode::Search).
     fn render_search_panel(frame: &mut Frame, state: &SearchState, area: Rect) {
         // ── Centre a popup (≤90 cols wide, 80% screen height) ─────────────────
-        let popup_width  = 90.min(area.width);
+        let popup_width = 90.min(area.width);
         let popup_height = (area.height * 4 / 5).max(10).min(area.height);
         let h_pad = area.width.saturating_sub(popup_width) / 2;
         let v_pad = area.height.saturating_sub(popup_height) / 2;
@@ -1079,17 +1154,17 @@ impl UI {
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // query input (with ALL borders)
-                Constraint::Length(3),  // glob filter (LEFT|RIGHT|BOTTOM — shares query bottom)
-                Constraint::Min(1),     // results list (LEFT|RIGHT|BOTTOM)
+                Constraint::Length(3), // query input (with ALL borders)
+                Constraint::Length(3), // glob filter (LEFT|RIGHT|BOTTOM — shares query bottom)
+                Constraint::Min(1),    // results list (LEFT|RIGHT|BOTTOM)
             ])
             .split(popup_area);
 
         // ── Query input ───────────────────────────────────────────────────────
         let query_focused = state.focus == SearchFocus::Query;
-        let query_color   = if query_focused { Color::LightRed } else { Color::DarkGray };
-        let query_cursor  = if query_focused { "_" } else { "" };
-        let query_text    = format!("> {}{}", state.query, query_cursor);
+        let query_color = if query_focused { Color::LightRed } else { Color::DarkGray };
+        let query_cursor = if query_focused { "_" } else { "" };
+        let query_text = format!("> {}{}", state.query, query_cursor);
 
         let query_block = Block::default()
             .title(Span::styled(
@@ -1098,24 +1173,19 @@ impl UI {
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(query_color));
-        let query_para = Paragraph::new(Span::styled(query_text, Style::default().fg(Color::White)))
-            .block(query_block);
+        let query_para =
+            Paragraph::new(Span::styled(query_text, Style::default().fg(Color::White)))
+                .block(query_block);
         frame.render_widget(query_para, inner[0]);
 
         // ── Glob filter input ─────────────────────────────────────────────────
         let glob_focused = state.focus == SearchFocus::Glob;
-        let glob_color   = if glob_focused { Color::LightYellow } else { Color::DarkGray };
-        let glob_cursor  = if glob_focused { "_" } else { "" };
+        let glob_color = if glob_focused { Color::LightYellow } else { Color::DarkGray };
+        let glob_cursor = if glob_focused { "_" } else { "" };
         let (glob_text, glob_style) = if state.glob.is_empty() && !glob_focused {
-            (
-                "  *.rs, src/**/*.ts  …".to_string(),
-                Style::default().fg(Color::DarkGray),
-            )
+            ("  *.rs, src/**/*.ts  …".to_string(), Style::default().fg(Color::DarkGray))
         } else {
-            (
-                format!("  {}{}", state.glob, glob_cursor),
-                Style::default().fg(Color::White),
-            )
+            (format!("  {}{}", state.glob, glob_cursor), Style::default().fg(Color::White))
         };
         let glob_block = Block::default()
             .title(Span::styled(
@@ -1131,9 +1201,9 @@ impl UI {
         let visible_height = inner[2].height.saturating_sub(2) as usize;
 
         let status_title = match &state.status {
-            SearchStatus::Idle    => " Results ".to_string(),
+            SearchStatus::Idle => " Results ".to_string(),
             SearchStatus::Running => " Results  (searching…) ".to_string(),
-            SearchStatus::Done    => format!(
+            SearchStatus::Done => format!(
                 " {} result{} ",
                 state.results.len(),
                 if state.results.len() == 1 { "" } else { "s" }
@@ -1152,31 +1222,23 @@ impl UI {
 
         // Scroll so the selected result stays within the visible window.
         let selected = state.selected;
-        let scroll = if selected >= visible_height {
-            selected - visible_height + 1
-        } else {
-            0
-        };
+        let scroll = if selected >= visible_height { selected - visible_height + 1 } else { 0 };
 
         let mut lines: Vec<Line> = Vec::new();
 
         if state.results.is_empty() {
             let msg = match &state.status {
-                SearchStatus::Idle    => "  Type a query to search across project files…",
+                SearchStatus::Idle => "  Type a query to search across project files…",
                 SearchStatus::Running => "  Searching…",
-                SearchStatus::Done    => "  No results.",
+                SearchStatus::Done => "  No results.",
                 SearchStatus::Error(_) => "  Search failed — check the title bar for the error.",
             };
             lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))));
         } else {
-            for (idx, result) in state.results
-                .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible_height)
+            for (idx, result) in state.results.iter().enumerate().skip(scroll).take(visible_height)
             {
                 let is_selected = idx == selected;
-                let bg     = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
+                let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
                 let prefix = if is_selected { "► " } else { "  " };
 
                 // Truncate long match text to avoid wrapping.
@@ -1186,7 +1248,10 @@ impl UI {
                 let line = if is_selected {
                     Line::from(vec![
                         Span::styled(prefix.to_string(), Style::default().bg(bg)),
-                        Span::styled(loc, Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            loc,
+                            Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(text_preview, Style::default().bg(bg).fg(Color::White)),
                     ])
                 } else {
@@ -1205,6 +1270,7 @@ impl UI {
     }
 
     /// Render the status line
+    #[allow(clippy::too_many_arguments)]
     fn render_status_line(
         frame: &mut Frame,
         buffer_data: Option<&BufferData>,
@@ -1254,10 +1320,7 @@ impl UI {
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", mode_str),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(mode_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Black).bg(mode_color).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
         ];
@@ -1286,13 +1349,15 @@ impl UI {
 
         // Diagnostic count
         if !diagnostics.is_empty() {
-            let error_count = diagnostics.iter().filter(|d| {
-                matches!(d.severity, Some(lsp_types::DiagnosticSeverity::ERROR))
-            }).count();
-            let warning_count = diagnostics.iter().filter(|d| {
-                matches!(d.severity, Some(lsp_types::DiagnosticSeverity::WARNING))
-            }).count();
-            
+            let error_count = diagnostics
+                .iter()
+                .filter(|d| matches!(d.severity, Some(lsp_types::DiagnosticSeverity::ERROR)))
+                .count();
+            let warning_count = diagnostics
+                .iter()
+                .filter(|d| matches!(d.severity, Some(lsp_types::DiagnosticSeverity::WARNING)))
+                .count();
+
             spans.push(Span::raw(" "));
             if error_count > 0 {
                 spans.push(Span::styled(
@@ -1320,8 +1385,7 @@ impl UI {
         }
 
         let status_line = Line::from(spans);
-        let paragraph = Paragraph::new(status_line)
-            .style(Style::default().bg(Color::Black));
+        let paragraph = Paragraph::new(status_line).style(Style::default().bg(Color::Black));
 
         frame.render_widget(paragraph, area);
     }
@@ -1402,18 +1466,15 @@ impl UI {
             .skip(scroll)
             .take(visible_h)
             .map(|dl| match dl {
-                DiffLine::Added(s) => Line::from(Span::styled(
-                    format!("+ {s}"),
-                    Style::default().fg(Color::Green),
-                )),
-                DiffLine::Removed(s) => Line::from(Span::styled(
-                    format!("- {s}"),
-                    Style::default().fg(Color::Red),
-                )),
-                DiffLine::Context(s) => Line::from(Span::styled(
-                    format!("  {s}"),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                DiffLine::Added(s) => {
+                    Line::from(Span::styled(format!("+ {s}"), Style::default().fg(Color::Green)))
+                },
+                DiffLine::Removed(s) => {
+                    Line::from(Span::styled(format!("- {s}"), Style::default().fg(Color::Red)))
+                },
+                DiffLine::Context(s) => {
+                    Line::from(Span::styled(format!("  {s}"), Style::default().fg(Color::DarkGray)))
+                },
             })
             .collect();
         frame.render_widget(Paragraph::new(diff_lines), body_area);
@@ -1429,16 +1490,12 @@ impl UI {
                     height: 1,
                 };
                 frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        indicator,
-                        Style::default().fg(Color::DarkGray),
-                    )),
+                    Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray))),
                     ind,
                 );
             }
         }
     }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1459,9 +1516,7 @@ fn render_message_content(content: &str, width: usize) -> Vec<Line<'static>> {
                 // Header line.
                 lines.push(Line::from(vec![Span::styled(
                     "◌ thinking",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 )]));
                 // Plain word-wrap — no markdown parsing inside thinking blocks.
                 for paragraph in text.split('\n') {
@@ -1498,10 +1553,10 @@ fn render_message_content(content: &str, width: usize) -> Vec<Line<'static>> {
                 }
                 // Spacer between thinking block and the answer.
                 lines.push(Line::from(""));
-            }
+            },
             ContentSegment::Normal(text) => {
                 lines.extend(crate::markdown::render(&text, width));
-            }
+            },
         }
     }
 

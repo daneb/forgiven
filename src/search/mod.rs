@@ -115,12 +115,12 @@ pub async fn run_search(query: &str, glob: &str, cwd: &Path) -> Result<Vec<Searc
         "--max-filesize=1M".to_string(),
         // Noise-dir exclusions — single-quoted so the shell never expands them.
         "--glob='!.git/**'".to_string(),
-        "--glob='!target/**'".to_string(),       // Rust / Maven
+        "--glob='!target/**'".to_string(), // Rust / Maven
         "--glob='!node_modules/**'".to_string(),
         "--glob='!dist/**'".to_string(),
         "--glob='!build/**'".to_string(),
-        "--glob='!obj/**'".to_string(),          // .NET intermediate output
-        "--glob='!bin/**'".to_string(),          // .NET / generic build output
+        "--glob='!obj/**'".to_string(), // .NET intermediate output
+        "--glob='!bin/**'".to_string(), // .NET / generic build output
         "--glob='!*.lock'".to_string(),
     ];
 
@@ -138,11 +138,7 @@ pub async fn run_search(query: &str, glob: &str, cwd: &Path) -> Result<Vec<Searc
     let cmd = parts.join(" ");
     tracing::info!("search: {} -l -c \"{}\"", shell, cmd);
 
-    let out = Command::new(&shell)
-        .args(["-l", "-c", &cmd])
-        .current_dir(cwd)
-        .output()
-        .await?;
+    let out = Command::new(&shell).args(["-l", "-c", &cmd]).current_dir(cwd).output().await?;
 
     // rg exit codes:
     //   0  — one or more matches found
@@ -154,7 +150,7 @@ pub async fn run_search(query: &str, glob: &str, cwd: &Path) -> Result<Vec<Searc
     // Only 0 and 1 are "normal" outcomes.  Everything else is surfaced as an
     // error so the user sees it in the results panel title.
     match out.status.code() {
-        Some(0) | Some(1) => {} // normal rg outcomes
+        Some(0) | Some(1) => {}, // normal rg outcomes
         code => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!(
@@ -162,15 +158,11 @@ pub async fn run_search(query: &str, glob: &str, cwd: &Path) -> Result<Vec<Searc
                 code.map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string()),
                 stderr.trim()
             );
-        }
+        },
     }
 
     let raw = String::from_utf8_lossy(&out.stdout);
-    let results = raw
-        .lines()
-        .take(500)
-        .filter_map(|l| parse_rg_line(l, cwd))
-        .collect();
+    let results = raw.lines().take(500).filter_map(|l| parse_rg_line(l, cwd)).collect();
 
     Ok(results)
 }

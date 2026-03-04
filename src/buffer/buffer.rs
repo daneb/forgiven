@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use crate::buffer::cursor::Cursor;
 use crate::buffer::history::EditHistory;
+use std::path::PathBuf;
 
 /// Selection range for visual mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,8 +16,9 @@ impl Selection {
 
     /// Return normalized selection (start before end)
     pub fn normalized(&self) -> (Cursor, Cursor) {
-        if self.start.row < self.end.row || 
-           (self.start.row == self.end.row && self.start.col <= self.end.col) {
+        if self.start.row < self.end.row
+            || (self.start.row == self.end.row && self.start.col <= self.end.col)
+        {
             (self.start.clone(), self.end.clone())
         } else {
             (self.end.clone(), self.start.clone())
@@ -117,9 +118,13 @@ impl Buffer {
                 .enumerate()
                 .filter_map(|(i, l)| {
                     // Keep all lines; just strip the phantom trailing empty line
-                    let is_last_empty = i == content.replace("\r\n", "\n").matches('\n').count()
-                        && l.is_empty();
-                    if is_last_empty { None } else { Some(l.to_string()) }
+                    let is_last_empty =
+                        i == content.replace("\r\n", "\n").matches('\n').count() && l.is_empty();
+                    if is_last_empty {
+                        None
+                    } else {
+                        Some(l.to_string())
+                    }
                 })
                 .collect()
         };
@@ -161,16 +166,18 @@ impl Buffer {
             if v.last().map(|l| l.is_empty()).unwrap_or(false) {
                 v.pop();
             }
-            if v.is_empty() { vec![String::new()] } else { v }
+            if v.is_empty() {
+                vec![String::new()]
+            } else {
+                v
+            }
         };
         self.lines = new_lines;
         self.is_modified = false;
         // Clamp cursor so it stays in bounds after a potential line-count change
         self.cursor.row = self.cursor.row.min(self.lines.len().saturating_sub(1));
         let row = self.cursor.row;
-        self.cursor.col = self.cursor.col.min(
-            self.lines[row].len().saturating_sub(1)
-        );
+        self.cursor.col = self.cursor.col.min(self.lines[row].len().saturating_sub(1));
         tracing::info!("Reloaded buffer '{}' from disk", self.name);
         Ok(())
     }
@@ -375,15 +382,23 @@ impl Buffer {
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
 
         if is_word(chars[col]) {
-            while col < len && is_word(chars[col]) { col += 1; }
+            while col < len && is_word(chars[col]) {
+                col += 1;
+            }
         } else if chars[col].is_whitespace() {
-            while col < len && chars[col].is_whitespace() { col += 1; }
+            while col < len && chars[col].is_whitespace() {
+                col += 1;
+            }
         } else {
             // Punctuation / operator run
-            while col < len && !is_word(chars[col]) && !chars[col].is_whitespace() { col += 1; }
+            while col < len && !is_word(chars[col]) && !chars[col].is_whitespace() {
+                col += 1;
+            }
         }
         // Consume trailing spaces (like vim `dw`)
-        while col < len && chars[col] == ' ' { col += 1; }
+        while col < len && chars[col] == ' ' {
+            col += 1;
+        }
         col
     }
 
@@ -399,10 +414,7 @@ impl Buffer {
 
     /// Return text from cursor to end of line (y$).
     pub fn yank_to_line_end(&self) -> String {
-        self.lines[self.cursor.row]
-            .chars()
-            .skip(self.cursor.col)
-            .collect()
+        self.lines[self.cursor.row].chars().skip(self.cursor.col).collect()
     }
 
     /// Remove and return text from cursor to end of word (dw).
@@ -599,11 +611,7 @@ impl Buffer {
             let line = &mut self.lines[row];
             let byte_idx = char_to_byte_idx(line, col);
             // Find the start of the previous char
-            let prev_byte = line[..byte_idx]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let prev_byte = line[..byte_idx].char_indices().last().map(|(i, _)| i).unwrap_or(0);
             line.remove(prev_byte);
             self.cursor.col -= 1;
         }
@@ -677,15 +685,14 @@ impl Buffer {
     /// Move cursor to the first non-whitespace character on the current line (`^`).
     /// If the line is all whitespace (or empty), falls back to column 0.
     pub fn move_cursor_first_nonblank(&mut self) {
-        let col = self.lines
+        let col = self
+            .lines
             .get(self.cursor.row)
             .and_then(|line| {
-                line.char_indices()
-                    .find(|(_, c)| !c.is_whitespace())
-                    .map(|(byte_idx, _)| {
-                        // Convert byte index to char index
-                        line[..byte_idx].chars().count()
-                    })
+                line.char_indices().find(|(_, c)| !c.is_whitespace()).map(|(byte_idx, _)| {
+                    // Convert byte index to char index
+                    line[..byte_idx].chars().count()
+                })
             })
             .unwrap_or(0);
         self.cursor.col = col;
@@ -817,7 +824,7 @@ impl Buffer {
         let (min_row, max_row) = if anchor <= cur { (anchor, cur) } else { (cur, anchor) };
         self.selection = Some(Selection {
             start: Cursor { row: min_row, col: 0 },
-            end:   Cursor { row: max_row, col: usize::MAX },
+            end: Cursor { row: max_row, col: usize::MAX },
         });
     }
 
@@ -838,7 +845,9 @@ impl Buffer {
         let end = (start + count).min(self.lines.len());
         let yanked = self.lines[start..end].join("\n");
         self.lines.drain(start..end);
-        if self.lines.is_empty() { self.lines.push(String::new()); }
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
         self.cursor.row = start.min(self.lines.len() - 1);
         self.clamp_cursor_col();
         self.mark_modified();
@@ -861,7 +870,9 @@ impl Buffer {
         let (start, end) = sel.normalized();
         let end_row = end.row.min(self.lines.len().saturating_sub(1));
         self.lines.drain(start.row..=end_row);
-        if self.lines.is_empty() { self.lines.push(String::new()); }
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
         self.cursor.row = start.row.min(self.lines.len() - 1);
         self.cursor.col = 0;
         self.visual_line_anchor = None;
@@ -906,7 +917,8 @@ impl Buffer {
         // Jump to the first match after cursor, or first match overall
         if !self.search_matches.is_empty() {
             let current_pos = (self.cursor.row, self.cursor.col);
-            let idx = self.search_matches
+            let idx = self
+                .search_matches
                 .iter()
                 .position(|(r, c, _)| (*r, *c) > current_pos)
                 .unwrap_or(0);
@@ -945,11 +957,8 @@ impl Buffer {
         }
 
         if let Some(idx) = self.current_match_idx {
-            self.current_match_idx = Some(if idx == 0 {
-                self.search_matches.len() - 1
-            } else {
-                idx - 1
-            });
+            self.current_match_idx =
+                Some(if idx == 0 { self.search_matches.len() - 1 } else { idx - 1 });
         } else {
             self.current_match_idx = Some(self.search_matches.len() - 1);
         }
@@ -973,14 +982,14 @@ impl Buffer {
             if let Some(&(row, col, len)) = self.search_matches.get(idx) {
                 let line = &mut self.lines[row];
                 let chars: Vec<char> = line.chars().collect();
-                
+
                 if col + len <= chars.len() {
                     let before: String = chars[..col].iter().collect();
                     let after: String = chars[col + len..].iter().collect();
                     *line = format!("{}{}{}", before, replacement, after);
-                    
+
                     self.mark_modified();
-                    
+
                     // Update match list - need to recalculate
                     if let Some(pattern) = self.search_pattern.clone() {
                         self.set_search_pattern(pattern);
@@ -1006,36 +1015,38 @@ impl Buffer {
         for line in &mut self.lines {
             let mut new_line = String::new();
             let mut remaining = line.as_str();
-            
+
             loop {
                 let remaining_lower = remaining.to_lowercase();
                 match remaining_lower.find(&pattern_lower) {
                     Some(pos) => {
                         // Get the actual case-preserved match
-                        let byte_pos = remaining.char_indices()
+                        let byte_pos = remaining
+                            .char_indices()
                             .nth(remaining_lower[..pos].chars().count())
                             .map(|(i, _)| i)
                             .unwrap_or(0);
-                        
+
                         new_line.push_str(&remaining[..byte_pos]);
                         new_line.push_str(replacement);
-                        
+
                         // Skip past the match
-                        let skip_bytes = remaining.char_indices()
+                        let skip_bytes = remaining
+                            .char_indices()
                             .nth(remaining_lower[..pos].chars().count() + pattern.chars().count())
                             .map(|(i, _)| i)
                             .unwrap_or(remaining.len());
-                        
+
                         remaining = &remaining[skip_bytes..];
                         count += 1;
-                    }
+                    },
                     None => {
                         new_line.push_str(remaining);
                         break;
-                    }
+                    },
                 }
             }
-            
+
             *line = new_line;
         }
 
@@ -1100,10 +1111,7 @@ impl Buffer {
 /// Convert a char-index `col` to a UTF-8 byte index within `s`.
 /// If `col` exceeds the string's char count, returns `s.len()`.
 pub fn char_to_byte_idx(s: &str, col: usize) -> usize {
-    s.char_indices()
-        .nth(col)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
+    s.char_indices().nth(col).map(|(i, _)| i).unwrap_or(s.len())
 }
 
 #[cfg(test)]

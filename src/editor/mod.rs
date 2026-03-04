@@ -1,14 +1,11 @@
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    event::{EnableBracketedPaste, DisableBracketedPaste},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -21,11 +18,11 @@ use crate::config::Config;
 use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
-use crate::lsp::{LspManager, parse_first_inline_completion};
-use crate::search::{SearchState, SearchStatus, run_search};
+use crate::lsp::{parse_first_inline_completion, LspManager};
+use crate::search::{run_search, SearchState, SearchStatus};
 use crate::ui::UI;
-use ratatui::text::Span;
 use lsp_types::Diagnostic;
+use ratatui::text::Span;
 
 /// Whether the clipboard was populated by a line-wise or char-wise operation.
 /// Controls how `p`/`P` pastes the content.
@@ -63,31 +60,31 @@ struct HighlightCache {
 pub struct Editor {
     /// All open buffers
     buffers: Vec<Buffer>,
-    
+
     /// Index of the currently active buffer
     current_buffer_idx: usize,
-    
+
     /// Current editing mode (Normal, Insert, Command, Visual, PickBuffer)
     mode: Mode,
-    
+
     /// Command buffer for command mode (when user types :w, :q, etc.)
     command_buffer: String,
-    
+
     /// Key handler for processing input
     key_handler: KeyHandler,
-    
+
     /// Terminal backend
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    
+
     /// Whether the editor should quit
     should_quit: bool,
-    
+
     /// Status message to display (for feedback)
     status_message: Option<String>,
-    
+
     /// Currently selected buffer in PickBuffer mode
     buffer_picker_idx: usize,
-    
+
     /// Currently selected file in PickFile mode
     file_picker_idx: usize,
 
@@ -103,7 +100,7 @@ pub struct Editor {
 
     /// Most-recently-opened files, most recent first. Capped at 5. Persisted across sessions.
     recent_files: Vec<PathBuf>,
-    
+
     /// LSP manager for language server protocol support
     lsp_manager: LspManager,
 
@@ -181,7 +178,6 @@ pub struct Editor {
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
     config: Config,
-
 }
 
 impl Editor {
@@ -221,7 +217,7 @@ impl Editor {
             highlighter: Highlighter::new(),
             highlight_cache: None,
             file_explorer: FileExplorer::new(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             preview_scroll: 0,
             search_state: SearchState::new(),
@@ -242,9 +238,9 @@ impl Editor {
     /// Open a file into a new buffer.
     /// Creates an empty buffer for non-existent files (new file workflow).
     /// Returns Ok(()) for unsupported binary files, displaying a status message instead of crashing.
-    pub fn open_file(&mut self, path: &PathBuf) -> Result<()> {
+    pub fn open_file(&mut self, path: &std::path::Path) -> Result<()> {
         let buffer = if path.exists() {
-            match Buffer::from_file(path.clone()) {
+            match Buffer::from_file(path.to_path_buf()) {
                 Ok(buf) => buf,
                 Err(e) => {
                     self.set_status(format!(
@@ -255,12 +251,12 @@ impl Editor {
                         e
                     ));
                     return Ok(());
-                }
+                },
             }
         } else {
             // New file — create an empty named buffer
             let mut buf = Buffer::new(path.to_string_lossy().as_ref());
-            buf.file_path = Some(path.clone());
+            buf.file_path = Some(path.to_path_buf());
             buf
         };
         self.buffers.push(buffer);
@@ -277,9 +273,7 @@ impl Editor {
 
         // Notify LSP about opened document if a server is running for this language.
         let language = LspManager::language_from_path(path);
-        let text = self.current_buffer()
-            .map(|b| b.lines().join("\n"))
-            .unwrap_or_default();
+        let text = self.current_buffer().map(|b| b.lines().join("\n")).unwrap_or_default();
 
         if let Ok(uri) = LspManager::path_to_uri(path) {
             if let Some(client) = self.lsp_manager.get_client(&language) {
@@ -294,8 +288,8 @@ impl Editor {
     /// Call this once after `new()`, before `run()`.
     /// Failures are non-fatal — the editor keeps working without LSP.
     pub async fn setup_lsp(&mut self) {
-        let workspace_root = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         tracing::info!("LSP workspace root from current_dir: {:?}", workspace_root);
 
         for server in &self.config.lsp.servers.clone() {
@@ -307,42 +301,45 @@ impl Editor {
             );
             match self
                 .lsp_manager
-                .add_server(
-                    server.language.clone(),
-                    &server.command,
-                    &args,
-                    workspace_root.clone(),
-                )
+                .add_server(server.language.clone(), &server.command, &args, workspace_root.clone())
                 .await
             {
                 Err(e) => {
                     let msg = format!("LSP '{}': {}", server.command, e);
                     tracing::warn!("{}", msg);
                     self.set_status(msg);
-                }
+                },
                 Ok(()) => {
                     // If this is the Copilot server, immediately check auth status
                     // so we can prompt the user to sign in if needed.
                     if server.language == "copilot" {
                         if let Some(client) = self.lsp_manager.get_client("copilot") {
                             match client.copilot_check_status() {
-                                Ok(rx) => { self.copilot_auth_rx = Some(rx); }
-                                Err(e) => { tracing::warn!("copilot checkStatus failed: {}", e); }
+                                Ok(rx) => {
+                                    self.copilot_auth_rx = Some(rx);
+                                },
+                                Err(e) => {
+                                    tracing::warn!("copilot checkStatus failed: {}", e);
+                                },
                             }
                         }
                     }
-                }
+                },
             }
         }
 
         // Files were opened before LSP was ready — send did_open for each now.
-        let notifications: Vec<_> = self.buffers.iter().filter_map(|buf| {
-            let path = buf.file_path.as_ref()?;
-            let language = LspManager::language_from_path(path);
-            let uri = LspManager::path_to_uri(path).ok()?;
-            let text = buf.lines().join("\n");
-            Some((language, uri, text))
-        }).collect();
+        let notifications: Vec<_> = self
+            .buffers
+            .iter()
+            .filter_map(|buf| {
+                let path = buf.file_path.as_ref()?;
+                let language = LspManager::language_from_path(path);
+                let uri = LspManager::path_to_uri(path).ok()?;
+                let text = buf.lines().join("\n");
+                Some((language, uri, text))
+            })
+            .collect();
 
         for (language, uri, text) in notifications {
             if let Some(client) = self.lsp_manager.get_client(&language) {
@@ -413,27 +410,32 @@ impl Editor {
                     "OK" | "AlreadySignedIn" => {
                         let user = val.get("user").and_then(|u| u.as_str()).unwrap_or("unknown");
                         self.set_sticky(format!("Copilot: signed in as {}", user));
-                    }
+                    },
                     "NotSignedIn" => {
                         // Auto-escalate: start the device auth flow
                         if let Some(client) = self.lsp_manager.get_client("copilot") {
                             match client.copilot_sign_in_initiate() {
-                                Ok(rx) => { self.copilot_auth_rx = Some(rx); }
-                                Err(e) => { self.set_sticky(format!("Copilot sign-in failed: {}", e)); }
+                                Ok(rx) => {
+                                    self.copilot_auth_rx = Some(rx);
+                                },
+                                Err(e) => {
+                                    self.set_sticky(format!("Copilot sign-in failed: {}", e));
+                                },
                             }
                         }
-                    }
+                    },
                     "PromptUserDeviceFlow" => {
-                        let uri = val.get("verificationUri").and_then(|u| u.as_str()).unwrap_or("?");
+                        let uri =
+                            val.get("verificationUri").and_then(|u| u.as_str()).unwrap_or("?");
                         let code = val.get("userCode").and_then(|c| c.as_str()).unwrap_or("?");
                         self.set_sticky(format!(
                             "Copilot auth: go to {}  and enter code: {}  (Esc to dismiss)",
                             uri, code
                         ));
-                    }
+                    },
                     _ => {
                         self.set_sticky(format!("Copilot: {}", val));
-                    }
+                    },
                 }
             }
             // ──────────────────────────────────────────────────────────────────
@@ -447,8 +449,7 @@ impl Editor {
             // Reload any buffers the agent modified on disk this tick.
             let reloads: Vec<String> = std::mem::take(&mut self.agent_panel.pending_reloads);
             for rel_path in reloads {
-                let cwd = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 let abs_path = cwd.join(&rel_path);
                 // Canonicalize once — resolves symlinks, cleans ".." etc.
                 // Falls back to the plain joined path if the file somehow can't be stat'd.
@@ -456,17 +457,21 @@ impl Editor {
 
                 let mut reloaded = false;
                 for buf in &mut self.buffers {
-                    let matches = buf.file_path.as_ref().map(|fp| {
-                        // Case 1: buffer stored an absolute path (opened from explorer)
-                        // — compare both canonicalized so symlinks don't fool us.
-                        let fp_canon = fp.canonicalize().unwrap_or_else(|_| fp.clone());
-                        if fp_canon == canonical {
-                            return true;
-                        }
-                        // Case 2: buffer stored a relative path (opened from CLI)
-                        // — compare component-wise suffix of the file_path against rel_path.
-                        fp.ends_with(std::path::Path::new(&rel_path))
-                    }).unwrap_or(false);
+                    let matches = buf
+                        .file_path
+                        .as_ref()
+                        .map(|fp| {
+                            // Case 1: buffer stored an absolute path (opened from explorer)
+                            // — compare both canonicalized so symlinks don't fool us.
+                            let fp_canon = fp.canonicalize().unwrap_or_else(|_| fp.clone());
+                            if fp_canon == canonical {
+                                return true;
+                            }
+                            // Case 2: buffer stored a relative path (opened from CLI)
+                            // — compare component-wise suffix of the file_path against rel_path.
+                            fp.ends_with(std::path::Path::new(&rel_path))
+                        })
+                        .unwrap_or(false);
 
                     if matches {
                         if let Err(e) = buf.reload_from_disk() {
@@ -504,7 +509,7 @@ impl Editor {
                     Err(_) => {
                         // channel closed without a response
                         Some(serde_json::Value::Null)
-                    }
+                    },
                 }
             } else {
                 None
@@ -550,10 +555,10 @@ impl Editor {
                 match result {
                     Ok(results) => {
                         self.search_state.set_results(results);
-                    }
+                    },
                     Err(e) => {
                         self.search_state.status = SearchStatus::Error(e.to_string());
-                    }
+                    },
                 }
             }
             // ──────────────────────────────────────────────────────────────────
@@ -583,15 +588,15 @@ impl Editor {
                     Event::Key(key) => {
                         self.handle_key(key)?;
                         needs_render = true;
-                    }
+                    },
                     // Bracketed paste: the terminal wraps pasted text in escape sequences
                     // so it arrives as a single Event::Paste(String) instead of a stream
                     // of KeyCode::Char / KeyCode::Enter events.
                     Event::Paste(text) => {
                         self.handle_paste(text)?;
                         needs_render = true;
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
 
@@ -612,20 +617,14 @@ impl Editor {
         // while we need a mutable borrow below to call scroll_to_cursor().
         let status_owned = self.status_message.clone();
         let status = status_owned.as_deref();
-        let command_buffer_owned = if self.mode == Mode::Command {
-            Some(self.command_buffer.clone())
-        } else {
-            None
-        };
+        let command_buffer_owned =
+            if self.mode == Mode::Command { Some(self.command_buffer.clone()) } else { None };
         let command_buffer = command_buffer_owned.as_deref();
 
         // Check if we should show which-key
         let show_which_key = self.key_handler.should_show_which_key();
-        let which_key_options = if show_which_key {
-            Some(self.key_handler.which_key_options())
-        } else {
-            None
-        };
+        let which_key_options =
+            if show_which_key { Some(self.key_handler.which_key_options()) } else { None };
 
         // Get key sequence for display
         let key_sequence = self.key_handler.sequence();
@@ -643,15 +642,15 @@ impl Editor {
         //   neither        → [Min(1)]
         // Then subtract 2 for the diagnostic gutter that is always prepended.
         let size = self.terminal.size().unwrap_or_default();
-        let viewport_height = (size.height as usize)
-            .saturating_sub(if show_which_key { 11 } else { 1 });
+        let viewport_height =
+            (size.height as usize).saturating_sub(if show_which_key { 11 } else { 1 });
 
         const GUTTER: usize = 2;
         let total_w = size.width as usize;
         let editor_area_w = match (self.file_explorer.visible, self.agent_panel.visible) {
-            (true,  true)  => total_w.saturating_sub(25).saturating_sub(total_w * 35 / 100),
-            (true,  false) => total_w.saturating_sub(25),
-            (false, true)  => total_w * 60 / 100,
+            (true, true) => total_w.saturating_sub(25).saturating_sub(total_w * 35 / 100),
+            (true, false) => total_w.saturating_sub(25),
+            (false, true) => total_w * 60 / 100,
             (false, false) => total_w,
         };
         let viewport_width = editor_area_w.saturating_sub(GUTTER);
@@ -682,44 +681,43 @@ impl Editor {
 
         // Collect the cache key from an immutable borrow (borrow ends before mut access).
         let cache_key = self.current_buffer().map(|buf| {
-            let ext = buf.file_path.as_deref()
-                .map(Highlighter::extension_for)
-                .unwrap_or_default();
+            let ext = buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default();
             (buf.scroll_row, buf.lsp_version, ext)
         });
 
-        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> = if let Some((scroll_row, lsp_ver, ext)) = cache_key {
-            let cache_hit = self.highlight_cache.as_ref().map_or(false, |c| {
-                c.buffer_idx == buf_idx
-                    && c.scroll_row == scroll_row
-                    && c.lsp_version == lsp_ver
-            });
-
-            if cache_hit {
-                // Zero allocation: clone the already-built Span vecs.
-                self.highlight_cache.as_ref().map(|c| c.spans.clone())
-            } else {
-                // Cache miss: run syntect for the visible window and store result.
-                let spans = if let Some(buf) = self.current_buffer() {
-                    let end = (scroll_row + term_height).min(buf.lines().len());
-                    buf.lines()[scroll_row..end]
-                        .iter()
-                        .map(|line| self.highlighter.highlight_line(line, &ext))
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                self.highlight_cache = Some(HighlightCache {
-                    buffer_idx: buf_idx,
-                    scroll_row,
-                    lsp_version: lsp_ver,
-                    spans: spans.clone(),
+        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> =
+            if let Some((scroll_row, lsp_ver, ext)) = cache_key {
+                let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
+                    c.buffer_idx == buf_idx
+                        && c.scroll_row == scroll_row
+                        && c.lsp_version == lsp_ver
                 });
-                Some(spans)
-            }
-        } else {
-            None
-        };
+
+                if cache_hit {
+                    // Zero allocation: clone the already-built Span vecs.
+                    self.highlight_cache.as_ref().map(|c| c.spans.clone())
+                } else {
+                    // Cache miss: run syntect for the visible window and store result.
+                    let spans = if let Some(buf) = self.current_buffer() {
+                        let end = (scroll_row + term_height).min(buf.lines().len());
+                        buf.lines()[scroll_row..end]
+                            .iter()
+                            .map(|line| self.highlighter.highlight_line(line, &ext))
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    self.highlight_cache = Some(HighlightCache {
+                        buffer_idx: buf_idx,
+                        scroll_row,
+                        lsp_version: lsp_ver,
+                        spans: spans.clone(),
+                    });
+                    Some(spans)
+                }
+            } else {
+                None
+            };
 
         // Buffer list for PickBuffer mode
         let buffer_list = if self.mode == Mode::PickBuffer {
@@ -738,17 +736,15 @@ impl Editor {
             None
         };
 
-        let ghost = self.ghost_text.as_ref()
-            .map(|(text, row, col)| (text.as_str(), *row, *col));
+        let ghost = self.ghost_text.as_ref().map(|(text, row, col)| (text.as_str(), *row, *col));
 
         // ── Markdown preview lines ─────────────────────────────────────────────
         // Computed when in MarkdownPreview mode; scrolled by self.preview_scroll so
         // render_buffer() only needs to take(viewport_height) from the front.
         let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> =
             if mode == Mode::MarkdownPreview {
-                let content = self.current_buffer()
-                    .map(|buf| buf.lines().join("\n"))
-                    .unwrap_or_default();
+                let content =
+                    self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
                 let all_lines = crate::markdown::render(&content, viewport_width);
                 // Cap scroll so we can't scroll past the end.
                 let max_scroll = all_lines.len().saturating_sub(1);
@@ -759,19 +755,18 @@ impl Editor {
             };
 
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
-        let explorer_ref = if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
+        let explorer_ref =
+            if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
         let hl_ref = highlighted_lines.as_deref();
         let preview_ref = preview_lines_owned.as_deref();
         let search_ref = if mode == Mode::Search { Some(&self.search_state) } else { None };
-        let rename_buf_owned = if mode == Mode::RenameFile {
-            Some(self.rename_buffer.clone())
-        } else {
-            None
-        };
+        let rename_buf_owned =
+            if mode == Mode::RenameFile { Some(self.rename_buffer.clone()) } else { None };
         let rename_buf = rename_buf_owned.as_deref();
 
         let delete_path_owned = if mode == Mode::DeleteFile {
-            self.delete_confirm_path.as_ref()
+            self.delete_confirm_path
+                .as_ref()
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_string())
@@ -781,9 +776,12 @@ impl Editor {
         let delete_name = delete_path_owned.as_deref();
 
         let apply_diff_target_owned: Option<String> = if mode == Mode::ApplyDiff {
-            Some(self.apply_diff_path.as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(unsaved buffer)".to_string()))
+            Some(
+                self.apply_diff_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(unsaved buffer)".to_string()),
+            )
         } else {
             None
         };
@@ -849,7 +847,7 @@ impl Editor {
         match current {
             0 => self.file_explorer.blur(),
             2 => self.agent_panel.blur(),
-            _ => {}
+            _ => {},
         }
 
         // Focus the panel gaining focus.
@@ -857,14 +855,14 @@ impl Editor {
             0 => {
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
-            }
+            },
             2 => {
                 self.agent_panel.focus();
                 self.mode = Mode::Agent;
-            }
+            },
             _ => {
                 self.mode = Mode::Normal;
-            }
+            },
         }
     }
 
@@ -876,19 +874,31 @@ impl Editor {
         }
 
         // Clear transient status message on any new input (except sticky messages and picker modes).
-        if self.mode != Mode::PickBuffer && self.mode != Mode::PickFile
-            && self.mode != Mode::Search && !self.status_sticky
+        if self.mode != Mode::PickBuffer
+            && self.mode != Mode::PickFile
+            && self.mode != Mode::Search
+            && !self.status_sticky
         {
             self.status_message = None;
         }
 
         // Global: Ctrl+W cycles visible panels (Explorer → Editor → Agent → wrap).
         // Skip in modes that capture text input or show modal overlays.
-        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if !matches!(self.mode, Mode::Command | Mode::PickBuffer | Mode::PickFile | Mode::InFileSearch | Mode::RenameFile | Mode::DeleteFile | Mode::ApplyDiff) {
-                self.cycle_panel_focus();
-                return Ok(());
-            }
+        if key.code == KeyCode::Char('w')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(
+                self.mode,
+                Mode::Command
+                    | Mode::PickBuffer
+                    | Mode::PickFile
+                    | Mode::InFileSearch
+                    | Mode::RenameFile
+                    | Mode::DeleteFile
+                    | Mode::ApplyDiff
+            )
+        {
+            self.cycle_panel_focus();
+            return Ok(());
         }
 
         match self.mode {
@@ -923,7 +933,9 @@ impl Editor {
     fn execute_action(&mut self, action: Action) -> Result<()> {
         // Don't consume the count for Noop — the user may still be building a
         // count prefix (e.g. typing "3" before "d") and we must not lose it.
-        if matches!(action, Action::Noop) { return Ok(()); }
+        if matches!(action, Action::Noop) {
+            return Ok(());
+        }
 
         // Consume the accumulated count (defaults to 1 if none).
         let count = self.key_handler.take_count();
@@ -968,26 +980,26 @@ impl Editor {
                     buf.move_cursor_right();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             Action::InsertLineStart => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_start();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             Action::InsertLineEnd => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_end();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             Action::InsertNewlineBelow => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_end();
                     buf.insert_newline();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             Action::InsertNewlineAbove => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_start();
@@ -995,83 +1007,103 @@ impl Editor {
                     buf.move_cursor_up();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             Action::MoveLeft => {
                 // h — clamped, no line wrap; repeats `count` times
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_left_clamp(); }
+                    for _ in 0..count {
+                        buf.move_cursor_left_clamp();
+                    }
                 }
-            }
+            },
             Action::MoveRight => {
                 // l — clamped, no line wrap; repeats `count` times
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_right_clamp(); }
+                    for _ in 0..count {
+                        buf.move_cursor_right_clamp();
+                    }
                 }
-            }
+            },
             Action::MoveUp => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_up(); }
+                    for _ in 0..count {
+                        buf.move_cursor_up();
+                    }
                 }
-            }
+            },
             Action::MoveDown => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_down(); }
+                    for _ in 0..count {
+                        buf.move_cursor_down();
+                    }
                 }
-            }
+            },
             Action::MoveLineStart => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_start();
                 }
-            }
+            },
             Action::MoveFirstNonBlank => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_first_nonblank();
                 }
-            }
+            },
             Action::MoveLineEnd => {
                 // Used by A / InsertLineEnd (cursor goes past last char)
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_end();
                 }
-            }
+            },
             Action::MoveLineEndNormal => {
                 // Used by $ in Normal mode (cursor lands ON last char)
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_end_normal();
                 }
-            }
+            },
             Action::GotoFileTop => {
                 if let Some(buf) = self.current_buffer_mut() {
                     // `5gg` → jump to line 5 (1-based); bare `gg` → first line
-                    if count > 1 { buf.goto_line(count); } else { buf.goto_first_line(); }
+                    if count > 1 {
+                        buf.goto_line(count);
+                    } else {
+                        buf.goto_first_line();
+                    }
                 }
-            }
+            },
             Action::GotoFileBottom => {
                 if let Some(buf) = self.current_buffer_mut() {
                     // `5G` → jump to line 5 (1-based); bare `G` → last line
-                    if count > 1 { buf.goto_line(count); } else { buf.goto_last_line(); }
+                    if count > 1 {
+                        buf.goto_line(count);
+                    } else {
+                        buf.goto_last_line();
+                    }
                 }
-            }
+            },
             Action::MoveWordForward => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_word_forward(); }
+                    for _ in 0..count {
+                        buf.move_cursor_word_forward();
+                    }
                 }
-            }
+            },
             Action::MoveWordBackward => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    for _ in 0..count { buf.move_cursor_word_backward(); }
+                    for _ in 0..count {
+                        buf.move_cursor_word_backward();
+                    }
                 }
-            }
+            },
             Action::Command => {
                 self.mode = Mode::Command;
                 self.command_buffer.clear();
-            }
+            },
             Action::Visual => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.start_selection();
                 }
                 self.mode = Mode::Visual;
-            }
+            },
             Action::BufferList => {
                 if self.buffers.is_empty() {
                     self.set_status("No buffers open".to_string());
@@ -1079,13 +1111,16 @@ impl Editor {
                     self.buffer_picker_idx = self.current_buffer_idx;
                     self.mode = Mode::PickBuffer;
                 }
-            }
+            },
             Action::BufferNext => {
                 if !self.buffers.is_empty() {
                     self.current_buffer_idx = (self.current_buffer_idx + 1) % self.buffers.len();
-                    self.set_status(format!("Switched to buffer: {}", self.buffers[self.current_buffer_idx].name));
+                    self.set_status(format!(
+                        "Switched to buffer: {}",
+                        self.buffers[self.current_buffer_idx].name
+                    ));
                 }
-            }
+            },
             Action::BufferPrevious => {
                 if !self.buffers.is_empty() {
                     self.current_buffer_idx = if self.current_buffer_idx == 0 {
@@ -1093,9 +1128,12 @@ impl Editor {
                     } else {
                         self.current_buffer_idx - 1
                     };
-                    self.set_status(format!("Switched to buffer: {}", self.buffers[self.current_buffer_idx].name));
+                    self.set_status(format!(
+                        "Switched to buffer: {}",
+                        self.buffers[self.current_buffer_idx].name
+                    ));
                 }
-            }
+            },
             Action::BufferClose => {
                 if !self.buffers.is_empty() {
                     let buf = &self.buffers[self.current_buffer_idx];
@@ -1114,23 +1152,23 @@ impl Editor {
                         self.set_status(format!("Closed buffer: {}", name));
                     }
                 }
-            }
+            },
             Action::FileFind => {
-                self.scan_files();          // fills file_all
+                self.scan_files(); // fills file_all
                 self.file_query.clear();
-                self.refilter_files();      // fills file_list from file_all
+                self.refilter_files(); // fills file_list from file_all
                 if self.file_list.is_empty() {
                     self.set_status("No files found".to_string());
                 } else {
                     self.file_picker_idx = 0;
                     self.mode = Mode::PickFile;
                 }
-            }
+            },
             Action::FileNew => {
                 // Enter command mode pre-filled with "e " — user types the path.
                 self.command_buffer = "e ".to_string();
                 self.mode = Mode::Command;
-            }
+            },
             Action::FileSave => {
                 // Get file path and text before doing LSP operations
                 let (file_path, text) = if let Some(buf) = self.current_buffer_mut() {
@@ -1139,9 +1177,9 @@ impl Editor {
                 } else {
                     (None, String::new())
                 };
-                
+
                 self.set_status("File saved".to_string());
-                
+
                 // Notify LSP about saved document
                 if let Some(path) = file_path {
                     let language = LspManager::language_from_path(&path);
@@ -1151,33 +1189,33 @@ impl Editor {
                         }
                     }
                 }
-            }
+            },
             Action::Quit => {
                 self.check_quit()?;
-            }
+            },
             Action::LspHover => {
                 self.request_hover();
-            }
+            },
             Action::LspGoToDefinition => {
                 self.request_goto_definition();
-            }
+            },
             Action::LspReferences => {
                 self.request_references();
-            }
+            },
             Action::LspRename => {
                 self.set_status("Rename not yet implemented".to_string());
                 // TODO: Implement rename workflow
-            }
+            },
             Action::LspDocumentSymbols => {
                 self.set_status("Document symbols not yet implemented".to_string());
                 // TODO: Implement symbol picker
-            }
+            },
             Action::LspNextDiagnostic => {
                 self.goto_next_diagnostic();
-            }
+            },
             Action::LspPrevDiagnostic => {
                 self.goto_prev_diagnostic();
-            }
+            },
             Action::AgentToggle => {
                 self.agent_panel.toggle_visible();
                 if self.agent_panel.visible {
@@ -1196,7 +1234,7 @@ impl Editor {
                 } else {
                     self.mode = Mode::Normal;
                 }
-            }
+            },
             Action::AgentFocus => {
                 if !self.agent_panel.visible {
                     self.agent_panel.visible = true;
@@ -1214,7 +1252,7 @@ impl Editor {
                         });
                     });
                 }
-            }
+            },
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
                 if self.file_explorer.visible {
@@ -1222,11 +1260,11 @@ impl Editor {
                 } else {
                     self.mode = Mode::Normal;
                 }
-            }
+            },
             Action::ExplorerFocus => {
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
-            }
+            },
             Action::ExplorerToggleHidden => {
                 self.file_explorer.toggle_hidden();
                 let status = if self.file_explorer.show_hidden {
@@ -1235,11 +1273,11 @@ impl Editor {
                     "Explorer: hiding hidden files"
                 };
                 self.set_status(status.to_string());
-            }
+            },
             // ── Git ───────────────────────────────────────────────────────────
             Action::GitOpen => {
                 self.open_lazygit()?;
-            }
+            },
             // ── Markdown preview ──────────────────────────────────────────────
             Action::MarkdownPreviewToggle => {
                 if self.mode == Mode::MarkdownPreview {
@@ -1248,107 +1286,104 @@ impl Editor {
                 } else {
                     self.preview_scroll = 0;
                     self.mode = Mode::MarkdownPreview;
-                    self.set_status("Markdown preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string());
+                    self.set_status(
+                        "Markdown preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string(),
+                    );
                 }
-            }
+            },
             Action::MarkdownOpenBrowser => {
                 self.open_markdown_in_browser();
-            }
+            },
             // ── Project-wide text search ──────────────────────────────────────
             Action::SearchOpen => {
                 self.search_state = SearchState::new();
                 self.search_rx = None;
                 self.last_search_instant = None;
                 self.mode = Mode::Search;
-            }
+            },
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.delete_char_at_cursor();
                 }
                 self.notify_lsp_change();
-            }
+            },
             // ── Linewise deletes/yanks (paste creates new rows) ───────────────
             Action::DeleteLine => {
                 // `count` lines deleted, e.g. `3dd` removes 3 lines
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_lines(count));
+                let deleted = self.current_buffer_mut().map(|buf| buf.delete_lines(count));
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Linewise));
                 }
                 self.notify_lsp_change();
-            }
+            },
             Action::YankLine => {
                 // `count` lines yanked, e.g. `3yy` copies 3 lines
-                let yanked = self.current_buffer()
-                    .map(|buf| buf.yank_lines(count));
+                let yanked = self.current_buffer().map(|buf| buf.yank_lines(count));
                 if let Some(text) = yanked {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Linewise));
-                    self.set_status(format!("{count} line{} yanked", if count == 1 { "" } else { "s" }));
+                    self.set_status(format!(
+                        "{count} line{} yanked",
+                        if count == 1 { "" } else { "s" }
+                    ));
                 }
-            }
+            },
             Action::ChangeLine => {
                 // `count` lines deleted then enter Insert, e.g. `3cc`
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_lines(count));
+                let deleted = self.current_buffer_mut().map(|buf| buf.delete_lines(count));
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Linewise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             // ── Visual Line mode ─────────────────────────────────────────────
             Action::VisualLine => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.start_selection_line();
                 }
                 self.mode = Mode::VisualLine;
-            }
+            },
             // ── Charwise deletes/yanks (paste inserts inline) ─────────────────
             Action::DeleteToLineEnd => {
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_to_line_end());
+                let deleted = self.current_buffer_mut().map(|buf| buf.delete_to_line_end());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                 }
                 self.notify_lsp_change();
-            }
+            },
             Action::DeleteWord => {
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_word());
+                let deleted = self.current_buffer_mut().map(|buf| buf.delete_word());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                 }
                 self.notify_lsp_change();
-            }
+            },
             Action::YankWord => {
-                let yanked = self.current_buffer()
-                    .map(|buf| buf.yank_word());
+                let yanked = self.current_buffer().map(|buf| buf.yank_word());
                 if let Some(text) = yanked {
                     let n = text.chars().count();
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.set_status(format!("{n} chars yanked"));
                 }
-            }
+            },
             Action::YankToLineEnd => {
-                let yanked = self.current_buffer()
-                    .map(|buf| buf.yank_to_line_end());
+                let yanked = self.current_buffer().map(|buf| buf.yank_to_line_end());
                 if let Some(text) = yanked {
                     let n = text.chars().count();
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.set_status(format!("{n} chars yanked"));
                 }
-            }
+            },
             Action::YankSelection => {
-                let yanked = self.current_buffer()
-                    .and_then(|buf| buf.yank_selection());
+                let yanked = self.current_buffer().and_then(|buf| buf.yank_selection());
                 if let Some(text) = yanked {
                     let n = text.chars().count();
                     self.sync_system_clipboard(&text);
@@ -1359,27 +1394,25 @@ impl Editor {
                     buf.clear_selection();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
             Action::DeleteSelection => {
-                let deleted = self.current_buffer_mut()
-                    .and_then(|buf| buf.delete_selection());
+                let deleted = self.current_buffer_mut().and_then(|buf| buf.delete_selection());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
             Action::ChangeWord => {
-                let deleted = self.current_buffer_mut()
-                    .map(|buf| buf.delete_word());
+                let deleted = self.current_buffer_mut().map(|buf| buf.delete_word());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
             // ── Paste — dispatch on clipboard type ────────────────────────────
             Action::PasteAfter => {
                 if let Some((text, clip_type)) = self.clipboard.clone() {
@@ -1391,7 +1424,7 @@ impl Editor {
                     }
                     self.notify_lsp_change();
                 }
-            }
+            },
             Action::PasteBefore => {
                 if let Some((text, clip_type)) = self.clipboard.clone() {
                     if let Some(buf) = self.current_buffer_mut() {
@@ -1402,41 +1435,37 @@ impl Editor {
                     }
                     self.notify_lsp_change();
                 }
-            }
+            },
             Action::Undo => {
-                let did_undo = self.current_buffer_mut()
-                    .map(|buf| buf.undo())
-                    .unwrap_or(false);
+                let did_undo = self.current_buffer_mut().map(|buf| buf.undo()).unwrap_or(false);
                 if did_undo {
                     self.notify_lsp_change();
                 } else {
                     self.set_status("Already at oldest change".to_string());
                 }
-            }
+            },
             Action::Redo => {
-                let did_redo = self.current_buffer_mut()
-                    .map(|buf| buf.redo())
-                    .unwrap_or(false);
+                let did_redo = self.current_buffer_mut().map(|buf| buf.redo()).unwrap_or(false);
                 if did_redo {
                     self.notify_lsp_change();
                 } else {
                     self.set_status("Already at newest change".to_string());
                 }
-            }
+            },
             Action::InFileSearchStart => {
                 self.in_file_search_buffer.clear();
                 self.mode = Mode::InFileSearch;
-            }
+            },
             Action::InFileSearchNext => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.search_next();
                 }
-            }
+            },
             Action::InFileSearchPrev => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.search_prev();
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -1450,31 +1479,30 @@ impl Editor {
                     buf.clear_selection();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
 
             // ── Yank / delete / change operators ──────────────────────────────
             // y — copy selection to register + system clipboard, back to Normal
             KeyCode::Char('y') => {
                 self.execute_action(Action::YankSelection)?;
-            }
+            },
             // d / x — delete selection into register, back to Normal
             KeyCode::Char('d') | KeyCode::Char('x') => {
                 self.execute_action(Action::DeleteSelection)?;
-            }
+            },
             // c — delete selection + enter Insert mode
             KeyCode::Char('c') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save_undo_snapshot();
                 }
-                let deleted = self.current_buffer_mut()
-                    .and_then(|buf| buf.delete_selection());
+                let deleted = self.current_buffer_mut().and_then(|buf| buf.delete_selection());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
 
             // ── Motion keys (extend the selection) ────────────────────────────
             KeyCode::Char('h') | KeyCode::Left => {
@@ -1482,62 +1510,62 @@ impl Editor {
                     buf.move_cursor_left();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('l') | KeyCode::Right => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_right();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_up();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_down();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('w') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_word_forward();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('b') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_word_backward();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('0') | KeyCode::Home => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_start();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('^') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_first_nonblank();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('$') | KeyCode::End => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_line_end_normal();
                     buf.update_selection();
                 }
-            }
+            },
             KeyCode::Char('G') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.goto_last_line();
                     buf.update_selection();
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -1554,13 +1582,12 @@ impl Editor {
                     buf.clear_selection();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
 
             // ── Yank selection (linewise) ─────────────────────────────────────
             // `y` — copy selected lines into register + system clipboard, Normal
             KeyCode::Char('y') => {
-                let yanked = self.current_buffer()
-                    .and_then(|buf| buf.yank_selection_lines());
+                let yanked = self.current_buffer().and_then(|buf| buf.yank_selection_lines());
                 if let Some(text) = yanked {
                     let n = text.lines().count();
                     self.sync_system_clipboard(&text);
@@ -1571,7 +1598,7 @@ impl Editor {
                     buf.clear_selection();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
 
             // ── Delete / change selection (linewise) ─────────────────────────
             // `d` / `x` — remove selected lines, store in register, Normal
@@ -1579,30 +1606,30 @@ impl Editor {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save_undo_snapshot();
                 }
-                let deleted = self.current_buffer_mut()
-                    .and_then(|buf| buf.delete_selection_lines());
+                let deleted =
+                    self.current_buffer_mut().and_then(|buf| buf.delete_selection_lines());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Linewise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Normal;
-            }
+            },
 
             // `c` — remove selected lines + enter Insert
             KeyCode::Char('c') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save_undo_snapshot();
                 }
-                let deleted = self.current_buffer_mut()
-                    .and_then(|buf| buf.delete_selection_lines());
+                let deleted =
+                    self.current_buffer_mut().and_then(|buf| buf.delete_selection_lines());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
                     self.clipboard = Some((text, ClipboardType::Linewise));
                     self.notify_lsp_change();
                 }
                 self.mode = Mode::Insert;
-            }
+            },
 
             // ── Motion keys (extend the line selection) ───────────────────────
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1610,19 +1637,19 @@ impl Editor {
                     buf.move_cursor_down();
                     buf.update_selection_line();
                 }
-            }
+            },
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_up();
                     buf.update_selection_line();
                 }
-            }
+            },
             KeyCode::Char('G') => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.goto_last_line();
                     buf.update_selection_line();
                 }
-            }
+            },
             KeyCode::Char('g') => {
                 // gg — go to first line (we can't use pending_key here easily,
                 // so a single `g` press jumps to the top — matches common muscle
@@ -1631,9 +1658,9 @@ impl Editor {
                     buf.goto_first_line();
                     buf.update_selection_line();
                 }
-            }
+            },
 
-            _ => {}
+            _ => {},
         }
         Ok(())
     }
@@ -1644,23 +1671,23 @@ impl Editor {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.status_message = None;
-            }
+            },
             KeyCode::Enter => {
                 self.current_buffer_idx = self.buffer_picker_idx;
                 self.mode = Mode::Normal;
                 self.status_message = None;
-            }
+            },
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.buffer_picker_idx > 0 {
                     self.buffer_picker_idx -= 1;
                 }
-            }
+            },
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.buffer_picker_idx + 1 < self.buffers.len() {
                     self.buffer_picker_idx += 1;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -1672,7 +1699,7 @@ impl Editor {
                 self.mode = Mode::Normal;
                 self.file_query.clear();
                 self.status_message = None;
-            }
+            },
             KeyCode::Enter => {
                 if let Some((path, _)) = self.file_list.get(self.file_picker_idx) {
                     if !Self::is_picker_sentinel(path) {
@@ -1682,7 +1709,7 @@ impl Editor {
                         self.open_file(&path_clone)?;
                     }
                 }
-            }
+            },
             KeyCode::Up => {
                 let mut idx = self.file_picker_idx;
                 while idx > 0 {
@@ -1692,7 +1719,7 @@ impl Editor {
                         break;
                     }
                 }
-            }
+            },
             KeyCode::Down => {
                 let mut idx = self.file_picker_idx;
                 while idx + 1 < self.file_list.len() {
@@ -1702,16 +1729,16 @@ impl Editor {
                         break;
                     }
                 }
-            }
+            },
             KeyCode::Backspace => {
                 self.file_query.pop();
                 self.refilter_files();
-            }
+            },
             KeyCode::Char(c) => {
                 self.file_query.push(c);
                 self.refilter_files();
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -1723,30 +1750,28 @@ impl Editor {
             KeyCode::Esc => {
                 self.agent_panel.blur();
                 self.mode = Mode::Normal;
-            }
+            },
             // Tab — toggle focus back to editor without closing.
             KeyCode::Tab => {
                 self.agent_panel.blur();
                 self.mode = Mode::Normal;
-            }
+            },
             // Alt+Enter — insert a newline into the multi-line input.
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.agent_panel.input_newline();
-            }
+            },
             // Enter — submit the input.
             KeyCode::Enter => {
                 // Snapshot current buffer content as context, including its path
                 // so the model knows which file is open and can reference it directly.
                 let context = self.current_buffer().map(|buf| {
-                    let path_header = buf.file_path
-                        .as_deref()
-                        .and_then(|p| p.to_str())
-                        .unwrap_or(&buf.name);
+                    let path_header =
+                        buf.file_path.as_deref().and_then(|p| p.to_str()).unwrap_or(&buf.name);
                     format!("File: {path_header}\n\n{}", buf.lines().join("\n"))
                 });
                 // Project root for tool sandboxing.
-                let project_root = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 // Submit is async; spawn a task and let the stream_rx handle tokens.
                 let panel = &mut self.agent_panel;
                 let max_rounds = self.config.max_agent_rounds;
@@ -1755,7 +1780,13 @@ impl Editor {
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
-                let fut = panel.submit(context, project_root, max_rounds, warning_threshold, &preferred_model);
+                let fut = panel.submit(
+                    context,
+                    project_root,
+                    max_rounds,
+                    warning_threshold,
+                    &preferred_model,
+                );
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process
                 // in the async run() loop.  For now use tokio::task::block_in_place.
@@ -1766,11 +1797,11 @@ impl Editor {
                         }
                     });
                 });
-            }
+            },
             // Backspace — delete last input character.
             KeyCode::Backspace => {
                 self.agent_panel.input_backspace();
-            }
+            },
             // Scroll history.
             KeyCode::Up => self.agent_panel.scroll_up(),
             KeyCode::Down => self.agent_panel.scroll_down(),
@@ -1780,7 +1811,8 @@ impl Editor {
             // On first press, fetches the live model list from the Copilot API.
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Eagerly load models if not yet fetched (brief one-time network call).
-                if self.agent_panel.available_models.is_empty() {
+                let was_empty = self.agent_panel.available_models.is_empty();
+                if was_empty {
                     self.set_status("Loading model list…".to_string());
                     let preferred = self.config.default_copilot_model.clone();
                     tokio::task::block_in_place(|| {
@@ -1790,20 +1822,27 @@ impl Editor {
                             }
                         });
                     });
+                    // First press: just confirm the config-preferred model; don't advance past it.
+                } else {
+                    // Subsequent presses: cycle to next model and persist the choice.
+                    self.agent_panel.cycle_model();
+                    let model_id = self.agent_panel.selected_model_id().to_string();
+                    let model_name = self.agent_panel.selected_model_display().to_string();
+                    self.config.default_copilot_model = model_id.clone();
+                    if let Err(e) = self.config.save() {
+                        tracing::warn!("Failed to save config: {e}");
+                    }
+                    // Clear conversation history so the new model gets a clean context.
+                    self.agent_panel.new_conversation(&model_name);
                 }
-                self.agent_panel.cycle_model();
-                let model = self.agent_panel.selected_model_id().to_string();
+                let model_name = self.agent_panel.selected_model_display().to_string();
                 let n = self.agent_panel.available_models.len();
                 let idx = self.agent_panel.selected_model + 1;
-                
-                // Save the selected model to config
-                self.config.default_copilot_model = model.clone();
-                if let Err(e) = self.config.save() {
-                    tracing::warn!("Failed to save config: {e}");
-                }
-                
-                self.set_status(format!("Agent model → {model}  [{idx}/{n}]  (Ctrl+T to cycle)"));
-            }
+
+                self.set_status(format!(
+                    "Agent model → {model_name}  [{idx}/{n}]  (Ctrl+T to cycle)"
+                ));
+            },
             // Ctrl+Shift+T — refresh model list from API (picks up new releases).
             KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.set_status("Refreshing model list from API…".to_string());
@@ -1814,13 +1853,15 @@ impl Editor {
                             tracing::warn!("Could not refresh model list: {e}");
                             self.set_status(format!("Failed to refresh models: {e}"));
                         } else {
-                            let model = self.agent_panel.selected_model_id().to_string();
+                            let model_name = self.agent_panel.selected_model_display().to_string();
                             let n = self.agent_panel.available_models.len();
-                            self.set_status(format!("Refreshed {n} models, selected: {model}"));
+                            self.set_status(format!(
+                                "Refreshed {n} models, selected: {model_name}"
+                            ));
                         }
                     });
                 });
-            }
+            },
             // Regular characters — handle special agent commands before appending to input.
             KeyCode::Char(ch) => {
                 // If awaiting continuation, 'y' approves and 'n' denies.
@@ -1829,18 +1870,18 @@ impl Editor {
                         'y' | 'Y' => {
                             self.agent_panel.approve_continuation();
                             self.set_status("Continuing agent work...".to_string());
-                        }
+                        },
                         'n' | 'N' => {
                             self.agent_panel.deny_continuation();
                             self.set_status("Agent stopped by user".to_string());
-                        }
+                        },
                         _ => {
                             // Ignore other keys when awaiting continuation
-                        }
+                        },
                     }
                     return Ok(());
                 }
-                
+
                 // 'y' with empty input = yank the last assistant reply to the system clipboard.
                 if ch == 'y' && self.agent_panel.input.is_empty() {
                     if let Some(text) = self.agent_panel.last_assistant_reply() {
@@ -1855,27 +1896,45 @@ impl Editor {
 
                 // 'a' with empty input = open apply-diff overlay.
                 if ch == 'a' && self.agent_panel.input.is_empty() {
-                    if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate() {
+                    if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate()
+                    {
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("."));
                         let (resolved_path, current_content) = if let Some(hint) = path_hint {
                             let abs = cwd.join(&hint);
-                            let content = self.buffers.iter()
-                                .find(|b| b.file_path.as_ref().map(|fp|
-                                    fp.canonicalize().unwrap_or_else(|_| fp.clone()) ==
-                                    abs.canonicalize().unwrap_or_else(|_| abs.clone())
-                                ).unwrap_or(false))
+                            let content = self
+                                .buffers
+                                .iter()
+                                .find(|b| {
+                                    b.file_path
+                                        .as_ref()
+                                        .map(|fp| {
+                                            fp.canonicalize().unwrap_or_else(|_| fp.clone())
+                                                == abs
+                                                    .canonicalize()
+                                                    .unwrap_or_else(|_| abs.clone())
+                                        })
+                                        .unwrap_or(false)
+                                })
                                 .map(|b| b.lines().join("\n"))
-                                .or_else(|| if abs.exists() { std::fs::read_to_string(&abs).ok() } else { None })
+                                .or_else(|| {
+                                    if abs.exists() {
+                                        std::fs::read_to_string(&abs).ok()
+                                    } else {
+                                        None
+                                    }
+                                })
                                 .unwrap_or_default();
                             (Some(abs), content)
                         } else {
-                            let (path, content) = self.current_buffer()
+                            let (path, content) = self
+                                .current_buffer()
                                 .map(|b| (b.file_path.clone(), b.lines().join("\n")))
                                 .unwrap_or_default();
                             (path, content)
                         };
-                        let old: Vec<String> = current_content.lines().map(str::to_string).collect();
+                        let old: Vec<String> =
+                            current_content.lines().map(str::to_string).collect();
                         let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
                         self.apply_diff_lines = lcs_diff(&old, &new);
                         self.apply_diff_path = resolved_path;
@@ -1888,8 +1947,8 @@ impl Editor {
                 } else {
                     self.agent_panel.input_char(ch);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -1925,13 +1984,13 @@ impl Editor {
                 // Blur explorer, return to editor (keep panel visible)
                 self.file_explorer.blur();
                 self.mode = Mode::Normal;
-            }
+            },
             KeyCode::Up | KeyCode::Char('k') => {
                 self.file_explorer.move_up();
-            }
+            },
             KeyCode::Down | KeyCode::Char('j') => {
                 self.file_explorer.move_down();
-            }
+            },
             KeyCode::Enter | KeyCode::Char('l') => {
                 let idx = self.file_explorer.cursor_idx;
                 let selected = self.file_explorer.selected_path();
@@ -1945,7 +2004,7 @@ impl Editor {
                         self.open_file(&path)?;
                     }
                 }
-            }
+            },
             // h — toggle hidden files visibility
             KeyCode::Char('h') => {
                 self.file_explorer.toggle_hidden();
@@ -1955,15 +2014,24 @@ impl Editor {
                     "Explorer: hiding hidden files"
                 };
                 self.set_status(status.to_string());
-            }
+            },
             // n — new file: pre-fill command mode with "e <dir>/" so the user
             //     only needs to type the filename and press Enter.
             KeyCode::Char('n') => {
                 // Resolve the target directory: selected dir, or parent of selected file,
                 // or fall back to the explorer root.
-                let target_dir = self.file_explorer
+                let target_dir = self
+                    .file_explorer
                     .selected_path()
-                    .map(|p| if p.is_dir() { p } else { p.parent().map(|x| x.to_path_buf()).unwrap_or(self.file_explorer.root_path.clone()) })
+                    .map(|p| {
+                        if p.is_dir() {
+                            p
+                        } else {
+                            p.parent()
+                                .map(|x| x.to_path_buf())
+                                .unwrap_or(self.file_explorer.root_path.clone())
+                        }
+                    })
                     .unwrap_or_else(|| self.file_explorer.root_path.clone());
 
                 // Build a project-relative prefix for readability.
@@ -1973,24 +2041,17 @@ impl Editor {
                     .to_string_lossy()
                     .to_string();
 
-                let prefill = if rel.is_empty() {
-                    "e ".to_string()
-                } else {
-                    format!("e {}/", rel)
-                };
+                let prefill = if rel.is_empty() { "e ".to_string() } else { format!("e {}/", rel) };
 
                 self.file_explorer.blur();
                 self.command_buffer = prefill;
                 self.mode = Mode::Command;
-            }
+            },
             // r — rename selected entry (falls back to reload when nothing is selected).
             // R — reload / refresh the file tree from disk.
             KeyCode::Char('r') => {
                 if let Some(path) = self.file_explorer.selected_path() {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                     self.rename_source = Some(path);
                     self.rename_buffer = name;
                     self.file_explorer.blur();
@@ -1999,11 +2060,11 @@ impl Editor {
                     self.file_explorer.reload();
                     self.set_status("Explorer refreshed".to_string());
                 }
-            }
+            },
             KeyCode::Char('R') => {
                 self.file_explorer.reload();
                 self.set_status("Explorer refreshed".to_string());
-            }
+            },
             // d — delete selected entry (with confirmation popup).
             KeyCode::Char('d') => {
                 if let Some(path) = self.file_explorer.selected_path() {
@@ -2011,8 +2072,8 @@ impl Editor {
                     self.file_explorer.blur();
                     self.mode = Mode::DeleteFile;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -2026,17 +2087,17 @@ impl Editor {
                 self.rename_buffer.clear();
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
-            }
+            },
             KeyCode::Enter => {
                 self.do_rename()?;
-            }
+            },
             KeyCode::Backspace => {
                 self.rename_buffer.pop();
-            }
+            },
             KeyCode::Char(c) if c != '/' && c != '\\' => {
                 self.rename_buffer.push(c);
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -2053,7 +2114,8 @@ impl Editor {
         }
 
         if let Some(src) = self.rename_source.take() {
-            let dst = src.parent()
+            let dst = src
+                .parent()
                 .map(|p| p.join(&new_name))
                 .ok_or_else(|| anyhow::anyhow!("No parent directory"))?;
 
@@ -2075,10 +2137,7 @@ impl Editor {
             // Refresh the explorer tree
             self.file_explorer.reload();
 
-            let old_name = src.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_string();
+            let old_name = src.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
             self.rename_buffer.clear();
             self.file_explorer.focus();
             self.mode = Mode::Explorer;
@@ -2093,13 +2152,13 @@ impl Editor {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.do_delete()?;
-            }
+            },
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.delete_confirm_path = None;
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -2113,19 +2172,14 @@ impl Editor {
             }
 
             // Close any open buffers under the deleted path (handles dirs too)
-            self.buffers.retain(|buf| {
-                buf.file_path.as_ref().map_or(true, |p| !p.starts_with(&path))
-            });
+            self.buffers.retain(|buf| buf.file_path.as_ref().is_none_or(|p| !p.starts_with(&path)));
             if self.current_buffer_idx >= self.buffers.len() {
                 self.current_buffer_idx = self.buffers.len().saturating_sub(1);
             }
 
             self.file_explorer.reload();
 
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_string();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
             self.file_explorer.focus();
             self.mode = Mode::Explorer;
             self.set_status(format!("Deleted '{}'", name));
@@ -2150,20 +2204,20 @@ impl Editor {
                 self.agent_panel.focus();
                 self.mode = Mode::Agent;
                 self.set_status("Apply discarded".to_string());
-            }
+            },
             KeyCode::Char('j') | KeyCode::Down => {
                 self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(1);
-            }
+            },
             KeyCode::Char('k') | KeyCode::Up => {
                 self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(1);
-            }
+            },
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(20);
-            }
+            },
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(20);
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -2175,7 +2229,7 @@ impl Editor {
                 self.clear_apply_diff();
                 self.mode = Mode::Normal;
                 return Ok(());
-            }
+            },
         };
         let path = self.apply_diff_path.take();
         self.apply_diff_lines.clear();
@@ -2187,15 +2241,14 @@ impl Editor {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                let to_write = if content.ends_with('\n') {
-                    content.clone()
-                } else {
-                    format!("{content}\n")
-                };
+                let to_write =
+                    if content.ends_with('\n') { content.clone() } else { format!("{content}\n") };
                 std::fs::write(p, &to_write)?;
                 let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
                 for buf in &mut self.buffers {
-                    let matches = buf.file_path.as_ref()
+                    let matches = buf
+                        .file_path
+                        .as_ref()
                         .map(|fp| fp.canonicalize().unwrap_or_else(|_| fp.clone()) == canon)
                         .unwrap_or(false);
                     if matches {
@@ -2204,7 +2257,7 @@ impl Editor {
                 }
                 self.mode = Mode::Normal;
                 self.set_status(format!("Applied to {}", p.display()));
-            }
+            },
             None => {
                 let new_lines: Vec<String> = content.lines().map(str::to_string).collect();
                 if let Some(buf) = self.current_buffer_mut() {
@@ -2212,7 +2265,7 @@ impl Editor {
                 }
                 self.mode = Mode::Normal;
                 self.set_status("Applied to unsaved buffer".to_string());
-            }
+            },
         }
         Ok(())
     }
@@ -2224,7 +2277,7 @@ impl Editor {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.in_file_search_buffer.clear();
-            }
+            },
             KeyCode::Enter => {
                 let pattern = self.in_file_search_buffer.clone();
                 self.in_file_search_buffer.clear();
@@ -2239,14 +2292,14 @@ impl Editor {
                 } else {
                     self.set_status(format!("{} match(es) found", count));
                 }
-            }
+            },
             KeyCode::Char(c) => {
                 self.in_file_search_buffer.push(c);
-            }
+            },
             KeyCode::Backspace => {
                 self.in_file_search_buffer.pop();
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -2258,39 +2311,39 @@ impl Editor {
             // Esc / q — exit preview, return to Normal
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Normal;
-            }
+            },
 
             // j / Down — scroll down one line
             KeyCode::Char('j') | KeyCode::Down => {
                 self.preview_scroll = self.preview_scroll.saturating_add(1);
-            }
+            },
 
             // k / Up — scroll up one line
             KeyCode::Char('k') | KeyCode::Up => {
                 self.preview_scroll = self.preview_scroll.saturating_sub(1);
-            }
+            },
 
             // Ctrl+D — scroll down half-page (10 lines)
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.preview_scroll = self.preview_scroll.saturating_add(10);
-            }
+            },
 
             // Ctrl+U — scroll up half-page (10 lines)
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);
-            }
+            },
 
             // g — jump to top
             KeyCode::Char('g') => {
                 self.preview_scroll = 0;
-            }
+            },
 
             // G — jump to bottom (approximate — capped in render())
             KeyCode::Char('G') => {
                 self.preview_scroll = usize::MAX / 2; // capped by render()
-            }
+            },
 
-            _ => {}
+            _ => {},
         }
         Ok(())
     }
@@ -2305,7 +2358,7 @@ impl Editor {
                 self.mode = Mode::Normal;
                 self.search_rx = None;
                 self.last_search_instant = None;
-            }
+            },
 
             // Enter — open the selected result at the matched line.
             KeyCode::Enter => {
@@ -2320,41 +2373,49 @@ impl Editor {
                         buf.goto_line(line + 1); // goto_line expects 1-based
                     }
                 }
-            }
+            },
 
             // Tab — switch focus between query and glob fields.
             KeyCode::Tab => {
                 self.search_state.focus = match self.search_state.focus {
                     SearchFocus::Query => SearchFocus::Glob,
-                    SearchFocus::Glob  => SearchFocus::Query,
+                    SearchFocus::Glob => SearchFocus::Query,
                 };
-            }
+            },
 
             // Navigation within results list.
             KeyCode::Up | KeyCode::Char('k') => {
                 self.search_state.select_up();
-            }
+            },
             KeyCode::Down | KeyCode::Char('j') => {
                 self.search_state.select_down();
-            }
+            },
 
             // Text editing in the focused field.
             KeyCode::Backspace => {
                 match self.search_state.focus {
-                    SearchFocus::Query => { self.search_state.query.pop(); }
-                    SearchFocus::Glob  => { self.search_state.glob.pop(); }
+                    SearchFocus::Query => {
+                        self.search_state.query.pop();
+                    },
+                    SearchFocus::Glob => {
+                        self.search_state.glob.pop();
+                    },
                 }
                 self.on_search_input_changed();
-            }
+            },
             KeyCode::Char(c) => {
                 match self.search_state.focus {
-                    SearchFocus::Query => { self.search_state.query.push(c); }
-                    SearchFocus::Glob  => { self.search_state.glob.push(c); }
+                    SearchFocus::Query => {
+                        self.search_state.query.push(c);
+                    },
+                    SearchFocus::Glob => {
+                        self.search_state.glob.push(c);
+                    },
                 }
                 self.on_search_input_changed();
-            }
+            },
 
-            _ => {}
+            _ => {},
         }
         Ok(())
     }
@@ -2370,9 +2431,8 @@ impl Editor {
     /// Spawn a tokio task that runs ripgrep and delivers results via oneshot channel.
     fn fire_search(&mut self) {
         let query = self.search_state.query.clone();
-        let glob  = self.search_state.glob.clone();
-        let cwd   = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let glob = self.search_state.glob.clone();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let (tx, rx) = oneshot::channel();
         self.search_rx = Some(rx);
         self.search_state.status = SearchStatus::Running;
@@ -2382,7 +2442,6 @@ impl Editor {
         });
     }
 
-    /// Scan filesystem for files (excluding common ignored directories)
     // ── Fuzzy file search ──────────────────────────────────────────────────────
 
     /// Score `query` against `candidate` using a subsequence-match algorithm.
@@ -2428,9 +2487,8 @@ impl Editor {
         // Bonus: first matched char appears late in the path (filename > directory)
         if let Some(&first) = indices.first() {
             // Reward matches that are in the filename portion (after the last /)
-            let last_sep = c_chars.iter().rposition(|&c| c == '/' || c == '\\')
-                .map(|p| p + 1)
-                .unwrap_or(0);
+            let last_sep =
+                c_chars.iter().rposition(|&c| c == '/' || c == '\\').map(|p| p + 1).unwrap_or(0);
             if first >= last_sep {
                 score += 15;
             }
@@ -2449,7 +2507,8 @@ impl Editor {
 
         if self.file_query.is_empty() {
             // No query → show recent files (scoped to cwd) first, then all project files.
-            let recents: Vec<PathBuf> = self.recent_files
+            let recents: Vec<PathBuf> = self
+                .recent_files
                 .iter()
                 .filter(|p| p.exists() && p.starts_with(&cwd))
                 .cloned()
@@ -2478,13 +2537,11 @@ impl Editor {
             self.file_picker_idx = if recents.is_empty() { 0 } else { 1 };
             return;
         } else {
-            let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self.file_all
+            let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self
+                .file_all
                 .iter()
                 .filter_map(|p| {
-                    let display = p.strip_prefix(&cwd)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .to_string();
+                    let display = p.strip_prefix(&cwd).unwrap_or(p).to_string_lossy().to_string();
                     Self::fuzzy_score(&self.file_query, &display)
                         .map(|(score, idxs)| (score, p.clone(), idxs))
                 })
@@ -2507,7 +2564,7 @@ impl Editor {
     /// - `PathBuf::new()`       → "─── Recent ───" section header
     /// - `PathBuf::from("\x01")` → closing divider after the recent section
     #[inline]
-    fn is_picker_sentinel(path: &PathBuf) -> bool {
+    fn is_picker_sentinel(path: &std::path::Path) -> bool {
         path.as_os_str().is_empty() || path.to_str() == Some("\x01")
     }
 
@@ -2536,7 +2593,8 @@ impl Editor {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = self.recent_files
+        let text = self
+            .recent_files
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -2566,16 +2624,15 @@ impl Editor {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             // Skip hidden files, common build dirs, and IDE folders
-            if file_name.starts_with('.') 
-                || file_name == "target" 
+            if file_name.starts_with('.')
+                || file_name == "target"
                 || file_name == "node_modules"
                 || file_name == "dist"
-                || file_name == "build" {
+                || file_name == "build"
+            {
                 continue;
             }
 
@@ -2583,7 +2640,8 @@ impl Editor {
                 // Skip binary and lock files
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_str().unwrap_or("");
-                    if ext_str == "lock" || ext_str == "exe" || ext_str == "dll" || ext_str == "so" {
+                    if ext_str == "lock" || ext_str == "exe" || ext_str == "dll" || ext_str == "so"
+                    {
                         continue;
                     }
                 }
@@ -2600,7 +2658,8 @@ impl Editor {
             // Tab: accept ghost text suggestion if one is displayed at the cursor.
             KeyCode::Tab => {
                 if let Some((text, row, col)) = self.ghost_text.take() {
-                    let cursor_matches = self.current_buffer()
+                    let cursor_matches = self
+                        .current_buffer()
                         .map(|b| b.cursor.row == row && b.cursor.col == col)
                         .unwrap_or(false);
                     if cursor_matches {
@@ -2609,10 +2668,8 @@ impl Editor {
                                 if let Some(buf) = self.current_buffer_mut() {
                                     buf.insert_newline();
                                 }
-                            } else {
-                                if let Some(buf) = self.current_buffer_mut() {
-                                    buf.insert_char(ch);
-                                }
+                            } else if let Some(buf) = self.current_buffer_mut() {
+                                buf.insert_char(ch);
                             }
                         }
                         self.pending_completion = None;
@@ -2628,7 +2685,7 @@ impl Editor {
                     buf.insert_char('\t');
                 }
                 true
-            }
+            },
             KeyCode::Esc => {
                 // Clear ghost text when leaving Insert mode.
                 self.ghost_text = None;
@@ -2636,59 +2693,59 @@ impl Editor {
                 self.last_edit_instant = None;
                 self.mode = Mode::Normal;
                 false
-            }
+            },
             KeyCode::Char(c) => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.insert_char(c);
                 }
                 true
-            }
+            },
             KeyCode::Enter => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.insert_newline();
                 }
                 true
-            }
+            },
             KeyCode::Backspace => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.delete_char_before();
                 }
                 true
-            }
+            },
             KeyCode::Delete => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.delete_char_at();
                 }
                 true
-            }
+            },
             KeyCode::Left => {
                 self.ghost_text = None;
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_left();
                 }
                 false
-            }
+            },
             KeyCode::Right => {
                 self.ghost_text = None;
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_right();
                 }
                 false
-            }
+            },
             KeyCode::Up => {
                 self.ghost_text = None;
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_up();
                 }
                 false
-            }
+            },
             KeyCode::Down => {
                 self.ghost_text = None;
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.move_cursor_down();
                 }
                 false
-            }
+            },
             _ => false,
         };
 
@@ -2706,19 +2763,19 @@ impl Editor {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.command_buffer.clear();
-            }
+            },
             KeyCode::Enter => {
                 self.execute_command()?;
                 self.mode = Mode::Normal;
                 self.command_buffer.clear();
-            }
+            },
             KeyCode::Char(c) => {
                 self.command_buffer.push(c);
-            }
+            },
             KeyCode::Backspace => {
                 self.command_buffer.pop();
-            }
-            _ => {}
+            },
+            _ => {},
         }
 
         Ok(())
@@ -2731,22 +2788,22 @@ impl Editor {
         match cmd {
             "q" | "quit" => {
                 self.check_quit()?;
-            }
+            },
             "q!" | "quit!" => {
                 self.should_quit = true;
-            }
+            },
             "w" | "write" => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save()?;
                     self.set_status("File saved".to_string());
                 }
-            }
+            },
             "wq" => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save()?;
                 }
                 self.should_quit = true;
-            }
+            },
             // :bd / :bdelete — close buffer, refuse if unsaved
             "bd" | "bdelete" => {
                 if !self.buffers.is_empty() {
@@ -2766,7 +2823,7 @@ impl Editor {
                         self.set_status(format!("Closed buffer: {name}"));
                     }
                 }
-            }
+            },
             // :bd! / :bdelete! — force-close buffer, discarding unsaved changes
             "bd!" | "bdelete!" => {
                 if !self.buffers.is_empty() {
@@ -2778,7 +2835,7 @@ impl Editor {
                     }
                     self.set_status(format!("Closed buffer: {name} (discarded changes)"));
                 }
-            }
+            },
             "copilot status" => {
                 let completion_state = if self.ghost_text.is_some() {
                     "suggestion ready (Tab to accept)"
@@ -2793,7 +2850,7 @@ impl Editor {
                     if has_server { "running" } else { "not connected" },
                     completion_state
                 ));
-            }
+            },
             "copilot auth" => {
                 // Re-run the auth check + sign-in initiate flow manually.
                 if let Some(client) = self.lsp_manager.get_client("copilot") {
@@ -2801,18 +2858,20 @@ impl Editor {
                         Ok(rx) => {
                             self.copilot_auth_rx = Some(rx);
                             self.set_status("Copilot: checking auth status…".to_string());
-                        }
+                        },
                         Err(e) => {
                             self.set_status(format!("Copilot auth error: {}", e));
-                        }
+                        },
                     }
                 } else {
-                    self.set_status("Copilot: server not connected (check config.toml)".to_string());
+                    self.set_status(
+                        "Copilot: server not connected (check config.toml)".to_string(),
+                    );
                 }
-            }
+            },
             // :e <path> / :edit <path> — open or create a file
             _ if cmd.starts_with("e ") || cmd.starts_with("edit ") => {
-                let path_str = cmd.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                let path_str = cmd.split_once(' ').map(|(_, rest)| rest).unwrap_or("").trim();
                 if path_str.is_empty() {
                     self.set_status("Usage: e <path>  (e.g.  e src/main.rs)".to_string());
                 } else {
@@ -2821,9 +2880,7 @@ impl Editor {
                         if p.is_absolute() {
                             p
                         } else {
-                            std::env::current_dir()
-                                .unwrap_or_else(|_| PathBuf::from("."))
-                                .join(p)
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p)
                         }
                     };
                     self.open_file(&path)?;
@@ -2832,7 +2889,7 @@ impl Editor {
                         self.file_explorer.reload();
                     }
                 }
-            }
+            },
             // :s/pattern/replacement or :s/pattern/replacement/g
             _ if cmd.starts_with("s/") => {
                 let rest = &cmd[2..];
@@ -2847,7 +2904,8 @@ impl Editor {
                         buf.set_search_pattern(pattern);
                     }
                     if global {
-                        let count = self.current_buffer_mut()
+                        let count = self
+                            .current_buffer_mut()
                             .map(|buf| buf.replace_all(&replacement))
                             .unwrap_or(0);
                         if count == 0 {
@@ -2857,7 +2915,8 @@ impl Editor {
                             self.set_status(format!("{} replacement(s) made", count));
                         }
                     } else {
-                        let made = self.current_buffer_mut()
+                        let made = self
+                            .current_buffer_mut()
                             .map(|buf| buf.replace_current(&replacement))
                             .unwrap_or(false);
                         if made {
@@ -2868,10 +2927,10 @@ impl Editor {
                         }
                     }
                 }
-            }
+            },
             _ => {
                 self.set_status(format!("Unknown command: {}", cmd));
-            }
+            },
         }
 
         Ok(())
@@ -2910,7 +2969,7 @@ impl Editor {
                 if let Err(e) = cb.set_text(text.to_string()) {
                     tracing::debug!("system clipboard write failed: {e}");
                 }
-            }
+            },
             Err(e) => tracing::debug!("system clipboard unavailable: {e}"),
         }
     }
@@ -2923,7 +2982,7 @@ impl Editor {
             None => {
                 self.set_status("No file open or LSP not available".to_string());
                 return;
-            }
+            },
         };
 
         // TODO: Actually request hover and display result
@@ -2938,7 +2997,7 @@ impl Editor {
             None => {
                 self.set_status("No file open or LSP not available".to_string());
                 return;
-            }
+            },
         };
 
         self.set_status("Go-to-definition requested (not yet fully implemented)".to_string());
@@ -2951,7 +3010,7 @@ impl Editor {
             None => {
                 self.set_status("No file open or LSP not available".to_string());
                 return;
-            }
+            },
         };
 
         self.set_status("Find references requested (not yet fully implemented)".to_string());
@@ -2964,15 +3023,16 @@ impl Editor {
             return;
         }
 
-        let current_line = self.current_buffer()
-            .map(|buf| buf.cursor.row)
-            .unwrap_or(0);
-        
+        let current_line = self.current_buffer().map(|buf| buf.cursor.row).unwrap_or(0);
+
         // Find next diagnostic after current line and extract position
-        let next_diag = self.current_diagnostics
+        let next_diag = self
+            .current_diagnostics
             .iter()
             .find(|d| d.range.start.line as usize > current_line)
-            .map(|d| (d.range.start.line as usize, d.range.start.character as usize, d.message.clone()));
+            .map(|d| {
+                (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
+            });
 
         if let Some((row, col, msg)) = next_diag {
             if let Some(buf) = self.current_buffer_mut() {
@@ -2983,9 +3043,10 @@ impl Editor {
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to first diagnostic
-            let first_diag = self.current_diagnostics.first()
-                .map(|d| (d.range.start.line as usize, d.range.start.character as usize, d.message.clone()));
-            
+            let first_diag = self.current_diagnostics.first().map(|d| {
+                (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
+            });
+
             if let Some((row, col, msg)) = first_diag {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.cursor.row = row;
@@ -3004,16 +3065,17 @@ impl Editor {
             return;
         }
 
-        let current_line = self.current_buffer()
-            .map(|buf| buf.cursor.row)
-            .unwrap_or(0);
-        
+        let current_line = self.current_buffer().map(|buf| buf.cursor.row).unwrap_or(0);
+
         // Find previous diagnostic before current line and extract position
-        let prev_diag = self.current_diagnostics
+        let prev_diag = self
+            .current_diagnostics
             .iter()
             .rev()
             .find(|d| (d.range.start.line as usize) < current_line)
-            .map(|d| (d.range.start.line as usize, d.range.start.character as usize, d.message.clone()));
+            .map(|d| {
+                (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
+            });
 
         if let Some((row, col, msg)) = prev_diag {
             if let Some(buf) = self.current_buffer_mut() {
@@ -3024,9 +3086,10 @@ impl Editor {
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to last diagnostic
-            let last_diag = self.current_diagnostics.last()
-                .map(|d| (d.range.start.line as usize, d.range.start.character as usize, d.message.clone()));
-            
+            let last_diag = self.current_diagnostics.last().map(|d| {
+                (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
+            });
+
             if let Some((row, col, msg)) = last_diag {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.cursor.row = row;
@@ -3043,10 +3106,8 @@ impl Editor {
         let buf = self.current_buffer()?;
         let path = buf.file_path.as_ref()?;
         let uri = LspManager::path_to_uri(path).ok()?;
-        let position = lsp_types::Position {
-            line: buf.cursor.row as u32,
-            character: buf.cursor.col as u32,
-        };
+        let position =
+            lsp_types::Position { line: buf.cursor.row as u32, character: buf.cursor.col as u32 };
         Some((uri, position))
     }
 
@@ -3159,10 +3220,10 @@ impl Editor {
                 self.set_status(
                     "lazygit not found — install it (e.g. brew install lazygit)".to_string(),
                 );
-            }
+            },
             Err(e) => {
                 self.set_status(format!("lazygit error: {e}"));
-            }
+            },
             Ok(_) => {
                 // Reload every open buffer — a git pull/checkout/rebase may have
                 // changed files on disk that are currently open in the editor.
@@ -3172,7 +3233,7 @@ impl Editor {
                     }
                 }
                 self.set_status("Returned from lazygit".to_string());
-            }
+            },
         }
 
         Ok(())
@@ -3189,7 +3250,7 @@ impl Editor {
             None => {
                 self.set_status("No buffer open".to_string());
                 return;
-            }
+            },
         };
 
         let file_stem = self
@@ -3275,8 +3336,12 @@ fn lcs_diff(old: &[String], new: &[String]) -> Vec<DiffLine> {
     const CAP: usize = 2000;
     if old.len() > CAP || new.len() > CAP {
         let mut r = Vec::with_capacity(old.len() + new.len());
-        for l in old { r.push(DiffLine::Removed(l.clone())); }
-        for l in new { r.push(DiffLine::Added(l.clone())); }
+        for l in old {
+            r.push(DiffLine::Removed(l.clone()));
+        }
+        for l in new {
+            r.push(DiffLine::Added(l.clone()));
+        }
         return r;
     }
     let (m, n) = (old.len(), new.len());

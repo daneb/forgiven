@@ -8,18 +8,18 @@ pub enum Mode {
     Normal,
     Insert,
     Command,
-    Visual,           // character-wise visual selection (v)
-    VisualLine,       // line-wise visual selection (V)
-    PickBuffer,       // For buffer selection UI
-    PickFile,         // For file finder UI
-    Agent,            // Copilot Chat / agent panel focused
-    Explorer,         // File explorer tree focused
-    MarkdownPreview,  // Read-only rendered markdown view (SPC m p toggle)
-    Search,           // Project-wide ripgrep search overlay (SPC s g)
-    InFileSearch,     // In-file search mode (/)
-    RenameFile,       // Rename popup: user edits a filename from the explorer
-    DeleteFile,       // Confirmation popup: y=delete, n/Esc=cancel
-    ApplyDiff,        // Full-screen diff preview before applying agent code block
+    Visual,          // character-wise visual selection (v)
+    VisualLine,      // line-wise visual selection (V)
+    PickBuffer,      // For buffer selection UI
+    PickFile,        // For file finder UI
+    Agent,           // Copilot Chat / agent panel focused
+    Explorer,        // File explorer tree focused
+    MarkdownPreview, // Read-only rendered markdown view (SPC m p toggle)
+    Search,          // Project-wide ripgrep search overlay (SPC s g)
+    InFileSearch,    // In-file search mode (/)
+    RenameFile,      // Rename popup: user edits a filename from the explorer
+    DeleteFile,      // Confirmation popup: y=delete, n/Esc=cancel
+    ApplyDiff,       // Full-screen diff preview before applying agent code block
 }
 
 /// An editor action to be executed
@@ -38,33 +38,33 @@ pub enum Action {
     MoveUp,
     MoveDown,
     MoveLineStart,
-    MoveFirstNonBlank,  // ^ — first non-whitespace char on the line
+    MoveFirstNonBlank, // ^ — first non-whitespace char on the line
     #[allow(dead_code)]
-    MoveLineEnd,        // A / InsertLineEnd motion (past last char)
-    MoveLineEndNormal,  // $ in Normal mode (lands ON last char)
+    MoveLineEnd, // A / InsertLineEnd motion (past last char)
+    MoveLineEndNormal, // $ in Normal mode (lands ON last char)
     MoveWordForward,
     MoveWordBackward,
     // Navigation
-    GotoFileTop,        // gg
-    GotoFileBottom,     // G
+    GotoFileTop,    // gg
+    GotoFileBottom, // G
     Command,
     Visual,
     // Edit operations
-    DeleteChar,         // x — delete char at cursor
-    DeleteLine,         // dd — delete current line into clipboard
-    DeleteToLineEnd,    // D  — delete from cursor to EOL
-    DeleteWord,         // dw — delete from cursor to end of word
-    YankLine,           // yy — yank whole line
-    YankWord,           // yw — yank to end of word
-    YankToLineEnd,      // y$ — yank to end of line
-    YankSelection,      // y in Visual mode — yank selection
-    DeleteSelection,    // d/x in Visual mode — delete selection into clipboard
-    ChangeLine,         // cc — delete line + enter Insert
-    ChangeWord,         // cw — delete word + enter Insert
-    PasteAfter,         // p
-    PasteBefore,        // P
-    Undo,               // u
-    Redo,               // Ctrl+R
+    DeleteChar,      // x — delete char at cursor
+    DeleteLine,      // dd — delete current line into clipboard
+    DeleteToLineEnd, // D  — delete from cursor to EOL
+    DeleteWord,      // dw — delete from cursor to end of word
+    YankLine,        // yy — yank whole line
+    YankWord,        // yw — yank to end of word
+    YankToLineEnd,   // y$ — yank to end of line
+    YankSelection,   // y in Visual mode — yank selection
+    DeleteSelection, // d/x in Visual mode — delete selection into clipboard
+    ChangeLine,      // cc — delete line + enter Insert
+    ChangeWord,      // cw — delete word + enter Insert
+    PasteAfter,      // p
+    PasteBefore,     // P
+    Undo,            // u
+    Redo,            // Ctrl+R
     // Leader key actions
     BufferList,
     BufferNext,
@@ -94,16 +94,16 @@ pub enum Action {
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen,    // SPC g g — open lazygit
+    GitOpen, // SPC g g — open lazygit
     // Markdown preview
-    MarkdownPreviewToggle,  // SPC m p — toggle markdown preview for .md buffers
-    MarkdownOpenBrowser,    // SPC m b — render current buffer to HTML and open in browser
+    MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
+    MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
     // Project-wide text search
-    SearchOpen,             // SPC s g — open the project search overlay
+    SearchOpen, // SPC s g — open the project search overlay
     // In-file search
-    InFileSearchStart,      // / — start search in current buffer
-    InFileSearchNext,       // n — jump to next match
-    InFileSearchPrev,       // N — jump to previous match
+    InFileSearchStart, // / — start search in current buffer
+    InFileSearchNext,  // n — jump to next match
+    InFileSearchPrev,  // N — jump to previous match
 }
 
 /// Represents a keybinding tree node
@@ -116,19 +116,11 @@ pub struct KeyNode {
 
 impl KeyNode {
     fn new(desc: impl Into<String>) -> Self {
-        Self {
-            description: desc.into(),
-            action: None,
-            children: HashMap::new(),
-        }
+        Self { description: desc.into(), action: None, children: HashMap::new() }
     }
 
     fn leaf(desc: impl Into<String>, action: Action) -> Self {
-        Self {
-            description: desc.into(),
-            action: Some(action),
-            children: HashMap::new(),
-        }
+        Self { description: desc.into(), action: Some(action), children: HashMap::new() }
     }
 }
 
@@ -208,9 +200,15 @@ impl KeyHandler {
 
         // SPC e - Explorer / file tree
         let mut explorer_node = KeyNode::new("explorer");
-        explorer_node.children.insert('e', KeyNode::leaf("toggle file explorer", Action::ExplorerToggle));
-        explorer_node.children.insert('f', KeyNode::leaf("focus file explorer", Action::ExplorerFocus));
-        explorer_node.children.insert('h', KeyNode::leaf("toggle hidden files", Action::ExplorerToggleHidden));
+        explorer_node
+            .children
+            .insert('e', KeyNode::leaf("toggle file explorer", Action::ExplorerToggle));
+        explorer_node
+            .children
+            .insert('f', KeyNode::leaf("focus file explorer", Action::ExplorerFocus));
+        explorer_node
+            .children
+            .insert('h', KeyNode::leaf("toggle hidden files", Action::ExplorerToggleHidden));
         tree.insert('e', explorer_node);
 
         // SPC g - Git (lazygit)
@@ -220,13 +218,17 @@ impl KeyHandler {
 
         // SPC m - Markdown
         let mut md_node = KeyNode::new("markdown");
-        md_node.children.insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
+        md_node
+            .children
+            .insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
         md_node.children.insert('b', KeyNode::leaf("open in browser", Action::MarkdownOpenBrowser));
         tree.insert('m', md_node);
 
         // SPC s - Search
         let mut search_node = KeyNode::new("search");
-        search_node.children.insert('g', KeyNode::leaf("search in project (ripgrep)", Action::SearchOpen));
+        search_node
+            .children
+            .insert('g', KeyNode::leaf("search in project (ripgrep)", Action::SearchOpen));
         tree.insert('s', search_node);
 
         tree
@@ -235,9 +237,7 @@ impl KeyHandler {
     /// Get the current key sequence (for display in status line).
     /// Shows accumulated count + pending key/leader so the user has feedback.
     pub fn sequence(&self) -> String {
-        let count_prefix = self.pending_count
-            .map(|n| n.to_string())
-            .unwrap_or_default();
+        let count_prefix = self.pending_count.map(|n| n.to_string()).unwrap_or_default();
         if let Some(pk) = self.pending_key {
             return format!("{}{}", count_prefix, pk);
         }
@@ -294,7 +294,8 @@ impl KeyHandler {
                 node.children
                     .iter()
                     .map(|(k, child)| {
-                        let key_seq = format!("SPC {}{}", self.sequence.iter().collect::<String>(), k);
+                        let key_seq =
+                            format!("SPC {}{}", self.sequence.iter().collect::<String>(), k);
                         (key_seq, child.description.clone())
                     })
                     .collect()
@@ -342,7 +343,7 @@ impl KeyHandler {
                     ('c', 'c') => Action::ChangeLine,
                     ('c', 'w') => Action::ChangeWord,
                     ('c', '$') => Action::DeleteToLineEnd, // same as D, then insert
-                    _ => Action::Noop, // unknown combo — discard
+                    _ => Action::Noop,                     // unknown combo — discard
                 };
             }
             // Non-char key after a prefix — cancel
@@ -382,15 +383,15 @@ impl KeyHandler {
             // Movement — h/l do NOT wrap across lines (vim behaviour)
             KeyCode::Char('h') => Action::MoveLeft,
             KeyCode::Char('l') => Action::MoveRight,
-            KeyCode::Left      => Action::MoveLeft,
-            KeyCode::Right     => Action::MoveRight,
-            KeyCode::Char('k') | KeyCode::Up   => Action::MoveUp,
+            KeyCode::Left => Action::MoveLeft,
+            KeyCode::Right => Action::MoveRight,
+            KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
             KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
             KeyCode::Char('0') | KeyCode::Home => Action::MoveLineStart,
             // ^ — first non-whitespace character on the line
             KeyCode::Char('^') => Action::MoveFirstNonBlank,
             // $ lands ON the last character in Normal mode
-            KeyCode::Char('$') | KeyCode::End  => Action::MoveLineEndNormal,
+            KeyCode::Char('$') | KeyCode::End => Action::MoveLineEndNormal,
             KeyCode::Char('w') => Action::MoveWordForward,
             KeyCode::Char('b') => Action::MoveWordBackward,
             KeyCode::Char('G') => Action::GotoFileBottom,
@@ -411,12 +412,10 @@ impl KeyHandler {
                     self.pending_key = Some(ch);
                 }
                 Action::Noop
-            }
+            },
 
             // Ctrl+R — redo
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::Redo
-            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Redo,
 
             // Visual modes
             KeyCode::Char('v') => Action::Visual,

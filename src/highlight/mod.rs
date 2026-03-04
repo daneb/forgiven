@@ -45,20 +45,14 @@ impl Highlighter {
             .find_syntax_by_extension(extension)
             .unwrap_or_else(|| self.ps.find_syntax_plain_text());
 
-        let theme = self
-            .ts
-            .themes
-            .get(&self.theme)
-            .unwrap_or_else(|| &self.ts.themes["base16-ocean.dark"]);
+        let theme =
+            self.ts.themes.get(&self.theme).unwrap_or_else(|| &self.ts.themes["base16-ocean.dark"]);
 
         let mut h = HighlightLines::new(syntax, theme);
 
         // `highlight_line` expects a line with a trailing newline; add one if absent.
-        let line_with_nl = if line.ends_with('\n') {
-            line.to_string()
-        } else {
-            format!("{}\n", line)
-        };
+        let line_with_nl =
+            if line.ends_with('\n') { line.to_string() } else { format!("{}\n", line) };
 
         let ranges = match h.highlight_line(&line_with_nl, &self.ps) {
             Ok(r) => r,
@@ -80,10 +74,7 @@ impl Highlighter {
 
     /// Return the file extension for a given path, or empty string for no extension.
     pub fn extension_for(path: &std::path::Path) -> String {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_string()
+        path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string()
     }
 }
 

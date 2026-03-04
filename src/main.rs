@@ -9,9 +9,9 @@ mod editor;
 mod explorer;
 mod highlight;
 mod keymap;
+mod lsp;
 mod markdown;
 mod search;
-mod lsp;
 mod ui;
 
 use crate::config::Config;
@@ -42,10 +42,7 @@ async fn main() -> Result<()> {
     // Set up logging to a file so it doesn't interfere with the TUI
     let log_file = std::fs::File::create("/tmp/forgiven.log")?;
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer().with_writer(log_file))
         .init();
 
@@ -79,7 +76,8 @@ async fn main() -> Result<()> {
     // current_dir() call (LSP root, agent project_root, FileExplorer, etc.)
     // automatically reflects the chosen project.
     if let Some(ref dir) = project_dir {
-        let canonical = dir.canonicalize()
+        let canonical = dir
+            .canonicalize()
             .with_context(|| format!("Cannot open directory: {}", dir.display()))?;
         std::env::set_current_dir(&canonical)
             .with_context(|| format!("Cannot change into directory: {}", canonical.display()))?;

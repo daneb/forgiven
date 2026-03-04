@@ -225,10 +225,10 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                         .map(|(i, l)| format!("{:4} | {l}", i + 1))
                         .collect();
                     format!("{path_str} ({} lines)\n{}", lines.len(), lines.join("\n"))
-                }
+                },
                 Err(e) => format!("error reading {path_str}: {e}"),
             }
-        }
+        },
 
         // ── write_file ───────────────────────────────────────────────────────
         "write_file" => {
@@ -253,7 +253,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Ok(()) => format!("wrote {path_str} ({} bytes)", content.len()),
                 Err(e) => format!("error writing {path_str}: {e}"),
             }
-        }
+        },
 
         // ── edit_file ────────────────────────────────────────────────────────
         "edit_file" => {
@@ -301,7 +301,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 ),
                 Err(e) => format!("error writing {path_str}: {e}"),
             }
-        }
+        },
 
         // ── list_directory ───────────────────────────────────────────────────
         "list_directory" => {
@@ -332,26 +332,22 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                     } else {
                         format!("{path_str}:\n{}", items.join("\n"))
                     }
-                }
+                },
                 Err(e) => format!("error listing {path_str}: {e}"),
             }
-        }
+        },
 
         // ── create_task / complete_task ───────────────────────────────────────
         // UI updates are handled by the agentic loop via StreamEvent.
         // These just validate the argument and return an acknowledgement.
-        "create_task" => {
-            match args.get("title").and_then(|v| v.as_str()) {
-                Some(title) => format!("task created: {title}"),
-                None => "error: missing required argument 'title'".to_string(),
-            }
-        }
-        "complete_task" => {
-            match args.get("title").and_then(|v| v.as_str()) {
-                Some(title) => format!("task done: {title}"),
-                None => "error: missing required argument 'title'".to_string(),
-            }
-        }
+        "create_task" => match args.get("title").and_then(|v| v.as_str()) {
+            Some(title) => format!("task created: {title}"),
+            None => "error: missing required argument 'title'".to_string(),
+        },
+        "complete_task" => match args.get("title").and_then(|v| v.as_str()) {
+            Some(title) => format!("task done: {title}"),
+            None => "error: missing required argument 'title'".to_string(),
+        },
 
         other => format!("unknown tool: {other}"),
     }
