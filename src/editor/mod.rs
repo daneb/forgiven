@@ -1894,6 +1894,29 @@ impl Editor {
                     return Ok(());
                 }
 
+                // 'c' with empty input = cycle through code blocks in the last reply.
+                if ch == 'c' && self.agent_panel.input.is_empty() {
+                    if let Some(reply) = self.agent_panel.last_assistant_reply() {
+                        let blocks = crate::agent::AgentPanel::extract_code_blocks(&reply);
+                        if blocks.is_empty() {
+                            self.set_status("No code blocks in last reply".to_string());
+                        } else {
+                            let idx = self.agent_panel.code_block_idx % blocks.len();
+                            self.sync_system_clipboard(&blocks[idx]);
+                            self.set_status(format!(
+                                "Code block {}/{} copied",
+                                idx + 1,
+                                blocks.len()
+                            ));
+                            self.agent_panel.code_block_idx =
+                                (self.agent_panel.code_block_idx + 1) % blocks.len();
+                        }
+                    } else {
+                        self.set_status("No reply to copy".to_string());
+                    }
+                    return Ok(());
+                }
+
                 // 'a' with empty input = open apply-diff overlay.
                 if ch == 'a' && self.agent_panel.input.is_empty() {
                     if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate()

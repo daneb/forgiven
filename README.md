@@ -19,6 +19,10 @@
               an AI-first terminal code editor  ·  MIT License
 ```
 
+> **Alpha release** — forgiven is under active development. Expect rough edges,
+> breaking keybinding changes, and missing polish. Feedback and bug reports are
+> welcome via [GitHub Issues](https://github.com/danebalia/forgiven/issues).
+
 An AI-first, terminal-based code editor with GitHub Copilot agent integration, inspired
 by Emacs / Spacemacs key philosophy and Vim modal editing.
 
@@ -384,6 +388,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0038](docs/adr/0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter |
 | [0039](docs/adr/0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title |
 | [0040](docs/adr/0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title |
+| [0041](docs/adr/0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) |
 
 ---
 

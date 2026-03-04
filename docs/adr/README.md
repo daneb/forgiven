@@ -48,6 +48,7 @@ that motivated it, what was decided, and the consequences.
 | [0038](0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter | Accepted |
 | [0039](0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title | Accepted |
 | [0040](0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title | Accepted |
+| [0041](0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) | Accepted |
 
 ## What is an ADR?
 

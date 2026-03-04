@@ -153,6 +153,8 @@ pub struct AgentPanel {
     /// Token counts from the last API response (0 = not yet received).
     pub last_prompt_tokens: u32,
     pub last_completion_tokens: u32,
+    /// Cycle index for the 'c' copy-code-block command.
+    pub code_block_idx: usize,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -280,6 +282,7 @@ impl AgentPanel {
             status: AgentStatus::Idle,
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
+            code_block_idx: 0,
         }
     }
 
@@ -650,6 +653,7 @@ Available tools:\n\
                                     .push(ChatMessage { role: Role::Assistant, content: text });
                             }
                         }
+                        self.code_block_idx = 0;
                         self.scroll = 0;
                         self.stream_rx = None;
                         self.continuation_tx = None;
