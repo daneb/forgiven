@@ -39,6 +39,7 @@ by Emacs / Spacemacs key philosophy and Vim modal editing.
 - **Explorer** — file tree navigation with create / rename / delete
 - **RenameFile** — inline name editor with confirmation (`Enter`) or cancel (`Esc`)
 - **DeleteFile** — delete confirmation popup (`y` = confirm, `n`/`Esc` = cancel)
+- **NewFolder** — inline folder name editor with confirmation (`Enter`) or cancel (`Esc`)
 - **InFileSearch** — `/` search with `n`/`N` next/prev match navigation
 
 ### Navigation & editing
@@ -83,6 +84,7 @@ Which-key popup shows available bindings after a 500 ms pause.
 - Left-sidebar tree (`SPC e e`); lazy directory loading
 - `j`/`k` or arrows navigate; `Enter`/`l` expands a dir or opens a file
 - `n` — new file (pre-fills Command mode with the target directory path)
+- `m` — new folder (inline popup, `Enter` confirms, `Esc` cancels)
 - `r` — rename selected entry (inline popup, `Enter` confirms, `Esc` cancels)
 - `d` — delete selected entry (confirmation popup, `y` confirms, `n`/`Esc` cancels)
 - `h` — toggle hidden files (`SPC e h` from Normal mode)
@@ -196,6 +198,7 @@ cargo build --release
 | `j/k` or `↓/↑` | Move cursor down / up |
 | `Enter` or `l` | Expand directory / open file (returns to Normal mode) |
 | `n` | New file — pre-fills Command mode with `e <dir>/` |
+| `m` | New folder — opens new-folder popup |
 | `r` | Rename selected entry (opens rename popup) |
 | `d` | Delete selected entry (opens confirmation popup) |
 | `h` | Toggle hidden files visibility |
@@ -217,6 +220,15 @@ cargo build --release
 |-----|--------|
 | `y` or `Y` | Confirm deletion (permanent) |
 | `n`, `N` or `Esc` | Cancel, return to explorer |
+
+### New folder popup (`Mode::NewFolder`)
+
+| Key | Action |
+|-----|--------|
+| *(type)* | Edit the folder name |
+| `Backspace` | Delete last character |
+| `Enter` | Confirm — creates the directory (and any missing parents) |
+| `Esc` | Cancel, return to explorer |
 
 ### In-file search (`Mode::InFileSearch`)
 
@@ -389,6 +401,12 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0039](docs/adr/0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title |
 | [0040](docs/adr/0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title |
 | [0041](docs/adr/0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) |
+| [0042](docs/adr/0042-agent-paste-summary.md) | Agent Panel Paste Summary |
+| [0043](docs/adr/0043-vertical-split-screen.md) | Vertical Split Screen |
+| [0044](docs/adr/0044-explorer-new-folder.md) | Explorer New Folder |
+| [0045](docs/adr/0045-mcp-client.md) | MCP Client Integration |
+| [0046](docs/adr/0046-agent-retry-visibility.md) | Agent Retry Visibility |
+| [0047](docs/adr/0047-git-commit-message-generation.md) | Git Commit Message Generation |
 
 ---
 
