@@ -1,6 +1,5 @@
 # Rust
 /target/
-Cargo.lock
 
 # Rust Incremental Compilation
 **/*.rs.bk

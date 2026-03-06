@@ -15,13 +15,13 @@ db-urls  = ["https://github.com/rustsec/advisory-db"]
 vulnerability = "deny"
 
 # Warn (not fail) for unmaintained crates — good signal but not always blocking.
-unmaintained = "workspace"
+unmaintained = "warn"
 
 # Warn on yanked versions of crates.
-yanked = "workspace"
+yanked = "warn"
 
 # Notice-level advisories are informational.
-notice = "workspace"
+notice = "warn"
 
 # ── Licences ───────────────────────────────────────────────────────────────────
 # All dependency licences must appear in the allow list.
