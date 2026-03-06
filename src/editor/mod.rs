@@ -839,37 +839,36 @@ impl Editor {
         // ── Markdown preview lines ─────────────────────────────────────────────
         // Computed when in MarkdownPreview mode; cached by (lsp_version, viewport_width)
         // so markdown re-parsing is skipped on frames where nothing changed.
-        let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> =
-            if mode == Mode::MarkdownPreview {
-                let all_lines = {
-                    let key = self.current_buffer().map(|buf| buf.lsp_version);
-                    let cache_hit = self.markdown_cache.as_ref().is_some_and(|c| {
-                        Some(c.lsp_version) == key && c.viewport_width == viewport_width
+        let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> = if mode
+            == Mode::MarkdownPreview
+        {
+            let all_lines = {
+                let key = self.current_buffer().map(|buf| buf.lsp_version);
+                let cache_hit = self.markdown_cache.as_ref().is_some_and(|c| {
+                    Some(c.lsp_version) == key && c.viewport_width == viewport_width
+                });
+                if cache_hit {
+                    self.markdown_cache.as_ref().unwrap().lines.clone()
+                } else {
+                    let ver = key.unwrap_or(0);
+                    let content =
+                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+                    let rendered = crate::markdown::render(&content, viewport_width);
+                    self.markdown_cache = Some(MarkdownCache {
+                        lsp_version: ver,
+                        viewport_width,
+                        lines: rendered.clone(),
                     });
-                    if cache_hit {
-                        self.markdown_cache.as_ref().unwrap().lines.clone()
-                    } else {
-                        let ver = key.unwrap_or(0);
-                        let content = self
-                            .current_buffer()
-                            .map(|buf| buf.lines().join("\n"))
-                            .unwrap_or_default();
-                        let rendered = crate::markdown::render(&content, viewport_width);
-                        self.markdown_cache = Some(MarkdownCache {
-                            lsp_version: ver,
-                            viewport_width,
-                            lines: rendered.clone(),
-                        });
-                        rendered
-                    }
-                };
-                // Cap scroll so we can't scroll past the end.
-                let max_scroll = all_lines.len().saturating_sub(1);
-                let scroll = self.preview_scroll.min(max_scroll);
-                Some(all_lines.into_iter().skip(scroll).collect())
-            } else {
-                None
+                    rendered
+                }
             };
+            // Cap scroll so we can't scroll past the end.
+            let max_scroll = all_lines.len().saturating_sub(1);
+            let scroll = self.preview_scroll.min(max_scroll);
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else {
+            None
+        };
 
         // ── Split pane data ────────────────────────────────────────────────────
         let split_buffer_data = self.split_other_idx.and_then(|idx| {
@@ -933,8 +932,7 @@ impl Editor {
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref =
             if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
-        let hl_ref: Option<&[Vec<Span<'static>>]> =
-            highlighted_lines.as_deref().map(Vec::as_slice);
+        let hl_ref: Option<&[Vec<Span<'static>>]> = highlighted_lines.as_deref().map(Vec::as_slice);
         let split_hl_ref: Option<&[Vec<Span<'static>>]> =
             split_highlighted_lines.as_deref().map(Vec::as_slice);
         let preview_ref = preview_lines_owned.as_deref();
@@ -1408,11 +1406,9 @@ impl Editor {
                 self.command_buffer = "e ".to_string();
                 self.mode = Mode::Command;
             },
-            Action::FileEditConfig => {
-                match crate::config::Config::config_path() {
-                    Some(path) => self.open_file(&path)?,
-                    None => self.set_status("Cannot locate config file ($HOME not set)".to_string()),
-                }
+            Action::FileEditConfig => match crate::config::Config::config_path() {
+                Some(path) => self.open_file(&path)?,
+                None => self.set_status("Cannot locate config file ($HOME not set)".to_string()),
             },
             Action::FileSave => {
                 // Get file path and text before doing LSP operations
@@ -3591,13 +3587,9 @@ impl Editor {
     fn start_commit_msg(&mut self, from_staged: bool) {
         // Run the git command synchronously (it's fast).
         let diff_cmd = if from_staged {
-            std::process::Command::new("git")
-                .args(["diff", "--staged"])
-                .output()
+            std::process::Command::new("git").args(["diff", "--staged"]).output()
         } else {
-            std::process::Command::new("git")
-                .args(["show", "HEAD", "--stat", "-p"])
-                .output()
+            std::process::Command::new("git").args(["show", "HEAD", "--stat", "-p"]).output()
         };
 
         let diff_text = match diff_cmd {
@@ -3660,9 +3652,7 @@ impl Editor {
                     self.set_status("Commit message is empty".to_string());
                     return Ok(());
                 }
-                let out = std::process::Command::new("git")
-                    .args(["commit", "-m", &msg])
-                    .output();
+                let out = std::process::Command::new("git").args(["commit", "-m", &msg]).output();
                 self.mode = Mode::Normal;
                 self.commit_msg_buffer.clear();
                 self.commit_msg_rx = None;

@@ -205,9 +205,7 @@ impl AgentStatus {
             AgentStatus::CallingTool { round, name } => {
                 Some(format!("{name} [{round}/{max_rounds}]"))
             },
-            AgentStatus::Retrying { attempt, max } => {
-                Some(format!("retrying ({attempt}/{max})…"))
-            },
+            AgentStatus::Retrying { attempt, max } => Some(format!("retrying ({attempt}/{max})…")),
         }
     }
 }
@@ -254,7 +252,10 @@ pub enum StreamEvent {
     Done,
     Error(String),
     /// API call failed and the loop is about to sleep before retrying.
-    Retrying { attempt: usize, max: usize },
+    Retrying {
+        attempt: usize,
+        max: usize,
+    },
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -1632,11 +1633,7 @@ pub async fn one_shot_complete(
 
     let val: serde_json::Value =
         resp.json().await.context("one_shot_complete: response not JSON")?;
-    let content = val["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let content = val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
     Ok(content)
 }
 

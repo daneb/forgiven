@@ -77,7 +77,8 @@ impl McpServerHandle {
         let mut buf = String::new();
         loop {
             buf.clear();
-            let n = self.stdout
+            let n = self
+                .stdout
                 .read_line(&mut buf)
                 .await
                 .with_context(|| format!("reading from MCP server '{}'", self.name))?;
@@ -157,11 +158,7 @@ impl McpManager {
                     for tool in &server.tools {
                         tool_map.insert(tool.name.clone(), idx);
                     }
-                    info!(
-                        "MCP server '{}' connected ({} tools)",
-                        cfg.name,
-                        server.tools.len()
-                    );
+                    info!("MCP server '{}' connected ({} tools)", cfg.name, server.tools.len());
                     servers.push(server);
                     children.push(child);
                 },
@@ -211,11 +208,7 @@ impl McpManager {
         self.servers
             .iter()
             .map(|s| {
-                let name = s
-                    .tools
-                    .first()
-                    .map(|t| t.server_name.as_str())
-                    .unwrap_or("?");
+                let name = s.tools.first().map(|t| t.server_name.as_str()).unwrap_or("?");
                 format!("{} ({})", name, s.tools.len())
             })
             .collect::<Vec<_>>()
@@ -254,10 +247,7 @@ impl McpManager {
 /// Spawn an MCP server process and perform the initialization handshake.
 async fn spawn_and_init(cfg: &McpServerConfig) -> Result<(McpServer, Child)> {
     let mut cmd = Command::new(&cfg.command);
-    cmd.args(&cfg.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null()); // suppress server stderr so it doesn't pollute our TUI
+    cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()); // suppress server stderr so it doesn't pollute our TUI
 
     for (k, v) in &cfg.env {
         cmd.env(k, v);
@@ -322,12 +312,7 @@ fn parse_tools(server_name: &str, result: &Value) -> Vec<McpTool> {
                 .get("inputSchema")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
-            Some(McpTool {
-                server_name: server_name.to_string(),
-                name,
-                description,
-                input_schema,
-            })
+            Some(McpTool { server_name: server_name.to_string(), name, description, input_schema })
         })
         .collect()
 }

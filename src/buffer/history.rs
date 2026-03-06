@@ -73,8 +73,11 @@ impl EditHistory {
         if self.future.len() >= MAX_SNAPSHOTS {
             self.future.pop_front();
         }
-        self.future
-            .push_back(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
+        self.future.push_back(BufferSnapshot {
+            lines: current_lines.to_vec(),
+            cursor_row,
+            cursor_col,
+        });
         Some(snap)
     }
 
@@ -91,8 +94,11 @@ impl EditHistory {
         if self.past.len() >= MAX_SNAPSHOTS {
             self.past.pop_front();
         }
-        self.past
-            .push_back(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
+        self.past.push_back(BufferSnapshot {
+            lines: current_lines.to_vec(),
+            cursor_row,
+            cursor_col,
+        });
         Some(snap)
     }
 }

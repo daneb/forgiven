@@ -195,29 +195,38 @@ impl UI {
             } else {
                 (highlighted_lines, split_highlighted_lines)
             };
-            let (left_ghost, right_ghost) = if split_right_focused {
-                (None, ghost_text)
-            } else {
-                (ghost_text, None)
-            };
+            let (left_ghost, right_ghost) =
+                if split_right_focused { (None, ghost_text) } else { (ghost_text, None) };
             let left_preview = if split_right_focused { None } else { preview_lines };
 
             Self::render_buffer(
-                frame, left_data, mode, split_chunks[0],
-                diagnostics, left_ghost, left_hl, left_preview, !split_right_focused,
+                frame,
+                left_data,
+                mode,
+                split_chunks[0],
+                diagnostics,
+                left_ghost,
+                left_hl,
+                left_preview,
+                !split_right_focused,
             );
 
             // Draw vertical separator
             let sep_lines: Vec<Line> = (0..split_chunks[1].height)
-                .map(|_| {
-                    Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))
-                })
+                .map(|_| Line::from(Span::styled("│", Style::default().fg(Color::DarkGray))))
                 .collect();
             frame.render_widget(Paragraph::new(sep_lines), split_chunks[1]);
 
             Self::render_buffer(
-                frame, right_data, mode, split_chunks[2],
-                diagnostics, right_ghost, right_hl, None, split_right_focused,
+                frame,
+                right_data,
+                mode,
+                split_chunks[2],
+                diagnostics,
+                right_ghost,
+                right_hl,
+                None,
+                split_right_focused,
             );
         } else {
             Self::render_buffer(
@@ -448,7 +457,10 @@ impl UI {
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
             " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+T=model, Tab=back)".to_string()
-        } else if panel.has_code_to_apply() && panel.input.is_empty() && panel.pasted_blocks.is_empty() {
+        } else if panel.has_code_to_apply()
+            && panel.input.is_empty()
+            && panel.pasted_blocks.is_empty()
+        {
             " Message Copilot… | [a] diff+apply  Ctrl+T=model ".to_string()
         } else {
             " Message Copilot… (Ctrl+T=model) ".to_string()
@@ -467,11 +479,7 @@ impl UI {
                 Line::from(Span::styled(label, paste_style))
             })
             .collect();
-        let typed = if focused {
-            format!("{}_", panel.input)
-        } else {
-            panel.input.clone()
-        };
+        let typed = if focused { format!("{}_", panel.input) } else { panel.input.clone() };
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
         }
@@ -1534,10 +1542,8 @@ impl UI {
             " Enter=commit   Esc=discard   (edit freely) ",
             Style::default().fg(Color::DarkGray),
         ));
-        let content_lines_rendered: Vec<Line<'static>> = msg
-            .lines()
-            .map(|l| Line::from(Span::raw(format!(" {l}"))))
-            .collect();
+        let content_lines_rendered: Vec<Line<'static>> =
+            msg.lines().map(|l| Line::from(Span::raw(format!(" {l}")))).collect();
         let mut all_lines = content_lines_rendered;
         all_lines.insert(0, hint);
 

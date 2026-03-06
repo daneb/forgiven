@@ -116,7 +116,11 @@ impl Buffer {
                 // If the file ends with \n, split produces a trailing empty string — drop it.
                 .enumerate()
                 .filter_map(|(i, l)| {
-                    if i == newline_count && l.is_empty() { None } else { Some(l.to_string()) }
+                    if i == newline_count && l.is_empty() {
+                        None
+                    } else {
+                        Some(l.to_string())
+                    }
                 })
                 .collect()
         };

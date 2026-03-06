@@ -202,8 +202,7 @@ impl FileExplorer {
     #[allow(dead_code)]
     pub fn selected_file(&self) -> Option<PathBuf> {
         let flat = self.flat_visible();
-        flat.get(self.cursor_idx)
-            .and_then(|n| if n.is_dir { None } else { Some(n.path.clone()) })
+        flat.get(self.cursor_idx).and_then(|n| if n.is_dir { None } else { Some(n.path.clone()) })
     }
 
     /// Return the path selected by the cursor regardless of type.

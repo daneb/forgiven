@@ -97,9 +97,9 @@ pub enum Action {
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen,          // SPC g g — open lazygit
-    GitCommitStaged,  // SPC g s — generate commit msg from staged diff
-    GitCommitLast,    // SPC g l — generate commit msg from last commit
+    GitOpen,         // SPC g g — open lazygit
+    GitCommitStaged, // SPC g s — generate commit msg from staged diff
+    GitCommitLast,   // SPC g l — generate commit msg from last commit
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
@@ -110,9 +110,9 @@ pub enum Action {
     InFileSearchNext,  // n — jump to next match
     InFileSearchPrev,  // N — jump to previous match
     // Window / split
-    WindowSplit,      // SPC w v — open vertical split
-    WindowFocusNext,  // SPC w w — cycle focus between panes
-    WindowClose,      // SPC w c — close split
+    WindowSplit,     // SPC w v — open vertical split
+    WindowFocusNext, // SPC w w — cycle focus between panes
+    WindowClose,     // SPC w c — close split
 }
 
 /// Represents a keybinding tree node
@@ -250,9 +250,7 @@ impl KeyHandler {
         // SPC w - Window / split
         let mut window_node = KeyNode::new("window");
         window_node.children.insert('v', KeyNode::leaf("vertical split", Action::WindowSplit));
-        window_node
-            .children
-            .insert('w', KeyNode::leaf("focus next pane", Action::WindowFocusNext));
+        window_node.children.insert('w', KeyNode::leaf("focus next pane", Action::WindowFocusNext));
         window_node.children.insert('c', KeyNode::leaf("close split", Action::WindowClose));
         tree.insert('w', window_node);
 
