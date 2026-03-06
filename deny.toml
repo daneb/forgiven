@@ -15,7 +15,7 @@ db-urls  = ["https://github.com/rustsec/advisory-db"]
 vulnerability = "deny"
 
 # Warn (not fail) for unmaintained crates — good signal but not always blocking.
-unmaintained = "warn"
+unmaintained = "workspace"
 
 # Warn on yanked versions of crates.
 yanked = "warn"
