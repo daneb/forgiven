@@ -64,8 +64,18 @@ impl UI {
         rename_buffer: Option<&str>,
         // Delete confirmation name (Mode::DeleteFile only).
         delete_name: Option<&str>,
+        // New folder name buffer (Mode::NewFolder only).
+        new_folder_buffer: Option<&str>,
         // Apply-diff overlay data (Mode::ApplyDiff only).
         apply_diff: Option<&ApplyDiffView<'_>>,
+        // Vertical split: inactive pane data (None = no split).
+        split_buffer_data: Option<&BufferData>,
+        // Pre-computed highlighted spans for the split (inactive) pane.
+        split_highlighted_lines: Option<&[Vec<Span<'static>>]>,
+        // True when the right pane is the focused pane.
+        split_right_focused: bool,
+        // Commit message buffer (Mode::CommitMsg only).
+        commit_msg: Option<&str>,
     ) {
         let size = frame.area();
 
@@ -160,17 +170,68 @@ impl UI {
             chunks[1]
         };
 
-        // Render buffer content
-        Self::render_buffer(
-            frame,
-            buffer_data,
-            mode,
-            main_area,
-            diagnostics,
-            ghost_text,
-            highlighted_lines,
-            preview_lines,
-        );
+        // Render buffer content — single pane or vertical split
+        if let Some(split_data) = split_buffer_data {
+            // 3-column layout: [left pane | 1-char separator | right pane]
+            let split_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(50),
+                    Constraint::Length(1),
+                    Constraint::Percentage(50),
+                ])
+                .split(main_area);
+
+            // Determine which buffer goes in which pane.
+            // current buffer (buffer_data) is always the focused pane.
+            let (left_data, right_data): (Option<&BufferData>, Option<&BufferData>) =
+                if split_right_focused {
+                    (Some(split_data), buffer_data)
+                } else {
+                    (buffer_data, Some(split_data))
+                };
+            let (left_hl, right_hl) = if split_right_focused {
+                (split_highlighted_lines, highlighted_lines)
+            } else {
+                (highlighted_lines, split_highlighted_lines)
+            };
+            let (left_ghost, right_ghost) = if split_right_focused {
+                (None, ghost_text)
+            } else {
+                (ghost_text, None)
+            };
+            let left_preview = if split_right_focused { None } else { preview_lines };
+
+            Self::render_buffer(
+                frame, left_data, mode, split_chunks[0],
+                diagnostics, left_ghost, left_hl, left_preview, !split_right_focused,
+            );
+
+            // Draw vertical separator
+            let sep_lines: Vec<Line> = (0..split_chunks[1].height)
+                .map(|_| {
+                    Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(sep_lines), split_chunks[1]);
+
+            Self::render_buffer(
+                frame, right_data, mode, split_chunks[2],
+                diagnostics, right_ghost, right_hl, None, split_right_focused,
+            );
+        } else {
+            Self::render_buffer(
+                frame,
+                buffer_data,
+                mode,
+                main_area,
+                diagnostics,
+                ghost_text,
+                highlighted_lines,
+                preview_lines,
+                true,
+            );
+        }
 
         // Render status line
         Self::render_status_line(
@@ -207,6 +268,16 @@ impl UI {
         if let Some(name) = delete_name {
             Self::render_delete_popup(frame, name, size);
         }
+
+        // Render new folder popup if active
+        if let Some(name) = new_folder_buffer {
+            Self::render_new_folder_popup(frame, name, size);
+        }
+
+        // Render commit message popup if active
+        if let Some(msg) = commit_msg {
+            Self::render_commit_msg_popup(frame, msg, size);
+        }
     }
 
     /// Render the Copilot Chat / agent panel on the right side.
@@ -239,7 +310,9 @@ impl UI {
             .sum();
         // At least 1 text line; at most 10 text lines to keep history visible.
         let input_text_lines = total_wrapped.clamp(1, 10) as u16;
-        let input_height = input_text_lines + 2; // +2 for top/bottom borders
+        // Each pasted block adds one summary line to the input box.
+        let paste_summary_lines = panel.pasted_blocks.len() as u16;
+        let input_height = input_text_lines + paste_summary_lines + 2; // +2 for top/bottom borders
 
         // Task strip height: 0 when empty, otherwise tasks + 2 border rows (capped at 8).
         let task_strip_height =
@@ -372,15 +445,10 @@ impl UI {
         }
 
         // ── Input box ─────────────────────────────────────────────────────────
-        let input_text = if focused {
-            format!("{}_", panel.input) // trailing cursor block
-        } else {
-            panel.input.clone()
-        };
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+T=model, Tab=back) ".to_string()
-        } else if panel.has_code_to_apply() && panel.input.is_empty() {
+            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+T=model, Tab=back)".to_string()
+        } else if panel.has_code_to_apply() && panel.input.is_empty() && panel.pasted_blocks.is_empty() {
             " Message Copilot… | [a] diff+apply  Ctrl+T=model ".to_string()
         } else {
             " Message Copilot… (Ctrl+T=model) ".to_string()
@@ -388,7 +456,26 @@ impl UI {
         let hint = hint.as_str();
         let input_block =
             Block::default().title(hint).borders(Borders::ALL).border_style(border_style);
-        let input_para = Paragraph::new(input_text)
+
+        // Build input content: one summary line per pasted block, then the typed input.
+        let paste_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
+        let mut input_lines: Vec<Line> = panel
+            .pasted_blocks
+            .iter()
+            .map(|(_, n)| {
+                let label = format!("⎘  Pasted {} line{}", n, if *n == 1 { "" } else { "s" });
+                Line::from(Span::styled(label, paste_style))
+            })
+            .collect();
+        let typed = if focused {
+            format!("{}_", panel.input)
+        } else {
+            panel.input.clone()
+        };
+        for line in typed.split('\n') {
+            input_lines.push(Line::from(line.to_string()));
+        }
+        let input_para = Paragraph::new(input_lines)
             .block(input_block)
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
@@ -501,6 +588,7 @@ impl UI {
         ghost_text: Option<(&str, usize, usize)>,
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
         preview_lines: Option<&[Line<'static>]>,
+        show_cursor: bool,
     ) {
         // ── Markdown preview mode — render pre-computed lines directly ─────────
         if let Some(md_lines) = preview_lines {
@@ -579,11 +667,11 @@ impl UI {
             let paragraph = Paragraph::new(visible_lines);
             frame.render_widget(paragraph, area);
 
-            // Render cursor (only in Normal, Insert modes).
+            // Render cursor (only in Normal, Insert modes, and only for the focused pane).
             // GUTTER_WIDTH accounts for the 2-char diagnostic marker ("  " / "● ")
             // prepended to every rendered line — the cursor must be offset by the same amount.
             const GUTTER_WIDTH: u16 = 2;
-            if mode != Mode::PickBuffer {
+            if mode != Mode::PickBuffer && show_cursor {
                 let cursor_row = cursor.row.saturating_sub(*scroll_row);
                 let cursor_col = cursor.col.saturating_sub(*scroll_col);
 
@@ -1296,7 +1384,9 @@ impl UI {
             Mode::InFileSearch => "SEARCH",
             Mode::RenameFile => "RENAME",
             Mode::DeleteFile => "DELETE",
+            Mode::NewFolder => "MKDIR",
             Mode::ApplyDiff => "DIFF",
+            Mode::CommitMsg => "COMMIT",
         };
 
         let mode_color = match mode {
@@ -1314,7 +1404,9 @@ impl UI {
             Mode::InFileSearch => Color::LightRed,
             Mode::RenameFile => Color::Yellow,
             Mode::DeleteFile => Color::Red,
+            Mode::NewFolder => Color::LightGreen,
             Mode::ApplyDiff => Color::Cyan,
+            Mode::CommitMsg => Color::LightYellow,
         };
 
         let mut spans = vec![
@@ -1406,6 +1498,57 @@ impl UI {
             .border_style(Style::default().fg(Color::Red))
             .title(" Delete ");
         frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
+    /// Render the centred new-folder popup (Mode::NewFolder).
+    fn render_new_folder_popup(frame: &mut Frame, folder_buffer: &str, area: Rect) {
+        let popup_width = 50.min(area.width);
+        let popup_height = 3u16;
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let display = format!(" {}_", folder_buffer); // trailing _ acts as cursor
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightGreen))
+            .title(" New Folder ");
+        frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
+    /// Render the centred commit-message popup (Mode::CommitMsg).
+    fn render_commit_msg_popup(frame: &mut Frame, msg: &str, area: Rect) {
+        let popup_width = 80.min(area.width);
+        // Height: 2 borders + hint line + content lines (min 4, max 12)
+        let content_lines = msg.lines().count().clamp(4, 12) as u16;
+        let popup_height = (content_lines + 3).min(area.height);
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let hint = Line::from(Span::styled(
+            " Enter=commit   Esc=discard   (edit freely) ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        let content_lines_rendered: Vec<Line<'static>> = msg
+            .lines()
+            .map(|l| Line::from(Span::raw(format!(" {l}"))))
+            .collect();
+        let mut all_lines = content_lines_rendered;
+        all_lines.insert(0, hint);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightYellow))
+            .title(Span::styled(
+                " Commit Message ",
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            ));
+        frame.render_widget(Paragraph::new(all_lines).block(block), popup_area);
     }
 
     /// Render the centred rename popup (Mode::RenameFile).

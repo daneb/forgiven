@@ -19,8 +19,11 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+use crate::mcp::McpManager;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data types
@@ -155,6 +158,13 @@ pub struct AgentPanel {
     pub last_completion_tokens: u32,
     /// Cycle index for the 'c' copy-code-block command.
     pub code_block_idx: usize,
+    /// Pasted content blocks captured via bracketed paste; shown as summary lines in the input box.
+    /// Each entry is `(text, line_count)` — the count is pre-computed at paste time so the
+    /// render path never has to scan the text again.
+    pub pasted_blocks: Vec<(String, usize)>,
+    /// MCP manager shared with the agentic loop.  Set by the editor at startup
+    /// after loading the config and spawning MCP server processes.
+    pub mcp_manager: Option<Arc<McpManager>>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -179,6 +189,8 @@ pub enum AgentStatus {
     Streaming { round: usize },
     /// A tool is executing synchronously between rounds.
     CallingTool { round: usize, name: String },
+    /// API call failed; retrying with exponential backoff.
+    Retrying { attempt: usize, max: usize },
 }
 
 impl AgentStatus {
@@ -192,6 +204,9 @@ impl AgentStatus {
             AgentStatus::Streaming { round } => Some(format!("streaming [{round}/{max_rounds}]")),
             AgentStatus::CallingTool { round, name } => {
                 Some(format!("{name} [{round}/{max_rounds}]"))
+            },
+            AgentStatus::Retrying { attempt, max } => {
+                Some(format!("retrying ({attempt}/{max})…"))
             },
         }
     }
@@ -238,6 +253,8 @@ pub enum StreamEvent {
     AwaitingContinuation,
     Done,
     Error(String),
+    /// API call failed and the loop is about to sleep before retrying.
+    Retrying { attempt: usize, max: usize },
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -283,6 +300,8 @@ impl AgentPanel {
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
             code_block_idx: 0,
+            pasted_blocks: Vec::new(),
+            mcp_manager: None,
         }
     }
 
@@ -433,11 +452,24 @@ impl AgentPanel {
         warning_threshold: usize,
         preferred_model: &str,
     ) -> Result<()> {
-        if self.input.trim().is_empty() {
+        if self.input.trim().is_empty() && self.pasted_blocks.is_empty() {
             return Ok(());
         }
 
-        let user_text = std::mem::take(&mut self.input);
+        let typed_text = std::mem::take(&mut self.input);
+        let pasted = std::mem::take(&mut self.pasted_blocks);
+        let user_text = if pasted.is_empty() {
+            typed_text
+        } else {
+            let mut combined =
+                pasted.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n\n");
+            if !typed_text.trim().is_empty() {
+                combined.push('\n');
+                combined.push('\n');
+                combined.push_str(&typed_text);
+            }
+            combined
+        };
         let root_display = project_root.display().to_string();
 
         // Build a shallow file tree so the model knows the project layout upfront
@@ -448,9 +480,15 @@ impl AgentPanel {
 MANDATORY PROTOCOL — follow these rules without exception:\n\
 \n\
 TASK PLANNING RULES:\n\
-0. For any multi-step job, call create_task ONCE per planned step BEFORE doing any\n\
-   file work. Keep titles short and imperative (e.g. 'Create Program.cs').\n\
-   After completing each step, call complete_task with the exact same title.\n\
+0. Use create_task / complete_task ONLY when the job involves 3 or more distinct\n\
+   file operations (creates, rewrites, or edits across different files), OR when\n\
+   the user explicitly asks you to plan or list steps.\n\
+   Do NOT plan for: questions, explanations, single-file edits, or any task\n\
+   completable in 1-2 tool calls. Reading a file before editing it does NOT count\n\
+   as a separate step.\n\
+   When planning IS needed, call create_task ONCE per step BEFORE any file work,\n\
+   keep titles short and imperative (e.g. 'Create Program.cs'), and call\n\
+   complete_task with the exact same title after finishing each step.\n\
 \n\
 COMMUNICATION RULES:\n\
 6. Do NOT output any text while working through tool calls. Work silently.\n\
@@ -543,6 +581,7 @@ Available tools:\n\
         let (cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
         self.continuation_tx = Some(cont_tx);
 
+        let mcp = self.mcp_manager.as_ref().map(Arc::clone);
         tokio::spawn(agentic_loop(
             api_token,
             send_messages,
@@ -552,6 +591,7 @@ Available tools:\n\
             max_rounds,
             warning_threshold,
             cont_rx,
+            mcp,
         ));
         Ok(())
     }
@@ -641,6 +681,10 @@ Available tools:\n\
                         } else {
                             self.streaming_reply = Some(prompt.to_string());
                         }
+                    },
+                    Ok(StreamEvent::Retrying { attempt, max }) => {
+                        active = true;
+                        self.status = AgentStatus::Retrying { attempt, max };
                     },
                     Ok(StreamEvent::Usage { prompt_tokens, completion_tokens }) => {
                         self.last_prompt_tokens = prompt_tokens;
@@ -866,8 +910,20 @@ async fn agentic_loop(
     max_rounds: usize,
     warning_threshold: usize,
     mut cont_rx: mpsc::UnboundedReceiver<bool>,
+    mcp_manager: Option<Arc<McpManager>>,
 ) {
-    let tool_defs = tools::tool_definitions();
+    // Merge built-in tools with any tools provided by MCP servers.
+    let mut tool_defs = tools::tool_definitions();
+    if let Some(ref mcp) = mcp_manager {
+        let mcp_tools = mcp.tool_definitions();
+        if !mcp_tools.is_empty() {
+            info!("Agentic loop: adding {} MCP tools", mcp_tools.len());
+            tool_defs
+                .as_array_mut()
+                .expect("tool_definitions() always returns a JSON array")
+                .extend(mcp_tools);
+        }
+    }
 
     // Use a manual counter so we can extend the limit when the user approves
     // continuation. A `for round in 0..max_rounds` loop cannot be extended
@@ -906,6 +962,7 @@ async fn agentic_loop(
             messages.clone(),
             tool_defs.clone(),
             &model_id,
+            &tx,
         )
         .await
         {
@@ -1152,7 +1209,15 @@ async fn agentic_loop(
                 args_summary: call.args_summary(),
             });
 
-            let result = tools::execute_tool(&call, &project_root);
+            let result = if let Some(ref mcp) = mcp_manager {
+                if mcp.is_mcp_tool(&call.name) {
+                    mcp.call_tool(&call.name, &call.arguments).await
+                } else {
+                    tools::execute_tool(&call, &project_root)
+                }
+            } else {
+                tools::execute_tool(&call, &project_root)
+            };
 
             // If a file was successfully written or edited, notify the editor
             // so it can reload any open buffer for that path.
@@ -1299,6 +1364,7 @@ async fn start_chat_stream_with_tools(
     messages: Vec<serde_json::Value>,
     tools: serde_json::Value,
     model_id: &str,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<reqwest::Response> {
     info!("Sending completion request with model_id={model_id:?}");
     let body = serde_json::json!({
@@ -1333,7 +1399,7 @@ async fn start_chat_stream_with_tools(
             .send()
             .await;
 
-        match resp {
+        let failure_reason = match resp {
             Ok(response) if response.status().is_success() => {
                 info!("Copilot Chat stream started ({})", response.status());
                 return Ok(response);
@@ -1346,17 +1412,22 @@ async fn start_chat_stream_with_tools(
                     return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
                 }
                 warn!("Retrying due to API error ({status}): {body}");
+                format!("HTTP {status}")
             },
             Err(e) => {
                 warn!("Retrying due to network error: {e}");
+                format!("{e}")
             },
-        }
+        };
 
         retry_attempts += 1;
         if retry_attempts >= max_retries {
-            return Err(anyhow::anyhow!("Max retries reached for Copilot Chat API"));
+            return Err(anyhow::anyhow!(
+                "Max retries reached for Copilot Chat API (last error: {failure_reason})"
+            ));
         }
 
+        let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts, max: max_retries });
         tokio::time::sleep(delay).await;
         delay *= 2; // Exponential backoff
     }
@@ -1508,6 +1579,65 @@ fn load_oauth_token() -> Result<String> {
 struct TokenResponse {
     token: String,
     expires_at: Option<String>,
+}
+
+/// Load the OAuth token and exchange it for a Copilot API token.
+/// Convenience wrapper for callers that don't have access to an `AgentPanel`.
+pub async fn acquire_copilot_token() -> Result<String> {
+    let oauth = load_oauth_token()?;
+    let api_token = exchange_token(&oauth).await?;
+    Ok(api_token.token)
+}
+
+/// Single non-streaming Copilot completion — for short one-shot tasks such as
+/// generating a commit message. Returns the assistant reply as a plain `String`.
+pub async fn one_shot_complete(
+    api_token: &str,
+    model_id: &str,
+    system: &str,
+    user: &str,
+) -> Result<String> {
+    let body = serde_json::json!({
+        "model": model_id,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user",   "content": user   }
+        ],
+        "stream": false,
+        "temperature": 0.3,
+        "max_tokens": 256
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.githubcopilot.com/chat/completions")
+        .header("Authorization", format!("Bearer {api_token}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("editor-version", "forgiven/0.1.0")
+        .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+        .header("openai-intent", "conversation-panel")
+        .header("User-Agent", "forgiven/0.1.0")
+        .json(&body)
+        .send()
+        .await
+        .context("one_shot_complete: request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Copilot API error ({status}): {text}"));
+    }
+
+    let val: serde_json::Value =
+        resp.json().await.context("one_shot_complete: response not JSON")?;
+    let content = val["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Ok(content)
 }
 
 async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {

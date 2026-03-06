@@ -19,7 +19,9 @@ pub enum Mode {
     InFileSearch,    // In-file search mode (/)
     RenameFile,      // Rename popup: user edits a filename from the explorer
     DeleteFile,      // Confirmation popup: y=delete, n/Esc=cancel
+    NewFolder,       // New folder popup: user types a folder name from the explorer
     ApplyDiff,       // Full-screen diff preview before applying agent code block
+    CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
 }
 
 /// An editor action to be executed
@@ -73,6 +75,7 @@ pub enum Action {
     FileFind,
     FileNew,
     FileSave,
+    FileEditConfig,
     Quit,
     // LSP actions
     LspHover,
@@ -94,7 +97,9 @@ pub enum Action {
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen, // SPC g g — open lazygit
+    GitOpen,          // SPC g g — open lazygit
+    GitCommitStaged,  // SPC g s — generate commit msg from staged diff
+    GitCommitLast,    // SPC g l — generate commit msg from last commit
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
@@ -104,6 +109,10 @@ pub enum Action {
     InFileSearchStart, // / — start search in current buffer
     InFileSearchNext,  // n — jump to next match
     InFileSearchPrev,  // N — jump to previous match
+    // Window / split
+    WindowSplit,      // SPC w v — open vertical split
+    WindowFocusNext,  // SPC w w — cycle focus between panes
+    WindowClose,      // SPC w c — close split
 }
 
 /// Represents a keybinding tree node
@@ -176,6 +185,7 @@ impl KeyHandler {
         file_node.children.insert('f', KeyNode::leaf("find file", Action::FileFind));
         file_node.children.insert('n', KeyNode::leaf("new file", Action::FileNew));
         file_node.children.insert('s', KeyNode::leaf("save file", Action::FileSave));
+        file_node.children.insert('e', KeyNode::leaf("edit config", Action::FileEditConfig));
         tree.insert('f', file_node);
 
         // SPC q - Quit commands
@@ -211,9 +221,15 @@ impl KeyHandler {
             .insert('h', KeyNode::leaf("toggle hidden files", Action::ExplorerToggleHidden));
         tree.insert('e', explorer_node);
 
-        // SPC g - Git (lazygit)
+        // SPC g - Git
         let mut git_node = KeyNode::new("git");
         git_node.children.insert('g', KeyNode::leaf("open lazygit", Action::GitOpen));
+        git_node
+            .children
+            .insert('s', KeyNode::leaf("commit msg from staged", Action::GitCommitStaged));
+        git_node
+            .children
+            .insert('l', KeyNode::leaf("commit msg from last commit", Action::GitCommitLast));
         tree.insert('g', git_node);
 
         // SPC m - Markdown
@@ -230,6 +246,15 @@ impl KeyHandler {
             .children
             .insert('g', KeyNode::leaf("search in project (ripgrep)", Action::SearchOpen));
         tree.insert('s', search_node);
+
+        // SPC w - Window / split
+        let mut window_node = KeyNode::new("window");
+        window_node.children.insert('v', KeyNode::leaf("vertical split", Action::WindowSplit));
+        window_node
+            .children
+            .insert('w', KeyNode::leaf("focus next pane", Action::WindowFocusNext));
+        window_node.children.insert('c', KeyNode::leaf("close split", Action::WindowClose));
+        tree.insert('w', window_node);
 
         tree
     }

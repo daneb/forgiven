@@ -49,6 +49,12 @@ that motivated it, what was decided, and the consequences.
 | [0039](0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title | Accepted |
 | [0040](0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title | Accepted |
 | [0041](0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) | Accepted |
+| [0042](0042-agent-paste-summary.md) | Agent Panel Paste Summary | Accepted |
+| [0043](0043-vertical-split-screen.md) | Vertical Split Screen | Accepted |
+| [0044](0044-explorer-new-folder.md) | Explorer New Folder | Accepted |
+| [0045](0045-mcp-client.md) | MCP Client Integration | Accepted |
+| [0046](0046-agent-retry-visibility.md) | Agent Retry Visibility | Accepted |
+| [0047](0047-git-commit-message-generation.md) | Git Commit Message Generation | Accepted |
 
 ## What is an ADR?
 

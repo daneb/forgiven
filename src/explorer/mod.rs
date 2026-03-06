@@ -4,6 +4,7 @@
 //! Directories are expanded/collapsed lazily on first open. Hidden directories and
 //! build artefact directories are skipped automatically.
 
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 // ── Skip list ──────────────────────────────────────────────────────────────────
@@ -75,6 +76,18 @@ impl FileNode {
     }
 }
 
+// ── FlatNode ───────────────────────────────────────────────────────────────────
+
+/// Owned snapshot of a `FileNode` used by the flat-visible cache.
+/// Avoids lifetime issues of storing `&FileNode` references in the cache.
+pub struct FlatNode {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
+    pub is_expanded: bool,
+    pub depth: usize,
+}
+
 // ── FileExplorer ───────────────────────────────────────────────────────────────
 
 pub struct FileExplorer {
@@ -89,6 +102,10 @@ pub struct FileExplorer {
     pub cursor_idx: usize,
     /// Whether to show hidden files and folders.
     pub show_hidden: bool,
+    /// Cached flat view — rebuilt lazily when `cache_dirty` is true.
+    flat_cache: RefCell<Vec<FlatNode>>,
+    /// Set to true whenever the tree structure changes.
+    cache_dirty: Cell<bool>,
 }
 
 impl FileExplorer {
@@ -101,6 +118,8 @@ impl FileExplorer {
             root_loaded: false,
             cursor_idx: 0,
             show_hidden: false,
+            flat_cache: RefCell::new(Vec::new()),
+            cache_dirty: Cell::new(true),
         }
     }
 
@@ -133,6 +152,7 @@ impl FileExplorer {
     fn load_root(&mut self) {
         self.root_nodes = load_dir(&self.root_path, 0, self.show_hidden);
         self.root_loaded = true;
+        self.cache_dirty.set(true);
     }
 
     /// Re-scan the root directory, discarding all cached expand/collapse state.
@@ -140,6 +160,7 @@ impl FileExplorer {
     pub fn reload(&mut self) {
         self.root_nodes = load_dir(&self.root_path, 0, self.show_hidden);
         self.root_loaded = true;
+        self.cache_dirty.set(true);
         // Keep cursor in bounds after the reload.
         let len = self.flat_visible().len();
         if len > 0 {
@@ -157,13 +178,10 @@ impl FileExplorer {
 
     /// Expand or collapse the node at `flat_idx` in the flat visible list.
     pub fn toggle_node_at(&mut self, flat_idx: usize) {
-        // Walk the tree to find the node at position `flat_idx`.
-        let path = {
-            let flat = self.flat_visible();
-            flat.get(flat_idx).map(|n| n.path.clone())
-        };
+        let path = self.flat_visible().get(flat_idx).map(|n| n.path.clone());
         if let Some(p) = path {
             toggle_in_list(&mut self.root_nodes, &p, self.show_hidden);
+            self.cache_dirty.set(true);
         }
     }
 
@@ -184,22 +202,32 @@ impl FileExplorer {
     #[allow(dead_code)]
     pub fn selected_file(&self) -> Option<PathBuf> {
         let flat = self.flat_visible();
-        flat.get(self.cursor_idx).and_then(|n| if n.is_dir { None } else { Some(n.path.clone()) })
+        flat.get(self.cursor_idx)
+            .and_then(|n| if n.is_dir { None } else { Some(n.path.clone()) })
     }
 
     /// Return the path selected by the cursor regardless of type.
     pub fn selected_path(&self) -> Option<PathBuf> {
-        let flat = self.flat_visible();
-        flat.get(self.cursor_idx).map(|n| n.path.clone())
+        self.flat_visible().get(self.cursor_idx).map(|n| n.path.clone())
     }
 
     // ── Flat rendering list ────────────────────────────────────────────────────
 
-    /// Flatten the visible tree into a single list for rendering and cursor tracking.
-    pub fn flat_visible(&self) -> Vec<&FileNode> {
-        let mut out = Vec::new();
-        flatten_nodes(&self.root_nodes, &mut out);
-        out
+    /// Return the cached flat view of all visible nodes.
+    ///
+    /// On a cache hit (no tree mutation since last call) this is free — no
+    /// allocation, no tree walk. On a miss the tree is walked once and the
+    /// result stored as owned `FlatNode` values so future calls can return
+    /// a borrow into the cache.
+    pub fn flat_visible(&self) -> std::cell::Ref<'_, Vec<FlatNode>> {
+        if self.cache_dirty.get() {
+            let mut cache = self.flat_cache.borrow_mut();
+            cache.clear();
+            flatten_nodes_owned(&self.root_nodes, &mut cache);
+            drop(cache);
+            self.cache_dirty.set(false);
+        }
+        self.flat_cache.borrow()
     }
 }
 
@@ -236,12 +264,18 @@ fn load_dir(path: &Path, depth: usize, show_hidden: bool) -> Vec<FileNode> {
     dirs
 }
 
-/// Recursively flatten visible nodes into `out`.
-fn flatten_nodes<'a>(nodes: &'a [FileNode], out: &mut Vec<&'a FileNode>) {
+/// Recursively flatten visible nodes into `out` as owned `FlatNode` snapshots.
+fn flatten_nodes_owned(nodes: &[FileNode], out: &mut Vec<FlatNode>) {
     for node in nodes {
-        out.push(node);
+        out.push(FlatNode {
+            path: node.path.clone(),
+            name: node.name.clone(),
+            is_dir: node.is_dir,
+            is_expanded: node.is_expanded,
+            depth: node.depth,
+        });
         if node.is_dir && node.is_expanded {
-            flatten_nodes(&node.children, out);
+            flatten_nodes_owned(&node.children, out);
         }
     }
 }

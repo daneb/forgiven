@@ -108,23 +108,15 @@ impl Buffer {
         let lines: Vec<String> = if content.is_empty() {
             vec![String::new()]
         } else {
-            // Normalise line endings
-            content
-                .replace("\r\n", "\n")
+            // Normalise line endings — computed once so the count isn't recalculated per line.
+            let normalised = content.replace("\r\n", "\n");
+            let newline_count = normalised.matches('\n').count();
+            normalised
                 .split('\n')
-                // If the file ends with \n, split produces a trailing empty string — drop it
-                .collect::<Vec<_>>()
-                .into_iter()
+                // If the file ends with \n, split produces a trailing empty string — drop it.
                 .enumerate()
                 .filter_map(|(i, l)| {
-                    // Keep all lines; just strip the phantom trailing empty line
-                    let is_last_empty =
-                        i == content.replace("\r\n", "\n").matches('\n').count() && l.is_empty();
-                    if is_last_empty {
-                        None
-                    } else {
-                        Some(l.to_string())
-                    }
+                    if i == newline_count && l.is_empty() { None } else { Some(l.to_string()) }
                 })
                 .collect()
         };

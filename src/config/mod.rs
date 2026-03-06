@@ -6,6 +6,40 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
+/// A single MCP server entry in the config file.
+///
+/// Example (`~/.config/forgiven/config.toml`):
+/// ```toml
+/// [[mcp.servers]]
+/// name    = "filesystem"
+/// command = "npx"
+/// args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+///
+/// [[mcp.servers]]
+/// name    = "git"
+/// command = "uvx"
+/// args    = ["mcp-server-git"]
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpServerConfig {
+    /// Human-readable name shown in the UI.
+    pub name: String,
+    /// Executable to spawn (e.g. "npx", "uvx", "/usr/local/bin/my-mcp-server").
+    pub command: String,
+    /// Arguments passed to the executable.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional environment variables to set for the server process.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
 /// A single language server entry in the config file.
 ///
 /// Example (`~/.config/forgiven/config.toml`):
@@ -41,6 +75,8 @@ pub struct Config {
     pub use_spaces: bool,
     #[serde(default)]
     pub lsp: LspConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Preferred Copilot model ID (e.g., "gpt-4o", "claude-3.5-sonnet").
     /// Falls back to "gpt-4o" if not set or if the model is no longer available.
     #[serde(default = "default_copilot_model")]
@@ -76,6 +112,7 @@ impl Default for Config {
             tab_width: default_tab_width(),
             use_spaces: default_use_spaces(),
             lsp: LspConfig::default(),
+            mcp: McpConfig::default(),
             default_copilot_model: default_copilot_model(),
             max_agent_rounds: default_max_agent_rounds(),
             agent_warning_threshold: default_agent_warning_threshold(),

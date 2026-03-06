@@ -9,6 +9,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
@@ -19,6 +20,7 @@ use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
+use crate::mcp::McpManager;
 use crate::search::{run_search, SearchState, SearchStatus};
 use crate::ui::UI;
 use lsp_types::Diagnostic;
@@ -53,7 +55,16 @@ struct HighlightCache {
     buffer_idx: usize,
     scroll_row: usize,
     lsp_version: i32,
-    spans: Vec<Vec<ratatui::text::Span<'static>>>,
+    spans: Arc<Vec<Vec<ratatui::text::Span<'static>>>>,
+}
+
+/// Cached rendered markdown lines for Mode::MarkdownPreview.
+/// Keyed on `(lsp_version, viewport_width)` — regenerated only when the buffer
+/// changes or the terminal is resized.
+struct MarkdownCache {
+    lsp_version: i32,
+    viewport_width: usize,
+    lines: Vec<ratatui::text::Line<'static>>,
 }
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
@@ -146,6 +157,8 @@ pub struct Editor {
     // ── Markdown preview ──────────────────────────────────────────────────────
     /// Scroll offset (in rendered lines) for Mode::MarkdownPreview.
     preview_scroll: usize,
+    /// Cached rendered markdown lines — avoids re-parsing on every render frame.
+    markdown_cache: Option<MarkdownCache>,
 
     // ── Project-wide text search ──────────────────────────────────────────────
     /// State for the search overlay (Mode::Search).
@@ -169,11 +182,38 @@ pub struct Editor {
     /// Path of the entry pending deletion (Mode::DeleteFile).
     delete_confirm_path: Option<std::path::PathBuf>,
 
+    // ── Explorer new folder popup ─────────────────────────────────────────────
+    /// Folder name being typed while in Mode::NewFolder.
+    new_folder_buffer: String,
+    /// Parent directory in which the new folder will be created.
+    new_folder_parent: Option<std::path::PathBuf>,
+
     // ── Apply-diff overlay (Mode::ApplyDiff) ──────────────────────────────────
     apply_diff_path: Option<std::path::PathBuf>,
     apply_diff_content: Option<String>,
     apply_diff_lines: Vec<DiffLine>,
     apply_diff_scroll: usize,
+
+    // ── Vertical split ────────────────────────────────────────────────────────
+    /// Index of the background pane's buffer; None = no split.
+    pub split_other_idx: Option<usize>,
+    /// True when the right pane has focus (current_buffer_idx == right buffer).
+    pub split_right_focused: bool,
+    /// Per-viewport highlight cache for the split (inactive) pane.
+    split_highlight_cache: Option<HighlightCache>,
+
+    // ── Commit message generation ─────────────────────────────────────────────
+    /// Editable commit message while Mode::CommitMsg is active.
+    commit_msg_buffer: String,
+    /// In-flight background task that fetches an AI-generated commit message.
+    commit_msg_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    /// True when generating from staged diff (`SPC g s`); false = last commit (`SPC g l`).
+    commit_msg_from_staged: bool,
+
+    // ── MCP servers ───────────────────────────────────────────────────────────
+    /// Manages connected MCP servers and their tool registries.
+    /// Initialized by `setup_mcp()` after the config is loaded.
+    mcp_manager: Option<std::sync::Arc<McpManager>>,
 
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
@@ -220,6 +260,7 @@ impl Editor {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             preview_scroll: 0,
+            markdown_cache: None,
             search_state: SearchState::new(),
             search_rx: None,
             last_search_instant: None,
@@ -227,10 +268,19 @@ impl Editor {
             rename_buffer: String::new(),
             rename_source: None,
             delete_confirm_path: None,
+            new_folder_buffer: String::new(),
+            new_folder_parent: None,
             apply_diff_path: None,
             apply_diff_content: None,
             apply_diff_lines: Vec::new(),
             apply_diff_scroll: 0,
+            split_other_idx: None,
+            split_right_focused: false,
+            split_highlight_cache: None,
+            commit_msg_buffer: String::new(),
+            commit_msg_rx: None,
+            commit_msg_from_staged: true,
+            mcp_manager: None,
             config,
         })
     }
@@ -345,6 +395,23 @@ impl Editor {
             if let Some(client) = self.lsp_manager.get_client(&language) {
                 let _ = client.did_open(uri, language, text);
             }
+        }
+    }
+
+    /// Initialize MCP servers from the loaded config.
+    /// Call this once after `new()`, before `run()`.
+    /// Servers that fail to connect are skipped with a warning.
+    pub async fn setup_mcp(&mut self) {
+        if self.config.mcp.servers.is_empty() {
+            return;
+        }
+        tracing::info!("Connecting to {} MCP server(s)…", self.config.mcp.servers.len());
+        let manager = McpManager::from_config(&self.config.mcp.servers).await;
+        if manager.has_tools() {
+            tracing::info!("MCP ready: {}", manager.summary());
+            let arc = std::sync::Arc::new(manager);
+            self.mcp_manager = Some(std::sync::Arc::clone(&arc));
+            self.agent_panel.mcp_manager = Some(arc);
         }
     }
 
@@ -563,6 +630,35 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Commit-message AI response poll ───────────────────────────────
+            let commit_done = if let Some(rx) = self.commit_msg_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(_) => Some(Err(anyhow::anyhow!("commit msg channel closed"))),
+                }
+            } else {
+                None
+            };
+            if let Some(result) = commit_done {
+                self.commit_msg_rx = None;
+                needs_render = true;
+                match result {
+                    Ok(msg) => {
+                        self.commit_msg_buffer = msg;
+                        self.set_status(
+                            "Commit message ready — edit then Enter to commit, Esc to discard"
+                                .to_string(),
+                        );
+                    },
+                    Err(e) => {
+                        self.mode = Mode::Normal;
+                        self.set_status(format!("Failed to generate commit message: {e}"));
+                    },
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // Also render whenever background polling is still in-flight so the
             // user sees spinner/progress updates.
             // Force a render whenever background work is in-flight OR the
@@ -572,6 +668,7 @@ impl Editor {
                 || self.pending_completion.is_some()
                 || self.key_handler.which_key_pending()
                 || self.search_rx.is_some()
+                || self.commit_msg_rx.is_some()
             {
                 needs_render = true;
             }
@@ -685,7 +782,7 @@ impl Editor {
             (buf.scroll_row, buf.lsp_version, ext)
         });
 
-        let highlighted_lines: Option<Vec<Vec<Span<'static>>>> =
+        let highlighted_lines: Option<Arc<Vec<Vec<Span<'static>>>>> =
             if let Some((scroll_row, lsp_ver, ext)) = cache_key {
                 let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
                     c.buffer_idx == buf_idx
@@ -694,8 +791,8 @@ impl Editor {
                 });
 
                 if cache_hit {
-                    // Zero allocation: clone the already-built Span vecs.
-                    self.highlight_cache.as_ref().map(|c| c.spans.clone())
+                    // Cache hit: Arc::clone is a single atomic increment — zero allocation.
+                    self.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
                 } else {
                     // Cache miss: run syntect for the visible window and store result.
                     let spans = if let Some(buf) = self.current_buffer() {
@@ -707,13 +804,14 @@ impl Editor {
                     } else {
                         Vec::new()
                     };
+                    let arc = Arc::new(spans);
                     self.highlight_cache = Some(HighlightCache {
                         buffer_idx: buf_idx,
                         scroll_row,
                         lsp_version: lsp_ver,
-                        spans: spans.clone(),
+                        spans: Arc::clone(&arc),
                     });
-                    Some(spans)
+                    Some(arc)
                 }
             } else {
                 None
@@ -739,13 +837,32 @@ impl Editor {
         let ghost = self.ghost_text.as_ref().map(|(text, row, col)| (text.as_str(), *row, *col));
 
         // ── Markdown preview lines ─────────────────────────────────────────────
-        // Computed when in MarkdownPreview mode; scrolled by self.preview_scroll so
-        // render_buffer() only needs to take(viewport_height) from the front.
+        // Computed when in MarkdownPreview mode; cached by (lsp_version, viewport_width)
+        // so markdown re-parsing is skipped on frames where nothing changed.
         let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> =
             if mode == Mode::MarkdownPreview {
-                let content =
-                    self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-                let all_lines = crate::markdown::render(&content, viewport_width);
+                let all_lines = {
+                    let key = self.current_buffer().map(|buf| buf.lsp_version);
+                    let cache_hit = self.markdown_cache.as_ref().is_some_and(|c| {
+                        Some(c.lsp_version) == key && c.viewport_width == viewport_width
+                    });
+                    if cache_hit {
+                        self.markdown_cache.as_ref().unwrap().lines.clone()
+                    } else {
+                        let ver = key.unwrap_or(0);
+                        let content = self
+                            .current_buffer()
+                            .map(|buf| buf.lines().join("\n"))
+                            .unwrap_or_default();
+                        let rendered = crate::markdown::render(&content, viewport_width);
+                        self.markdown_cache = Some(MarkdownCache {
+                            lsp_version: ver,
+                            viewport_width,
+                            lines: rendered.clone(),
+                        });
+                        rendered
+                    }
+                };
                 // Cap scroll so we can't scroll past the end.
                 let max_scroll = all_lines.len().saturating_sub(1);
                 let scroll = self.preview_scroll.min(max_scroll);
@@ -754,15 +871,81 @@ impl Editor {
                 None
             };
 
+        // ── Split pane data ────────────────────────────────────────────────────
+        let split_buffer_data = self.split_other_idx.and_then(|idx| {
+            self.buffers.get(idx).map(|buf| {
+                (
+                    buf.name.clone(),
+                    buf.is_modified,
+                    buf.cursor.clone(),
+                    buf.scroll_row,
+                    buf.scroll_col,
+                    buf.lines().to_vec(),
+                    buf.selection.clone(),
+                )
+            })
+        });
+
+        // ── Split highlight cache ──────────────────────────────────────────────
+        let split_highlighted_lines: Option<Arc<Vec<Vec<ratatui::text::Span<'static>>>>> =
+            if let Some(split_idx) = self.split_other_idx {
+                if let Some(split_buf) = self.buffers.get(split_idx) {
+                    let split_scroll = split_buf.scroll_row;
+                    let split_ver = split_buf.lsp_version;
+                    let split_ext = split_buf
+                        .file_path
+                        .as_deref()
+                        .map(Highlighter::extension_for)
+                        .unwrap_or_default();
+                    let cache_hit = self.split_highlight_cache.as_ref().is_some_and(|c| {
+                        c.buffer_idx == split_idx
+                            && c.scroll_row == split_scroll
+                            && c.lsp_version == split_ver
+                    });
+                    if cache_hit {
+                        // Cache hit: Arc::clone is a single atomic increment — zero allocation.
+                        self.split_highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
+                    } else {
+                        let end = (split_scroll + term_height).min(split_buf.lines().len());
+                        let spans: Vec<Vec<ratatui::text::Span<'static>>> = split_buf.lines()
+                            [split_scroll..end]
+                            .iter()
+                            .map(|line| self.highlighter.highlight_line(line, &split_ext))
+                            .collect();
+                        let arc = Arc::new(spans);
+                        self.split_highlight_cache = Some(HighlightCache {
+                            buffer_idx: split_idx,
+                            scroll_row: split_scroll,
+                            lsp_version: split_ver,
+                            spans: Arc::clone(&arc),
+                        });
+                        Some(arc)
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        let split_right_focused = self.split_right_focused;
+
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref =
             if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
-        let hl_ref = highlighted_lines.as_deref();
+        let hl_ref: Option<&[Vec<Span<'static>>]> =
+            highlighted_lines.as_deref().map(Vec::as_slice);
+        let split_hl_ref: Option<&[Vec<Span<'static>>]> =
+            split_highlighted_lines.as_deref().map(Vec::as_slice);
         let preview_ref = preview_lines_owned.as_deref();
         let search_ref = if mode == Mode::Search { Some(&self.search_state) } else { None };
         let rename_buf_owned =
             if mode == Mode::RenameFile { Some(self.rename_buffer.clone()) } else { None };
         let rename_buf = rename_buf_owned.as_deref();
+
+        let new_folder_buf_owned =
+            if mode == Mode::NewFolder { Some(self.new_folder_buffer.clone()) } else { None };
+        let new_folder_buf = new_folder_buf_owned.as_deref();
 
         let delete_path_owned = if mode == Mode::DeleteFile {
             self.delete_confirm_path
@@ -790,6 +973,8 @@ impl Editor {
             lines: &self.apply_diff_lines,
             scroll: self.apply_diff_scroll,
         });
+        let commit_msg_buf =
+            if mode == Mode::CommitMsg { Some(self.commit_msg_buffer.as_str()) } else { None };
 
         self.terminal.draw(|frame| {
             UI::render(
@@ -811,7 +996,12 @@ impl Editor {
                 search_ref,
                 rename_buf,
                 delete_name,
+                new_folder_buf,
                 apply_diff_view.as_ref(),
+                split_buffer_data.as_ref(),
+                split_hl_ref,
+                split_right_focused,
+                commit_msg_buf,
             );
         })?;
 
@@ -894,7 +1084,9 @@ impl Editor {
                     | Mode::InFileSearch
                     | Mode::RenameFile
                     | Mode::DeleteFile
+                    | Mode::NewFolder
                     | Mode::ApplyDiff
+                    | Mode::CommitMsg
             )
         {
             self.cycle_panel_focus();
@@ -916,7 +1108,9 @@ impl Editor {
             Mode::InFileSearch => self.handle_in_file_search_mode(key)?,
             Mode::RenameFile => self.handle_rename_mode(key)?,
             Mode::DeleteFile => self.handle_delete_mode(key)?,
+            Mode::NewFolder => self.handle_new_folder_mode(key)?,
             Mode::ApplyDiff => self.handle_apply_diff_mode(key)?,
+            Mode::CommitMsg => self.handle_commit_msg_mode(key)?,
         }
 
         Ok(())
@@ -1143,8 +1337,27 @@ impl Editor {
                                 .to_string(),
                         );
                     } else {
-                        let name = buf.name.clone();
-                        self.buffers.remove(self.current_buffer_idx);
+                        let closing_idx = self.current_buffer_idx;
+                        // If closing the focused pane while a split is active, bring the
+                        // other pane to focus first so we never close the split's buffer
+                        // out from under the cursor.
+                        if let Some(other) = self.split_other_idx {
+                            if closing_idx == other {
+                                // Closing the background pane's buffer — just clear the split.
+                                self.split_other_idx = None;
+                                self.split_right_focused = false;
+                                self.split_highlight_cache = None;
+                            } else {
+                                // Closing the focused buffer while split is open: swap focus
+                                // so the other pane becomes active, then close.
+                                self.current_buffer_idx = other;
+                                self.split_other_idx = None;
+                                self.split_right_focused = false;
+                                self.split_highlight_cache = None;
+                            }
+                        }
+                        let name = self.buffers[closing_idx].name.clone();
+                        self.buffers.remove(closing_idx);
                         if !self.buffers.is_empty() {
                             self.current_buffer_idx =
                                 self.current_buffer_idx.min(self.buffers.len() - 1);
@@ -1152,6 +1365,32 @@ impl Editor {
                         self.set_status(format!("Closed buffer: {}", name));
                     }
                 }
+            },
+            Action::WindowSplit => {
+                if self.buffers.len() < 2 {
+                    self.set_status("Need another buffer open — use SPC f f".into());
+                } else if self.split_other_idx.is_some() {
+                    self.set_status("Split already open — SPC w c to close".into());
+                } else {
+                    let other = if self.current_buffer_idx == 0 {
+                        self.buffers.len() - 1
+                    } else {
+                        self.current_buffer_idx - 1
+                    };
+                    self.split_other_idx = Some(other);
+                    self.split_right_focused = false;
+                }
+            },
+            Action::WindowFocusNext => {
+                if let Some(ref mut other) = self.split_other_idx {
+                    std::mem::swap(&mut self.current_buffer_idx, other);
+                    self.split_right_focused = !self.split_right_focused;
+                }
+            },
+            Action::WindowClose => {
+                self.split_other_idx = None;
+                self.split_right_focused = false;
+                self.split_highlight_cache = None;
             },
             Action::FileFind => {
                 self.scan_files(); // fills file_all
@@ -1168,6 +1407,12 @@ impl Editor {
                 // Enter command mode pre-filled with "e " — user types the path.
                 self.command_buffer = "e ".to_string();
                 self.mode = Mode::Command;
+            },
+            Action::FileEditConfig => {
+                match crate::config::Config::config_path() {
+                    Some(path) => self.open_file(&path)?,
+                    None => self.set_status("Cannot locate config file ($HOME not set)".to_string()),
+                }
             },
             Action::FileSave => {
                 // Get file path and text before doing LSP operations
@@ -1278,6 +1523,8 @@ impl Editor {
             Action::GitOpen => {
                 self.open_lazygit()?;
             },
+            Action::GitCommitStaged => self.start_commit_msg(true),
+            Action::GitCommitLast => self.start_commit_msg(false),
             // ── Markdown preview ──────────────────────────────────────────────
             Action::MarkdownPreviewToggle => {
                 if self.mode == Mode::MarkdownPreview {
@@ -1984,11 +2231,11 @@ impl Editor {
     /// The user still presses Enter to send.
     fn handle_paste(&mut self, text: String) -> Result<()> {
         if self.mode == Mode::Agent {
-            // Preserve line breaks so multi-line pastes work in the agent input.
+            // Store the paste as a block; the UI shows a compact summary line
+            // ("⎘ Pasted N lines") and the full content is sent with the message.
             let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-            for ch in normalised.chars() {
-                self.agent_panel.input_char(ch);
-            }
+            let line_count = normalised.lines().count();
+            self.agent_panel.pasted_blocks.push((normalised, line_count));
         } else if self.mode == Mode::Insert {
             // In insert mode, paste the text as-is into the current buffer.
             let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -2095,6 +2342,26 @@ impl Editor {
                     self.file_explorer.blur();
                     self.mode = Mode::DeleteFile;
                 }
+            },
+            // m — create a new folder inside the selected directory (or file's parent).
+            KeyCode::Char('m') => {
+                let target_dir = self
+                    .file_explorer
+                    .selected_path()
+                    .map(|p| {
+                        if p.is_dir() {
+                            p
+                        } else {
+                            p.parent()
+                                .map(|x| x.to_path_buf())
+                                .unwrap_or(self.file_explorer.root_path.clone())
+                        }
+                    })
+                    .unwrap_or_else(|| self.file_explorer.root_path.clone());
+                self.new_folder_parent = Some(target_dir);
+                self.new_folder_buffer.clear();
+                self.file_explorer.blur();
+                self.mode = Mode::NewFolder;
             },
             _ => {},
         }
@@ -2206,6 +2473,60 @@ impl Editor {
             self.file_explorer.focus();
             self.mode = Mode::Explorer;
             self.set_status(format!("Deleted '{}'", name));
+        }
+        Ok(())
+    }
+
+    // ── New folder popup mode key handling ───────────────────────────────────
+
+    fn handle_new_folder_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.new_folder_buffer.clear();
+                self.new_folder_parent = None;
+                self.file_explorer.focus();
+                self.mode = Mode::Explorer;
+            },
+            KeyCode::Enter => {
+                self.do_create_folder()?;
+            },
+            KeyCode::Backspace => {
+                self.new_folder_buffer.pop();
+            },
+            KeyCode::Char(c) if c != '/' && c != '\\' => {
+                self.new_folder_buffer.push(c);
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
+    fn do_create_folder(&mut self) -> Result<()> {
+        let name = self.new_folder_buffer.trim().to_string();
+        if name.is_empty() {
+            self.set_status("Create folder cancelled: empty name".into());
+            self.new_folder_buffer.clear();
+            self.new_folder_parent = None;
+            self.file_explorer.focus();
+            self.mode = Mode::Explorer;
+            return Ok(());
+        }
+
+        if let Some(parent) = self.new_folder_parent.take() {
+            let new_dir = parent.join(&name);
+            if new_dir.exists() {
+                self.set_status(format!("Create folder failed: '{}' already exists", name));
+                self.new_folder_parent = Some(parent); // keep popup open for retry
+                return Ok(());
+            }
+
+            std::fs::create_dir_all(&new_dir)?;
+            self.file_explorer.reload();
+
+            self.new_folder_buffer.clear();
+            self.file_explorer.focus();
+            self.mode = Mode::Explorer;
+            self.set_status(format!("Created folder '{}'", name));
         }
         Ok(())
     }
@@ -3259,6 +3580,113 @@ impl Editor {
             },
         }
 
+        Ok(())
+    }
+
+    // ── Commit-message generation ──────────────────────────────────────────────
+
+    /// Kick off a background AI task to generate a commit message.
+    /// `from_staged = true`  → use `git diff --staged`
+    /// `from_staged = false` → use `git show HEAD --stat -p`
+    fn start_commit_msg(&mut self, from_staged: bool) {
+        // Run the git command synchronously (it's fast).
+        let diff_cmd = if from_staged {
+            std::process::Command::new("git")
+                .args(["diff", "--staged"])
+                .output()
+        } else {
+            std::process::Command::new("git")
+                .args(["show", "HEAD", "--stat", "-p"])
+                .output()
+        };
+
+        let diff_text = match diff_cmd {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => {
+                self.set_status(format!("git error: {e}"));
+                return;
+            },
+        };
+
+        if diff_text.trim().is_empty() {
+            let msg = if from_staged {
+                "No staged changes — stage files first (git add)".to_string()
+            } else {
+                "No commits found".to_string()
+            };
+            self.set_status(msg);
+            return;
+        }
+
+        let model_id = self.agent_panel.selected_model_id().to_string();
+
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let system = "You are a concise git commit message writer. \
+                Given a git diff, output ONLY a single commit message: \
+                a short subject line (≤72 chars, imperative mood), then a blank line, \
+                then an optional bullet-point body with the key changes. \
+                No preamble, no explanation, just the commit message.";
+            let user = format!("Write a commit message for this diff:\n\n```\n{diff_text}\n```");
+            let result = async {
+                let api_token = crate::agent::acquire_copilot_token().await?;
+                crate::agent::one_shot_complete(&api_token, &model_id, system, &user).await
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+
+        self.commit_msg_rx = Some(rx);
+        self.commit_msg_from_staged = from_staged;
+        self.commit_msg_buffer = String::new();
+        self.mode = Mode::CommitMsg;
+        self.set_status("Generating commit message…".to_string());
+    }
+
+    /// Handle key events while in Mode::CommitMsg.
+    fn handle_commit_msg_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            // Esc — discard
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.commit_msg_buffer.clear();
+                self.commit_msg_rx = None;
+                self.set_status("Commit message discarded".to_string());
+            },
+            // Enter — commit with the current message
+            KeyCode::Enter => {
+                let msg = self.commit_msg_buffer.trim().to_string();
+                if msg.is_empty() {
+                    self.set_status("Commit message is empty".to_string());
+                    return Ok(());
+                }
+                let out = std::process::Command::new("git")
+                    .args(["commit", "-m", &msg])
+                    .output();
+                self.mode = Mode::Normal;
+                self.commit_msg_buffer.clear();
+                self.commit_msg_rx = None;
+                match out {
+                    Ok(o) if o.status.success() => {
+                        self.set_status("Committed successfully".to_string());
+                    },
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr).to_string();
+                        self.set_status(format!("git commit failed: {err}"));
+                    },
+                    Err(e) => self.set_status(format!("git error: {e}")),
+                }
+            },
+            // Backspace — delete last character
+            KeyCode::Backspace => {
+                self.commit_msg_buffer.pop();
+            },
+            // Regular characters
+            KeyCode::Char(ch) => {
+                self.commit_msg_buffer.push(ch);
+            },
+            _ => {},
+        }
         Ok(())
     }
 

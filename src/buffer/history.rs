@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 /// Maximum number of undo/redo snapshots kept per buffer.
 /// At ~10 KB average per snapshot this caps memory use at ~1 MB per buffer.
 const MAX_SNAPSHOTS: usize = 100;
@@ -25,10 +27,10 @@ pub struct BufferSnapshot {
 /// step — matching standard vim behaviour.
 #[derive(Debug, Clone, Default)]
 pub struct EditHistory {
-    /// Saved states, oldest first.  Top of stack = most recent.
-    past: Vec<BufferSnapshot>,
-    /// States saved during undo so they can be redone.
-    future: Vec<BufferSnapshot>,
+    /// Saved states, oldest first.  Back of deque = most recent.
+    past: VecDeque<BufferSnapshot>,
+    /// States saved during undo so they can be redone.  Back = most recent.
+    future: VecDeque<BufferSnapshot>,
 }
 
 impl EditHistory {
@@ -40,9 +42,9 @@ impl EditHistory {
     /// Clears the redo stack — a new edit invalidates any future chain.
     pub fn save(&mut self, lines: &[String], cursor_row: usize, cursor_col: usize) {
         if self.past.len() >= MAX_SNAPSHOTS {
-            self.past.remove(0);
+            self.past.pop_front();
         }
-        self.past.push(BufferSnapshot { lines: lines.to_vec(), cursor_row, cursor_col });
+        self.past.push_back(BufferSnapshot { lines: lines.to_vec(), cursor_row, cursor_col });
         self.future.clear();
     }
 
@@ -67,11 +69,12 @@ impl EditHistory {
         cursor_row: usize,
         cursor_col: usize,
     ) -> Option<BufferSnapshot> {
-        let snap = self.past.pop()?;
+        let snap = self.past.pop_back()?;
         if self.future.len() >= MAX_SNAPSHOTS {
-            self.future.remove(0);
+            self.future.pop_front();
         }
-        self.future.push(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
+        self.future
+            .push_back(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
         Some(snap)
     }
 
@@ -84,11 +87,12 @@ impl EditHistory {
         cursor_row: usize,
         cursor_col: usize,
     ) -> Option<BufferSnapshot> {
-        let snap = self.future.pop()?;
+        let snap = self.future.pop_back()?;
         if self.past.len() >= MAX_SNAPSHOTS {
-            self.past.remove(0);
+            self.past.pop_front();
         }
-        self.past.push(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
+        self.past
+            .push_back(BufferSnapshot { lines: current_lines.to_vec(), cursor_row, cursor_col });
         Some(snap)
     }
 }

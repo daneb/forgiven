@@ -11,6 +11,7 @@ mod highlight;
 mod keymap;
 mod lsp;
 mod markdown;
+mod mcp;
 mod search;
 mod ui;
 
@@ -96,6 +97,9 @@ async fn main() -> Result<()> {
 
     // Start configured LSP servers (non-fatal if any fail)
     editor.setup_lsp().await;
+
+    // Connect to configured MCP servers (non-fatal if any fail)
+    editor.setup_mcp().await;
 
     editor.run().await?;
 
