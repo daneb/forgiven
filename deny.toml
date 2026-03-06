@@ -32,6 +32,7 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "OpenSSL",
+    "BSL-1.0",          # clipboard-win + error-code (via arboard, Windows clipboard)
 ]
 
 # Confidence threshold — a score below this treats the detected licence as
