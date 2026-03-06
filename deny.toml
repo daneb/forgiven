@@ -31,8 +31,8 @@ allow = [
     "Unicode-DFS-2016",     # unicode-data tables
     "Unicode-3.0",
     "Zlib",
-    "OpenSSL",
     "BSL-1.0",          # clipboard-win + error-code (via arboard, Windows clipboard)
+    "CDLA-Permissive-2.0", # webpki-roots (via reqwest rustls-tls)
 ]
 
 # Confidence threshold — a score below this treats the detected licence as
