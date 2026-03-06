@@ -11,17 +11,11 @@
 db-path = "~/.cargo/advisory-db"
 db-urls  = ["https://github.com/rustsec/advisory-db"]
 
-# Fail the build if a VULNERABILITY is found.
-vulnerability = "deny"
-
 # Warn (not fail) for unmaintained crates — good signal but not always blocking.
 unmaintained = "workspace"
 
 # Warn on yanked versions of crates.
 yanked = "warn"
-
-# Notice-level advisories are informational.
-notice = "warn"
 
 # ── Licences ───────────────────────────────────────────────────────────────────
 # All dependency licences must appear in the allow list.
@@ -44,8 +38,6 @@ allow = [
 # unknown.  0.8 is a safe default; raise to 0.9 if you want stricter checks.
 confidence-threshold = 0.8
 
-# If a crate is detected as having no licence at all, deny it.
-unlicensed = "deny"
 
 # ── Bans ───────────────────────────────────────────────────────────────────────
 # Prevent crates with known issues or policy violations.
