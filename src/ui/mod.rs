@@ -405,7 +405,11 @@ impl UI {
             .iter()
             .map(|l| {
                 let cols: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-                if inner_width == 0 { 1 } else { cols.div_ceil(inner_width).max(1) }
+                if inner_width == 0 {
+                    1
+                } else {
+                    cols.div_ceil(inner_width).max(1)
+                }
             })
             .sum::<usize>()
             .max(1);
@@ -456,10 +460,9 @@ impl UI {
                 format!(" MCP: {} ", mcp.summary()),
                 Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
             ),
-            Some(_) => Span::styled(
-                " MCP: connected (no tools) ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Some(_) => {
+                Span::styled(" MCP: connected (no tools) ", Style::default().fg(Color::DarkGray))
+            },
             None => Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray)),
         };
 
