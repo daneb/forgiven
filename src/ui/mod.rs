@@ -394,17 +394,26 @@ impl UI {
         }
 
         // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
-        let visible_height = history_area.height.saturating_sub(2) as usize; // account for border
-        let total = lines.len();
+        // We use display rows (not logical lines) so that wrapped code-block lines don't
+        // cause the bottom of the panel to be clipped.
+        let inner_width = history_area.width.saturating_sub(2) as usize;
+        let visible_height = history_area.height.saturating_sub(2) as usize;
 
-        // Cap scroll so we never scroll past the top.
-        let max_scroll = total.saturating_sub(visible_height);
+        // Approximate display rows per logical Line by summing span character counts
+        // and dividing by the inner panel width (same heuristic ratatui uses for Wrap).
+        let total_display_rows: usize = lines
+            .iter()
+            .map(|l| {
+                let cols: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+                if inner_width == 0 { 1 } else { cols.div_ceil(inner_width).max(1) }
+            })
+            .sum::<usize>()
+            .max(1);
+
+        let max_scroll = total_display_rows.saturating_sub(visible_height);
         let scroll = panel.scroll.min(max_scroll);
-
-        // Compute the slice: count back from the bottom, then offset by scroll.
-        let end = total.saturating_sub(scroll);
-        let start = end.saturating_sub(visible_height);
-        let visible_lines = lines[start..end].to_vec();
+        // row_offset for Paragraph::scroll: 0 = top of content; max_scroll = show bottom.
+        let row_offset = max_scroll.saturating_sub(scroll) as u16;
 
         // Build a title that shows the active model, live status, and scroll position.
         let model_label = panel.selected_model_display();
@@ -413,7 +422,7 @@ impl UI {
         let scroll_suffix = if scroll > 0 {
             let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
             format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ")
-        } else if total > visible_height {
+        } else if total_display_rows > visible_height {
             "  (↑ to scroll up) ".to_string()
         } else {
             " ".to_string()
@@ -442,10 +451,27 @@ impl UI {
             Span::raw(format!("{status_suffix}{scroll_suffix}")),
         ]);
 
-        let history_block =
-            Block::default().title(title_line).borders(Borders::ALL).border_style(border_style);
-        let history_para =
-            Paragraph::new(visible_lines).block(history_block).wrap(Wrap { trim: false });
+        let mcp_bottom = match &panel.mcp_manager {
+            Some(mcp) if mcp.has_tools() => Span::styled(
+                format!(" MCP: {} ", mcp.summary()),
+                Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+            ),
+            Some(_) => Span::styled(
+                " MCP: connected (no tools) ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            None => Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray)),
+        };
+
+        let history_block = Block::default()
+            .title(title_line)
+            .title_bottom(mcp_bottom)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let history_para = Paragraph::new(lines)
+            .block(history_block)
+            .wrap(Wrap { trim: false })
+            .scroll((row_offset, 0));
         frame.render_widget(history_para, history_area);
 
         // ── Task strip ────────────────────────────────────────────────────────

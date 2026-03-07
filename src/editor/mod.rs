@@ -407,12 +407,10 @@ impl Editor {
         }
         tracing::info!("Connecting to {} MCP server(s)…", self.config.mcp.servers.len());
         let manager = McpManager::from_config(&self.config.mcp.servers).await;
-        if manager.has_tools() {
-            tracing::info!("MCP ready: {}", manager.summary());
-            let arc = std::sync::Arc::new(manager);
-            self.mcp_manager = Some(std::sync::Arc::clone(&arc));
-            self.agent_panel.mcp_manager = Some(arc);
-        }
+        tracing::info!("MCP ready: {}", manager.summary());
+        let arc = std::sync::Arc::new(manager);
+        self.mcp_manager = Some(std::sync::Arc::clone(&arc));
+        self.agent_panel.mcp_manager = Some(arc);
     }
 
     /// Get the currently active buffer
