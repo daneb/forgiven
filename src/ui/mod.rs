@@ -22,6 +22,20 @@ pub struct ApplyDiffView<'a> {
     pub scroll: usize,
 }
 
+/// Data for the diagnostics overlay (Mode::Diagnostics).
+pub struct DiagnosticsData<'a> {
+    /// MCP: (server_name, tool_count) for each connected server.
+    pub mcp_connected: Vec<(&'a str, usize)>,
+    /// MCP: (server_name, error) for each failed server.
+    pub mcp_failed: &'a [(String, String)],
+    /// LSP server names that are active.
+    pub lsp_servers: Vec<&'a str>,
+    /// Path to the log file.
+    pub log_path: &'a str,
+    /// Recent log entries (level, message) newest-last.
+    pub recent_logs: &'a [(String, String)],
+}
+
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
 // Buffer list tuple: (buffer names with modified flags, selected index)
@@ -76,6 +90,10 @@ impl UI {
         split_right_focused: bool,
         // Commit message buffer (Mode::CommitMsg only).
         commit_msg: Option<&str>,
+        // Diagnostics overlay data (Mode::Diagnostics only).
+        diag_overlay: Option<&DiagnosticsData<'_>>,
+        // Time from process start to the editor being ready; displayed on the welcome screen.
+        startup_elapsed: Option<std::time::Duration>,
     ) {
         let size = frame.area();
 
@@ -209,6 +227,7 @@ impl UI {
                 left_hl,
                 left_preview,
                 !split_right_focused,
+                startup_elapsed,
             );
 
             // Draw vertical separator
@@ -227,6 +246,7 @@ impl UI {
                 right_hl,
                 None,
                 split_right_focused,
+                startup_elapsed,
             );
         } else {
             Self::render_buffer(
@@ -239,6 +259,7 @@ impl UI {
                 highlighted_lines,
                 preview_lines,
                 true,
+                startup_elapsed,
             );
         }
 
@@ -286,6 +307,11 @@ impl UI {
         // Render commit message popup if active
         if let Some(msg) = commit_msg {
             Self::render_commit_msg_popup(frame, msg, size);
+        }
+
+        // Render diagnostics overlay if active
+        if let Some(diag) = diag_overlay {
+            Self::render_diagnostics_overlay(frame, diag, size);
         }
     }
 
@@ -456,14 +482,36 @@ impl UI {
         ]);
 
         let mcp_bottom = match &panel.mcp_manager {
-            Some(mcp) if mcp.has_tools() => Span::styled(
-                format!(" MCP: {} ", mcp.summary()),
-                Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
-            ),
-            Some(_) => {
-                Span::styled(" MCP: connected (no tools) ", Style::default().fg(Color::DarkGray))
+            None => Line::from(Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray))),
+            Some(mcp) => {
+                let mut spans = vec![Span::raw(" MCP: ")];
+                // Connected servers — green.
+                let connected: Vec<String> = mcp
+                    .connected_servers()
+                    .into_iter()
+                    .map(|(name, count)| format!("{} ({})", name, count))
+                    .collect();
+                if !connected.is_empty() {
+                    spans.push(Span::styled(
+                        connected.join(", "),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        "no tools",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                // Failed servers — red with ⚠ prefix.
+                for (name, reason) in &mcp.failed_servers {
+                    spans.push(Span::styled(
+                        format!("  ⚠ {}: {}", name, reason),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+                spans.push(Span::raw(" "));
+                Line::from(spans)
             },
-            None => Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray)),
         };
 
         let history_block = Block::default()
@@ -626,6 +674,7 @@ impl UI {
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
         preview_lines: Option<&[Line<'static>]>,
         show_cursor: bool,
+        startup_elapsed: Option<std::time::Duration>,
     ) {
         // ── Markdown preview mode — render pre-computed lines directly ─────────
         if let Some(md_lines) = preview_lines {
@@ -721,12 +770,12 @@ impl UI {
             }
         } else {
             // No buffer open — show the welcome screen.
-            Self::render_welcome(frame, area);
+            Self::render_welcome(frame, area, startup_elapsed);
         }
     }
 
     /// Render the welcome / splash screen shown when no buffer is open.
-    fn render_welcome(frame: &mut Frame, area: Rect) {
+    fn render_welcome(frame: &mut Frame, area: Rect, startup_elapsed: Option<std::time::Duration>) {
         #[rustfmt::skip]
         const CROSS: &[&str] = &[
             "                               ┃┃┃",
@@ -756,8 +805,9 @@ impl UI {
         let area_h = area.height as usize;
         let area_w = area.width as usize;
 
-        // Total logo height: cross + blank + wordmark + blank + tagline + blank + hints.
-        let logo_h = CROSS.len() + 1 + WORDMARK.len() + 1 + 1 + 1 + 1;
+        // Total logo height: cross + blank + wordmark + blank + tagline + blank + hints [+ blank + ready].
+        let logo_h =
+            CROSS.len() + 1 + WORDMARK.len() + 1 + 1 + 1 + 1 + if startup_elapsed.is_some() { 2 } else { 0 };
         let top_pad = area_h.saturating_sub(logo_h) / 2;
         let left_pad = area_w.saturating_sub(LOGO_W) / 2;
 
@@ -792,6 +842,17 @@ impl UI {
             format!("{}{}", " ".repeat(hint_pad), HINTS),
             dim_style,
         )));
+
+        if let Some(elapsed) = startup_elapsed {
+            let ms = elapsed.as_millis();
+            let ready_text = format!("ready in {ms} ms");
+            let ready_pad = area_w.saturating_sub(ready_text.len()) / 2;
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(ready_pad), ready_text),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            )));
+        }
 
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -1424,6 +1485,7 @@ impl UI {
             Mode::NewFolder => "MKDIR",
             Mode::ApplyDiff => "DIFF",
             Mode::CommitMsg => "COMMIT",
+            Mode::Diagnostics => "DIAG",
         };
 
         let mode_color = match mode {
@@ -1444,6 +1506,7 @@ impl UI {
             Mode::NewFolder => Color::LightGreen,
             Mode::ApplyDiff => Color::Cyan,
             Mode::CommitMsg => Color::LightYellow,
+            Mode::Diagnostics => Color::LightCyan,
         };
 
         let mut spans = vec![
@@ -1673,6 +1736,136 @@ impl UI {
                 );
             }
         }
+    }
+
+    /// Render the diagnostics overlay (Mode::Diagnostics).
+    /// Shows MCP server status and LSP servers. Any key closes it.
+    fn render_diagnostics_overlay(frame: &mut Frame, data: &DiagnosticsData<'_>, area: Rect) {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // ── MCP Servers ───────────────────────────────────────────────────────
+        lines.push(Line::from(vec![Span::styled(
+            " MCP Servers ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+
+        if data.mcp_connected.is_empty() && data.mcp_failed.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "  none configured",
+                Style::default().fg(Color::DarkGray),
+            )]));
+        }
+
+        for (name, count) in &data.mcp_connected {
+            lines.push(Line::from(vec![
+                Span::styled("  ✓ ", Style::default().fg(Color::Green)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {count} tools"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        for (name, reason) in data.mcp_failed {
+            lines.push(Line::from(vec![
+                Span::styled("  ✗ ", Style::default().fg(Color::Red)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  failed: ", Style::default().fg(Color::DarkGray)),
+            ]));
+            // Wrap each line of the reason so long errors are readable.
+            for err_line in reason.lines() {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("      {err_line}"),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                )]));
+            }
+        }
+
+        // ── LSP Servers ───────────────────────────────────────────────────────
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            " LSP Servers ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+
+        if data.lsp_servers.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "  none configured",
+                Style::default().fg(Color::DarkGray),
+            )]));
+        }
+
+        for name in &data.lsp_servers {
+            lines.push(Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(Color::Green)),
+                Span::styled(name.to_string(), Style::default().fg(Color::White)),
+            ]));
+        }
+
+        // ── Recent logs ───────────────────────────────────────────────────────
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Recent Logs ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({})", data.log_path),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+        if data.recent_logs.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "  no warnings or errors",
+                Style::default().fg(Color::DarkGray),
+            )]));
+        }
+
+        for (level, msg) in data.recent_logs {
+            let (prefix, color) = match level.as_str() {
+                "ERROR" => ("  ERROR ", Color::Red),
+                "WARN" => ("  WARN  ", Color::Yellow),
+                _ => ("  INFO  ", Color::DarkGray),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(msg.clone(), Style::default().fg(Color::White)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            " press any key to close ",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        )]));
+
+        // Centre the popup.
+        let popup_width = 60.min(area.width);
+        let popup_height = (lines.len() as u16 + 2).min(area.height);
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+        let block = Block::default()
+            .title(Span::styled(
+                " Diagnostics ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(
+            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            popup_area,
+        );
     }
 }
 

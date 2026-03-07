@@ -1,6 +1,55 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tracing::Level;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
+
+/// Tracing layer that captures WARN/ERROR events into a shared ring buffer
+/// so the in-app diagnostics panel can display them without the user leaving
+/// the editor.
+struct RingBufLayer {
+    buf: Arc<Mutex<VecDeque<(String, String)>>>,
+    capacity: usize,
+}
+
+impl<S> Layer<S> for RingBufLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() > Level::WARN {
+            return;
+        }
+        let level = event.metadata().level().to_string();
+        // Extract the message field from the event.
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+        if let Ok(mut buf) = self.buf.lock() {
+            if buf.len() >= self.capacity {
+                buf.pop_front();
+            }
+            buf.push_back((level, visitor.0));
+        }
+    }
+}
+
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_string();
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
 
 mod agent;
 mod buffer;
@@ -40,11 +89,16 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up logging to a file so it doesn't interfere with the TUI
+    // Set up logging to a file so it doesn't interfere with the TUI.
+    // Also install a ring-buffer layer so the in-app diagnostics panel can
+    // display recent WARN/ERROR events without the user leaving the editor.
     let log_file = std::fs::File::create("/tmp/forgiven.log")?;
+    let log_buf: Arc<Mutex<VecDeque<(String, String)>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer().with_writer(log_file))
+        .with(RingBufLayer { buf: Arc::clone(&log_buf), capacity: 50 })
         .init();
 
     let cli = Cli::parse();
@@ -87,19 +141,23 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting forgiven");
 
+    let t0 = Instant::now();
+
     let config = Config::load();
     let mut editor = Editor::new(config)?;
+    editor.log_buffer = log_buf;
 
     // Open any files passed on the command line
     for path in &files_to_open {
         editor.open_file(path)?;
     }
 
-    // Start configured LSP servers (non-fatal if any fail)
-    editor.setup_lsp().await;
+    // Start LSP + MCP servers concurrently (each group also starts its members in parallel).
+    editor.render_loading("starting services…")?;
+    editor.setup_services().await;
 
-    // Connect to configured MCP servers (non-fatal if any fail)
-    editor.setup_mcp().await;
+    editor.startup_elapsed = Some(t0.elapsed());
+    tracing::info!("startup: total ready in {}ms", t0.elapsed().as_millis());
 
     editor.run().await?;
 

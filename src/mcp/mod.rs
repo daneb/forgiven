@@ -140,20 +140,46 @@ pub struct McpManager {
     tool_map: HashMap<String, usize>,
     /// Keeps the child processes alive (stdin/stdout were already extracted).
     _children: Vec<Child>,
+    /// Names of servers that failed to start, with the error reason.
+    pub failed_servers: Vec<(String, String)>,
 }
 
 impl McpManager {
     /// Connect to all servers listed in `configs`, performing the MCP initialize
     /// handshake and collecting tool definitions.  Servers that fail to start are
     /// skipped with a warning — the manager is returned even if some servers fail.
+    ///
+    /// All servers are connected **concurrently** so startup time is bounded by
+    /// the slowest single server rather than the sum of all servers.
     pub async fn from_config(configs: &[McpServerConfig]) -> Self {
+        use tokio::task::JoinSet;
+
+        // Spawn all connections concurrently, tagging each with its original index
+        // so we can reassemble in config order (tool_map indices must be stable).
+        let mut join_set: JoinSet<(usize, Result<(McpServer, Child)>)> = JoinSet::new();
+        for (idx, cfg) in configs.iter().enumerate() {
+            let cfg = cfg.clone();
+            join_set.spawn(async move { (idx, spawn_and_init(&cfg).await) });
+        }
+
+        // Collect into a slot-per-server array to restore original ordering.
+        let mut slots: Vec<Option<Result<(McpServer, Child)>>> =
+            (0..configs.len()).map(|_| None).collect();
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, result)) => slots[idx] = Some(result),
+                Err(e) => warn!("MCP server task panicked: {e}"),
+            }
+        }
+
         let mut servers = Vec::new();
         let mut tool_map = HashMap::new();
         let mut children = Vec::new();
+        let mut failed_servers = Vec::new();
 
-        for cfg in configs {
-            match spawn_and_init(cfg).await {
-                Ok((server, child)) => {
+        for (slot, cfg) in slots.into_iter().zip(configs.iter()) {
+            match slot {
+                Some(Ok((server, child))) => {
                     let idx = servers.len();
                     for tool in &server.tools {
                         tool_map.insert(tool.name.clone(), idx);
@@ -162,18 +188,19 @@ impl McpManager {
                     servers.push(server);
                     children.push(child);
                 },
-                Err(e) => {
-                    warn!("Failed to start MCP server '{}': {e}", cfg.name);
+                Some(Err(e)) => {
+                    let reason = format!("{e:#}");
+                    warn!("Failed to start MCP server '{}': {reason}", cfg.name);
+                    failed_servers.push((cfg.name.clone(), reason));
+                },
+                None => {
+                    warn!("MCP server '{}' task did not complete", cfg.name);
+                    failed_servers.push((cfg.name.clone(), "task did not complete".to_string()));
                 },
             }
         }
 
-        McpManager { servers, tool_map, _children: children }
-    }
-
-    /// Returns `true` if at least one MCP server is connected with at least one tool.
-    pub fn has_tools(&self) -> bool {
-        !self.tool_map.is_empty()
+        McpManager { servers, tool_map, _children: children, failed_servers }
     }
 
     /// Returns `true` if `name` is a tool provided by one of our MCP servers.
@@ -196,6 +223,17 @@ impl McpManager {
                         "parameters": t.input_schema,
                     }
                 })
+            })
+            .collect()
+    }
+
+    /// Returns (name, tool_count) for every successfully connected server.
+    pub fn connected_servers(&self) -> Vec<(&str, usize)> {
+        self.servers
+            .iter()
+            .map(|s| {
+                let name = s.tools.first().map(|t| t.server_name.as_str()).unwrap_or("?");
+                (name, s.tools.len())
             })
             .collect()
     }
@@ -250,7 +288,20 @@ async fn spawn_and_init(cfg: &McpServerConfig) -> Result<(McpServer, Child)> {
     cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()); // suppress server stderr so it doesn't pollute our TUI
 
     for (k, v) in &cfg.env {
-        cmd.env(k, v);
+        // Support $VAR_NAME syntax: read the value from the current process environment
+        // so that secrets are never stored in config.toml.
+        let resolved = if let Some(var_name) = v.strip_prefix('$') {
+            std::env::var(var_name).unwrap_or_else(|_| {
+                warn!(
+                    "MCP server '{}': env var ${} is not set in the shell environment",
+                    cfg.name, var_name
+                );
+                String::new()
+            })
+        } else {
+            v.clone()
+        };
+        cmd.env(k, resolved);
     }
 
     let mut child = cmd

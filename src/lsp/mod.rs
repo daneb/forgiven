@@ -748,38 +748,20 @@ impl LspManager {
         }
     }
 
+    /// Clone the notification sender so callers can spin up clients independently.
+    pub fn notification_tx(&self) -> mpsc::UnboundedSender<LspNotificationMsg> {
+        self.notification_tx.clone()
+    }
+
+    /// Insert an already-initialized client (used after parallel startup).
+    pub fn insert_client(&mut self, language: String, client: LspClient) {
+        self.clients.insert(language, client);
+    }
+
     /// Drain any human-readable messages collected since the last call.
     /// The editor should call this each frame and display the last one.
     pub fn drain_messages(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_messages)
-    }
-
-    /// Add and initialize a language server for the given language.
-    pub async fn add_server(
-        &mut self,
-        language: String,
-        command: &str,
-        args: &[&str],
-        workspace_root: PathBuf,
-    ) -> Result<()> {
-        let mut client =
-            LspClient::spawn(command, args, workspace_root, self.notification_tx.clone())?;
-
-        // The GitHub Copilot language server requires editorInfo + editorPluginInfo
-        // in initializationOptions, otherwise it rejects every subsequent request
-        // with error -32002.
-        let init_options = if language == "copilot" {
-            Some(serde_json::json!({
-                "editorInfo":       { "name": "forgiven", "version": "0.1.0" },
-                "editorPluginInfo": { "name": "forgiven-copilot", "version": "0.1.0" }
-            }))
-        } else {
-            None
-        };
-
-        client.initialize(init_options).await?;
-        self.clients.insert(language, client);
-        Ok(())
     }
 
     /// Get a mutable reference to the client for a language.
@@ -881,6 +863,66 @@ impl Default for LspManager {
 
 // =============================================================================
 // Inline completion helpers
+// =============================================================================
+
+// =============================================================================
+// Parallel startup helper
+// =============================================================================
+
+/// Spawn and initialize all LSP servers concurrently.
+///
+/// Returns one `(language, Result<LspClient>)` per configured server in the
+/// same order as `servers`.  Callers apply the results to `LspManager` via
+/// `insert_client` and handle per-server errors individually.
+pub async fn init_servers_parallel(
+    servers: &[crate::config::LspServerConfig],
+    workspace_root: std::path::PathBuf,
+    notification_tx: mpsc::UnboundedSender<LspNotificationMsg>,
+) -> Vec<(String, Result<LspClient>)> {
+    use tokio::task::JoinSet;
+
+    let mut join_set: JoinSet<(usize, String, Result<LspClient>)> = JoinSet::new();
+
+    for (idx, server) in servers.iter().enumerate() {
+        let language = server.language.clone();
+        let command = server.command.clone();
+        let args: Vec<String> = server.args.clone();
+        let root = workspace_root.clone();
+        let tx = notification_tx.clone();
+
+        join_set.spawn(async move {
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let result = async {
+                let mut client = LspClient::spawn(&command, &args_ref, root, tx)?;
+                let init_options = if language == "copilot" {
+                    Some(serde_json::json!({
+                        "editorInfo":       { "name": "forgiven", "version": "0.1.0" },
+                        "editorPluginInfo": { "name": "forgiven-copilot", "version": "0.1.0" }
+                    }))
+                } else {
+                    None
+                };
+                client.initialize(init_options).await?;
+                Ok::<LspClient, anyhow::Error>(client)
+            }
+            .await;
+            (idx, language, result)
+        });
+    }
+
+    // Collect into index-ordered slots to restore config ordering.
+    let mut slots: Vec<Option<(String, Result<LspClient>)>> =
+        (0..servers.len()).map(|_| None).collect();
+    while let Some(join_result) = join_set.join_next().await {
+        match join_result {
+            Ok((idx, lang, result)) => slots[idx] = Some((lang, result)),
+            Err(e) => warn!("LSP init task panicked: {e}"),
+        }
+    }
+
+    slots.into_iter().flatten().collect()
+}
+
 // =============================================================================
 
 /// Extract the first suggestion text from a raw `textDocument/inlineCompletion` response.

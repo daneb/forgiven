@@ -215,6 +215,16 @@ pub struct Editor {
     /// Initialized by `setup_mcp()` after the config is loaded.
     mcp_manager: Option<std::sync::Arc<McpManager>>,
 
+    // ── In-memory log ring buffer ─────────────────────────────────────────────
+    /// Recent WARN/ERROR log entries captured from the tracing subscriber.
+    /// Shared with the tracing layer via Arc<Mutex<...>>.
+    pub log_buffer: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(String, String)>>>,
+
+    // ── Startup timing ────────────────────────────────────────────────────────
+    /// Time from process start to the editor being fully ready (LSP + MCP set up).
+    /// Set by main() after setup completes; displayed on the welcome screen.
+    pub startup_elapsed: Option<std::time::Duration>,
+
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
     config: Config,
@@ -281,8 +291,84 @@ impl Editor {
             commit_msg_rx: None,
             commit_msg_from_staged: true,
             mcp_manager: None,
+            log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            startup_elapsed: None,
             config,
         })
+    }
+
+    /// Render a loading frame while async setup (LSP / MCP) is in progress.
+    /// The terminal is already in alternate-screen mode at this point.
+    pub fn render_loading(&mut self, msg: &str) -> Result<()> {
+        use ratatui::{
+            style::{Color, Modifier, Style},
+            text::{Line, Span},
+            widgets::Paragraph,
+        };
+        #[rustfmt::skip]
+        const CROSS: &[&str] = &[
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "           ━━━━━━━━━━━━━━━━━━━━╋╋╋━━━━━━━━━━━━━━━━━━━━",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+            "                               ┃┃┃",
+        ];
+        #[rustfmt::skip]
+        const WORDMARK: &[&str] = &[
+            "███████╗ ██████╗ ██████╗  ██████╗ ██╗██╗   ██╗███████╗███╗   ██╗",
+            "██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██║██║   ██║██╔════╝████╗  ██║",
+            "█████╗  ██║   ██║██████╔╝██║  ███╗██║██║   ██║█████╗  ██╔██╗ ██║",
+            "██╔══╝  ██║   ██║██╔══██╗██║   ██║██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║",
+            "██║     ╚██████╔╝██║  ██║╚██████╔╝██║ ╚████╔╝ ███████╗██║ ╚████║",
+            "╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝",
+        ];
+        const LOGO_W: usize = 64;
+
+        let msg = msg.to_owned();
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let area_h = area.height as usize;
+            let area_w = area.width as usize;
+
+            // cross + blank + wordmark + blank + msg
+            let logo_h = CROSS.len() + 1 + WORDMARK.len() + 1 + 1;
+            let top_pad = area_h.saturating_sub(logo_h) / 2;
+            let left_pad = area_w.saturating_sub(LOGO_W) / 2;
+
+            let cross_style = Style::default().fg(Color::Yellow);
+            let word_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+            let loading_style = Style::default().fg(Color::DarkGray);
+
+            let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+            for s in CROSS {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", " ".repeat(left_pad), *s),
+                    cross_style,
+                )));
+            }
+            lines.push(Line::from(""));
+            for s in WORDMARK {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", " ".repeat(left_pad), *s),
+                    word_style,
+                )));
+            }
+            lines.push(Line::from(""));
+            let msg_pad = area_w.saturating_sub(msg.len()) / 2;
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(msg_pad), msg),
+                loading_style,
+            )));
+
+            frame.render_widget(Paragraph::new(lines), area);
+        })?;
+        Ok(())
     }
 
     /// Open a file into a new buffer.
@@ -334,43 +420,44 @@ impl Editor {
         Ok(())
     }
 
-    /// Initialise LSP servers from the loaded config.
-    /// Call this once after `new()`, before `run()`.
-    /// Failures are non-fatal — the editor keeps working without LSP.
-    pub async fn setup_lsp(&mut self) {
+    /// Start all LSP servers and MCP servers concurrently, then apply the results.
+    ///
+    /// Because `tokio::join!` requires independent futures (no shared `&mut self`),
+    /// we extract the config data first, run both init passes in parallel, then
+    /// apply their results sequentially.
+    pub async fn setup_services(&mut self) {
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        tracing::info!("LSP workspace root from current_dir: {:?}", workspace_root);
+        let lsp_servers = self.config.lsp.servers.clone();
+        let mcp_servers = self.config.mcp.servers.clone();
+        let notif_tx = self.lsp_manager.notification_tx();
 
-        for server in &self.config.lsp.servers.clone() {
-            let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
-            tracing::info!(
-                "Starting LSP server '{}' for language '{}'",
-                server.command,
-                server.language
-            );
-            match self
-                .lsp_manager
-                .add_server(server.language.clone(), &server.command, &args, workspace_root.clone())
-                .await
-            {
+        tracing::info!(
+            "Starting {} LSP + {} MCP server(s) concurrently",
+            lsp_servers.len(),
+            mcp_servers.len()
+        );
+
+        let (lsp_results, mcp_manager) = tokio::join!(
+            crate::lsp::init_servers_parallel(&lsp_servers, workspace_root, notif_tx),
+            McpManager::from_config(&mcp_servers),
+        );
+
+        // ── Apply LSP results ─────────────────────────────────────────────────
+        for (language, result) in lsp_results {
+            match result {
                 Err(e) => {
-                    let msg = format!("LSP '{}': {}", server.command, e);
+                    let msg = format!("LSP '{}': {e}", language);
                     tracing::warn!("{}", msg);
                     self.set_status(msg);
                 },
-                Ok(()) => {
-                    // If this is the Copilot server, immediately check auth status
-                    // so we can prompt the user to sign in if needed.
-                    if server.language == "copilot" {
-                        if let Some(client) = self.lsp_manager.get_client("copilot") {
-                            match client.copilot_check_status() {
-                                Ok(rx) => {
-                                    self.copilot_auth_rx = Some(rx);
-                                },
-                                Err(e) => {
-                                    tracing::warn!("copilot checkStatus failed: {}", e);
-                                },
+                Ok(client) => {
+                    self.lsp_manager.insert_client(language.clone(), client);
+                    if language == "copilot" {
+                        if let Some(c) = self.lsp_manager.get_client("copilot") {
+                            match c.copilot_check_status() {
+                                Ok(rx) => self.copilot_auth_rx = Some(rx),
+                                Err(e) => tracing::warn!("copilot checkStatus failed: {e}"),
                             }
                         }
                     }
@@ -378,7 +465,7 @@ impl Editor {
             }
         }
 
-        // Files were opened before LSP was ready — send did_open for each now.
+        // Send did_open for any files that were opened before LSP was ready.
         let notifications: Vec<_> = self
             .buffers
             .iter()
@@ -390,27 +477,19 @@ impl Editor {
                 Some((language, uri, text))
             })
             .collect();
-
         for (language, uri, text) in notifications {
             if let Some(client) = self.lsp_manager.get_client(&language) {
                 let _ = client.did_open(uri, language, text);
             }
         }
-    }
 
-    /// Initialize MCP servers from the loaded config.
-    /// Call this once after `new()`, before `run()`.
-    /// Servers that fail to connect are skipped with a warning.
-    pub async fn setup_mcp(&mut self) {
-        if self.config.mcp.servers.is_empty() {
-            return;
+        // ── Apply MCP results ─────────────────────────────────────────────────
+        if !mcp_servers.is_empty() {
+            tracing::info!("MCP ready: {}", mcp_manager.summary());
+            let arc = std::sync::Arc::new(mcp_manager);
+            self.mcp_manager = Some(std::sync::Arc::clone(&arc));
+            self.agent_panel.mcp_manager = Some(arc);
         }
-        tracing::info!("Connecting to {} MCP server(s)…", self.config.mcp.servers.len());
-        let manager = McpManager::from_config(&self.config.mcp.servers).await;
-        tracing::info!("MCP ready: {}", manager.summary());
-        let arc = std::sync::Arc::new(manager);
-        self.mcp_manager = Some(std::sync::Arc::clone(&arc));
-        self.agent_panel.mcp_manager = Some(arc);
     }
 
     /// Get the currently active buffer
@@ -972,6 +1051,41 @@ impl Editor {
         let commit_msg_buf =
             if mode == Mode::CommitMsg { Some(self.commit_msg_buffer.as_str()) } else { None };
 
+        let mcp_failed_empty: Vec<(String, String)> = Vec::new();
+        let recent_logs_owned: Vec<(String, String)> = self
+            .log_buffer
+            .lock()
+            .map(|g| g.iter().cloned().collect())
+            .unwrap_or_default();
+        let diag_overlay = if mode == Mode::Diagnostics {
+            let mcp_connected = self
+                .mcp_manager
+                .as_ref()
+                .map(|m| m.connected_servers())
+                .unwrap_or_default();
+            let mcp_failed: &[(String, String)] = self
+                .mcp_manager
+                .as_ref()
+                .map(|m| m.failed_servers.as_slice())
+                .unwrap_or(mcp_failed_empty.as_slice());
+            let lsp_servers = self
+                .config
+                .lsp
+                .servers
+                .iter()
+                .map(|s| s.language.as_str())
+                .collect::<Vec<_>>();
+            Some(crate::ui::DiagnosticsData {
+                mcp_connected,
+                mcp_failed,
+                lsp_servers,
+                log_path: "/tmp/forgiven.log",
+                recent_logs: recent_logs_owned.as_slice(),
+            })
+        } else {
+            None
+        };
+
         self.terminal.draw(|frame| {
             UI::render(
                 frame,
@@ -998,6 +1112,8 @@ impl Editor {
                 split_hl_ref,
                 split_right_focused,
                 commit_msg_buf,
+                diag_overlay.as_ref(),
+                self.startup_elapsed,
             );
         })?;
 
@@ -1083,6 +1199,7 @@ impl Editor {
                     | Mode::NewFolder
                     | Mode::ApplyDiff
                     | Mode::CommitMsg
+                    | Mode::Diagnostics
             )
         {
             self.cycle_panel_focus();
@@ -1107,6 +1224,10 @@ impl Editor {
             Mode::NewFolder => self.handle_new_folder_mode(key)?,
             Mode::ApplyDiff => self.handle_apply_diff_mode(key)?,
             Mode::CommitMsg => self.handle_commit_msg_mode(key)?,
+            Mode::Diagnostics => {
+                // Any key closes the overlay.
+                self.mode = Mode::Normal;
+            },
         }
 
         Ok(())
@@ -1534,6 +1655,13 @@ impl Editor {
             },
             Action::MarkdownOpenBrowser => {
                 self.open_markdown_in_browser();
+            },
+            // ── Diagnostics overlay ───────────────────────────────────────────
+            Action::DiagnosticsOpen => {
+                self.mode = Mode::Diagnostics;
+            },
+            Action::DiagnosticsOpenLog => {
+                self.open_file(std::path::Path::new("/tmp/forgiven.log"))?;
             },
             // ── Project-wide text search ──────────────────────────────────────
             Action::SearchOpen => {

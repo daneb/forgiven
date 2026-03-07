@@ -22,6 +22,7 @@ pub enum Mode {
     NewFolder,       // New folder popup: user types a folder name from the explorer
     ApplyDiff,       // Full-screen diff preview before applying agent code block
     CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
+    Diagnostics,     // Read-only diagnostics overlay (SPC d)
 }
 
 /// An editor action to be executed
@@ -113,6 +114,9 @@ pub enum Action {
     WindowSplit,     // SPC w v — open vertical split
     WindowFocusNext, // SPC w w — cycle focus between panes
     WindowClose,     // SPC w c — close split
+    // Diagnostics
+    DiagnosticsOpen,   // SPC d d — open diagnostics overlay
+    DiagnosticsOpenLog, // SPC d l — open /tmp/forgiven.log in editor
 }
 
 /// Represents a keybinding tree node
@@ -253,6 +257,12 @@ impl KeyHandler {
         window_node.children.insert('w', KeyNode::leaf("focus next pane", Action::WindowFocusNext));
         window_node.children.insert('c', KeyNode::leaf("close split", Action::WindowClose));
         tree.insert('w', window_node);
+
+        // SPC d - Diagnostics
+        let mut diag_node = KeyNode::new("diagnostics");
+        diag_node.children.insert('d', KeyNode::leaf("diagnostics overlay", Action::DiagnosticsOpen));
+        diag_node.children.insert('l', KeyNode::leaf("open log file", Action::DiagnosticsOpenLog));
+        tree.insert('d', diag_node);
 
         tree
     }

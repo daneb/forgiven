@@ -407,6 +407,10 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0045](docs/adr/0045-mcp-client.md) | MCP Client Integration |
 | [0046](docs/adr/0046-agent-retry-visibility.md) | Agent Retry Visibility |
 | [0047](docs/adr/0047-git-commit-message-generation.md) | Git Commit Message Generation |
+| [0048](docs/adr/0048-mcp-status-visualisation.md) | MCP Server Status Visualisation |
+| [0049](docs/adr/0049-diagnostics-overlay.md) | Diagnostics Overlay (`SPC d`) |
+| [0050](docs/adr/0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution |
+| [0051](docs/adr/0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation |
 
 ---
 

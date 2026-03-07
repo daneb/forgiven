@@ -55,6 +55,10 @@ that motivated it, what was decided, and the consequences.
 | [0045](0045-mcp-client.md) | MCP Client Integration | Accepted |
 | [0046](0046-agent-retry-visibility.md) | Agent Retry Visibility | Accepted |
 | [0047](0047-git-commit-message-generation.md) | Git Commit Message Generation | Accepted |
+| [0048](0048-mcp-status-visualisation.md) | MCP Server Status Visualisation | Accepted |
+| [0049](0049-diagnostics-overlay.md) | Diagnostics Overlay (`SPC d`) | Accepted |
+| [0050](0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution | Accepted |
+| [0051](0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation | Accepted |
 
 ## What is an ADR?
 
