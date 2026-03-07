@@ -122,13 +122,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+          path: dist
+
+      - name: List artefacts
+        run: ls -lh dist/
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          # Mark as pre-release when the tag contains alpha / beta / rc
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            forgiven-*.tar.gz
-            forgiven-*.zip
+            dist/forgiven-*.tar.gz
+            dist/forgiven-*.zip
