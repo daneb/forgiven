@@ -59,6 +59,7 @@ that motivated it, what was decided, and the consequences.
 | [0049](0049-diagnostics-overlay.md) | Diagnostics Overlay (`SPC d`) | Accepted |
 | [0050](0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution | Accepted |
 | [0051](0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation | Accepted |
+| [0052](0052-dotnet-lsp-csharp-ls.md) | .NET LSP — Switch Default to csharp-ls | Accepted |
 
 ## What is an ADR?
 

@@ -48,6 +48,13 @@ pub struct McpConfig {
 /// language = "rust"
 /// command  = "rust-analyzer"
 /// args     = []
+///
+/// # Optional: pass custom initialization_options to the LSP server.
+/// # Values are merged with forgiven's built-in defaults (user values win).
+/// # Example for OmniSharp — override the analysis timeout:
+/// [lsp.servers.initialization_options.RoslynExtensionsOptions]
+/// documentAnalysisTimeoutMs = 60000
+/// enableImportCompletion    = true
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LspServerConfig {
@@ -58,6 +65,11 @@ pub struct LspServerConfig {
     /// Optional arguments passed to the executable.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional initialization options forwarded verbatim to the LSP server's
+    /// `initialize` request. Merged with forgiven's built-in defaults; user
+    /// values take precedence.
+    #[serde(default)]
+    pub initialization_options: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

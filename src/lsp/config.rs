@@ -13,13 +13,6 @@ impl LanguageServerConfig {
     /// Get default language server configurations
     pub fn defaults() -> Vec<Self> {
         vec![
-            // C# (OmniSharp)
-            Self {
-                language: "csharp".to_string(),
-                command: "omnisharp".to_string(),
-                args: vec!["--languageserver".to_string(), "--stdio".to_string()],
-                file_extensions: vec!["cs".to_string()],
-            },
             // JavaScript/TypeScript
             Self {
                 language: "typescript".to_string(),

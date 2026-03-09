@@ -840,7 +840,7 @@ impl LspManager {
                 "go" => "go",
                 "c" => "c",
                 "cpp" | "cc" | "cxx" => "cpp",
-                "cs" => "csharp",
+
                 "java" => "java",
                 "rb" => "ruby",
                 "sh" => "sh",
@@ -887,6 +887,7 @@ pub async fn init_servers_parallel(
         let language = server.language.clone();
         let command = server.command.clone();
         let args: Vec<String> = server.args.clone();
+        let user_init_options = server.initialization_options.clone();
         let root = workspace_root.clone();
         let tx = notification_tx.clone();
 
@@ -894,7 +895,9 @@ pub async fn init_servers_parallel(
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let result = async {
                 let mut client = LspClient::spawn(&command, &args_ref, root, tx)?;
-                let init_options = if language == "copilot" {
+
+                // Build built-in defaults for servers that need special initialization.
+                let builtin: Option<serde_json::Value> = if language == "copilot" {
                     Some(serde_json::json!({
                         "editorInfo":       { "name": "forgiven", "version": "0.1.0" },
                         "editorPluginInfo": { "name": "forgiven-copilot", "version": "0.1.0" }
@@ -902,6 +905,28 @@ pub async fn init_servers_parallel(
                 } else {
                     None
                 };
+
+                // Merge user-supplied initialization_options over the built-in defaults.
+                // User values take precedence at the top level; nested merging is not
+                // performed (a user key fully replaces the corresponding built-in key).
+                let init_options = match (builtin, user_init_options) {
+                    (Some(mut base), Some(overrides)) => {
+                        if let Ok(overrides_json) = serde_json::to_value(&overrides) {
+                            if let (Some(base_obj), Some(override_obj)) =
+                                (base.as_object_mut(), overrides_json.as_object())
+                            {
+                                for (k, v) in override_obj {
+                                    base_obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                        Some(base)
+                    }
+                    (Some(base), None) => Some(base),
+                    (None, Some(overrides)) => serde_json::to_value(&overrides).ok(),
+                    (None, None) => None,
+                };
+
                 client.initialize(init_options).await?;
                 Ok::<LspClient, anyhow::Error>(client)
             }
