@@ -1052,29 +1052,18 @@ impl Editor {
             if mode == Mode::CommitMsg { Some(self.commit_msg_buffer.as_str()) } else { None };
 
         let mcp_failed_empty: Vec<(String, String)> = Vec::new();
-        let recent_logs_owned: Vec<(String, String)> = self
-            .log_buffer
-            .lock()
-            .map(|g| g.iter().cloned().collect())
-            .unwrap_or_default();
+        let recent_logs_owned: Vec<(String, String)> =
+            self.log_buffer.lock().map(|g| g.iter().cloned().collect()).unwrap_or_default();
         let diag_overlay = if mode == Mode::Diagnostics {
-            let mcp_connected = self
-                .mcp_manager
-                .as_ref()
-                .map(|m| m.connected_servers())
-                .unwrap_or_default();
+            let mcp_connected =
+                self.mcp_manager.as_ref().map(|m| m.connected_servers()).unwrap_or_default();
             let mcp_failed: &[(String, String)] = self
                 .mcp_manager
                 .as_ref()
                 .map(|m| m.failed_servers.as_slice())
                 .unwrap_or(mcp_failed_empty.as_slice());
-            let lsp_servers = self
-                .config
-                .lsp
-                .servers
-                .iter()
-                .map(|s| s.language.as_str())
-                .collect::<Vec<_>>();
+            let lsp_servers =
+                self.config.lsp.servers.iter().map(|s| s.language.as_str()).collect::<Vec<_>>();
             Some(crate::ui::DiagnosticsData {
                 mcp_connected,
                 mcp_failed,

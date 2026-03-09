@@ -18,7 +18,11 @@ impl<S> Layer<S> for RingBufLayer
 where
     S: tracing::Subscriber,
 {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         if *event.metadata().level() > Level::WARN {
             return;
         }
@@ -93,8 +97,7 @@ async fn main() -> Result<()> {
     // Also install a ring-buffer layer so the in-app diagnostics panel can
     // display recent WARN/ERROR events without the user leaving the editor.
     let log_file = std::fs::File::create("/tmp/forgiven.log")?;
-    let log_buf: Arc<Mutex<VecDeque<(String, String)>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let log_buf: Arc<Mutex<VecDeque<(String, String)>>> = Arc::new(Mutex::new(VecDeque::new()));
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer().with_writer(log_file))

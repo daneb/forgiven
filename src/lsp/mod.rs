@@ -921,7 +921,7 @@ pub async fn init_servers_parallel(
                             }
                         }
                         Some(base)
-                    }
+                    },
                     (Some(base), None) => Some(base),
                     (None, Some(overrides)) => serde_json::to_value(&overrides).ok(),
                     (None, None) => None,

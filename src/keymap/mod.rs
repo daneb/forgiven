@@ -115,7 +115,7 @@ pub enum Action {
     WindowFocusNext, // SPC w w — cycle focus between panes
     WindowClose,     // SPC w c — close split
     // Diagnostics
-    DiagnosticsOpen,   // SPC d d — open diagnostics overlay
+    DiagnosticsOpen,    // SPC d d — open diagnostics overlay
     DiagnosticsOpenLog, // SPC d l — open /tmp/forgiven.log in editor
 }
 
@@ -260,7 +260,9 @@ impl KeyHandler {
 
         // SPC d - Diagnostics
         let mut diag_node = KeyNode::new("diagnostics");
-        diag_node.children.insert('d', KeyNode::leaf("diagnostics overlay", Action::DiagnosticsOpen));
+        diag_node
+            .children
+            .insert('d', KeyNode::leaf("diagnostics overlay", Action::DiagnosticsOpen));
         diag_node.children.insert('l', KeyNode::leaf("open log file", Action::DiagnosticsOpenLog));
         tree.insert('d', diag_node);
 

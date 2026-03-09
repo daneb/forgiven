@@ -497,10 +497,7 @@ impl UI {
                         Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
                     ));
                 } else {
-                    spans.push(Span::styled(
-                        "no tools",
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    spans.push(Span::styled("no tools", Style::default().fg(Color::DarkGray)));
                 }
                 // Failed servers — red with ⚠ prefix.
                 for (name, reason) in &mcp.failed_servers {
@@ -806,8 +803,14 @@ impl UI {
         let area_w = area.width as usize;
 
         // Total logo height: cross + blank + wordmark + blank + tagline + blank + hints [+ blank + ready].
-        let logo_h =
-            CROSS.len() + 1 + WORDMARK.len() + 1 + 1 + 1 + 1 + if startup_elapsed.is_some() { 2 } else { 0 };
+        let logo_h = CROSS.len()
+            + 1
+            + WORDMARK.len()
+            + 1
+            + 1
+            + 1
+            + 1
+            + if startup_elapsed.is_some() { 2 } else { 0 };
         let top_pad = area_h.saturating_sub(logo_h) / 2;
         let left_pad = area_w.saturating_sub(LOGO_W) / 2;
 
@@ -1763,10 +1766,7 @@ impl UI {
                     name.to_string(),
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("  {count} tools"),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("  {count} tools"), Style::default().fg(Color::DarkGray)),
             ]));
         }
 
@@ -1816,10 +1816,7 @@ impl UI {
                 " Recent Logs ",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  ({})", data.log_path),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("  ({})", data.log_path), Style::default().fg(Color::DarkGray)),
         ]));
 
         if data.recent_logs.is_empty() {
