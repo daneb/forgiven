@@ -482,11 +482,8 @@ impl AgentPanel {
         }
         let prefix = self.input.trim_start_matches('/');
         let all = fw.commands();
-        let items: Vec<String> = all
-            .into_iter()
-            .filter(|cmd| cmd.starts_with(prefix))
-            .map(|s| s.to_string())
-            .collect();
+        let items: Vec<String> =
+            all.into_iter().filter(|cmd| cmd.starts_with(prefix)).map(|s| s.to_string()).collect();
 
         if items.is_empty() {
             self.slash_menu = None;
@@ -525,7 +522,8 @@ impl AgentPanel {
             None => return,
         };
         // Preserve any context text typed after the slash-command.
-        let rest = self.input
+        let rest = self
+            .input
             .trim_start_matches('/')
             .split_once(char::is_whitespace)
             .map(|(_, r)| format!(" {}", r.trim_start()))
@@ -899,11 +897,8 @@ Available tools:\n\
     pub fn confirm_user_question(&mut self) {
         if let Some(ref state) = self.asking_user.take() {
             if let Some(ref tx) = self.question_tx {
-                let answer = state
-                    .options
-                    .get(state.selected)
-                    .cloned()
-                    .unwrap_or_else(|| "Yes".to_string());
+                let answer =
+                    state.options.get(state.selected).cloned().unwrap_or_else(|| "Yes".to_string());
                 // Echo the choice into the reply so the user sees it in history.
                 let echo = format!("\n\n→ **{}**", answer);
                 match self.streaming_reply.as_mut() {
@@ -919,11 +914,7 @@ Available tools:\n\
     pub fn cancel_user_question(&mut self) {
         if let Some(ref state) = self.asking_user.take() {
             if let Some(ref tx) = self.question_tx {
-                let answer = state
-                    .options
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "No".to_string());
+                let answer = state.options.last().cloned().unwrap_or_else(|| "No".to_string());
                 let echo = format!("\n\n→ **{}** (cancelled)", answer);
                 match self.streaming_reply.as_mut() {
                     Some(r) => r.push_str(&echo),
@@ -939,8 +930,7 @@ Available tools:\n\
         if let Some(ref mut state) = self.asking_user {
             let n = state.options.len();
             if n > 0 {
-                state.selected =
-                    (state.selected as i32 + delta).rem_euclid(n as i32) as usize;
+                state.selected = (state.selected as i32 + delta).rem_euclid(n as i32) as usize;
             }
         }
     }
@@ -1397,8 +1387,8 @@ async fn agentic_loop(
             let result = if call.name == "ask_user" {
                 // Parse question + options, emit an AskingUser event, and block until
                 // the user makes a selection (or the 5-minute timeout fires).
-                let args_val = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                    .unwrap_or_default();
+                let args_val =
+                    serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
                 let question = args_val
                     .get("question")
                     .and_then(|v| v.as_str())
@@ -1408,9 +1398,7 @@ async fn agentic_loop(
                     .get("options")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
-                        arr.iter()
-                            .filter_map(|o| o.as_str().map(|s| s.to_string()))
-                            .collect()
+                        arr.iter().filter_map(|o| o.as_str().map(|s| s.to_string())).collect()
                     })
                     .filter(|v: &Vec<String>| !v.is_empty())
                     .unwrap_or_else(|| vec!["Yes".to_string(), "No".to_string()]);
@@ -1420,15 +1408,15 @@ async fn agentic_loop(
                     options: options.clone(),
                 });
 
-                let answer = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(300),
-                    question_rx.recv(),
-                )
-                .await;
+                let answer =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(300), question_rx.recv())
+                        .await;
 
                 match answer {
                     Ok(Some(ans)) => ans,
-                    Ok(None) | Err(_) => options.last().cloned().unwrap_or_else(|| "No".to_string()),
+                    Ok(None) | Err(_) => {
+                        options.last().cloned().unwrap_or_else(|| "No".to_string())
+                    },
                 }
             } else if let Some(ref mcp) = mcp_manager {
                 if mcp.is_mcp_tool(&call.name) {

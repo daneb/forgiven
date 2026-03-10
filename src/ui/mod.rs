@@ -64,9 +64,7 @@ fn wrapped_line_count(lines: &[Line<'static>], inner_width: usize) -> usize {
     if inner_width == 0 || lines.is_empty() {
         return lines.len();
     }
-    Paragraph::new(lines.to_vec())
-        .wrap(Wrap { trim: false })
-        .line_count(inner_width as u16)
+    Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false }).line_count(inner_width as u16)
 }
 
 thread_local! {
@@ -457,10 +455,10 @@ impl UI {
         // which is expensive.  We cache the rendered Line<'static> vectors and
         // only recompute when content or width actually changes.
         let content_width = history_area.width.saturating_sub(4) as usize;
-        let inner_width   = history_area.width.saturating_sub(2) as usize;
+        let inner_width = history_area.width.saturating_sub(2) as usize;
         let visible_height = history_area.height.saturating_sub(2) as usize;
 
-        let cur_msg_count    = panel.messages.len();
+        let cur_msg_count = panel.messages.len();
         let cur_streaming_len = panel.streaming_reply.as_ref().map(|s| s.len()).unwrap_or(0);
 
         let (lines, total_display_rows) = PANEL_CACHE.with(|cell| {
@@ -479,9 +477,9 @@ impl UI {
                         continue;
                     }
                     let (label, color) = match msg.role {
-                        Role::User      => ("You",     Color::Green),
+                        Role::User => ("You", Color::Green),
                         Role::Assistant => ("Copilot", Color::Cyan),
-                        Role::System    => unreachable!(),
+                        Role::System => unreachable!(),
                     };
                     ml.push(Line::from(vec![Span::styled(
                         format!("╔ {label} "),
@@ -490,8 +488,8 @@ impl UI {
                     ml.extend(render_message_content(&msg.content, content_width));
                     ml.push(Line::from(""));
                 }
-                cache.msg_lines     = ml;
-                cache.msg_count     = cur_msg_count;
+                cache.msg_lines = ml;
+                cache.msg_count = cur_msg_count;
                 cache.content_width = content_width;
                 cache.msg_row_count = wrapped_line_count(&cache.msg_lines, inner_width);
             }
@@ -514,9 +512,9 @@ impl UI {
                 } else {
                     cache.streaming_lines.clear();
                 }
-                cache.streaming_len         = cur_streaming_len;
-                cache.streaming_width       = content_width;
-                cache.streaming_row_count   = wrapped_line_count(&cache.streaming_lines, inner_width);
+                cache.streaming_len = cur_streaming_len;
+                cache.streaming_width = content_width;
+                cache.streaming_row_count = wrapped_line_count(&cache.streaming_lines, inner_width);
             }
 
             // Build the combined line Vec for ratatui.
@@ -547,8 +545,7 @@ impl UI {
         let status_suffix =
             panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
         let scroll_suffix: std::borrow::Cow<'static, str> = if scroll > 0 {
-            let pct =
-                if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
+            let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
             format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ").into()
         } else if total_display_rows > visible_height {
             "  (↑ to scroll up) ".into()
@@ -590,9 +587,10 @@ impl UI {
             );
             if cache.mcp_status_key != mcp_key {
                 let line = match &panel.mcp_manager {
-                    None => {
-                        Line::from(Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray)))
-                    },
+                    None => Line::from(Span::styled(
+                        " MCP: none ",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                     Some(mcp) => {
                         let mut spans = vec![Span::raw(" MCP: ")];
                         let connected: Vec<String> = mcp
@@ -737,10 +735,7 @@ impl UI {
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else {
-                    Line::from(Span::styled(
-                        format!(" /{cmd}"),
-                        Style::default().fg(Color::White),
-                    ))
+                    Line::from(Span::styled(format!(" /{cmd}"), Style::default().fg(Color::White)))
                 }
             })
             .collect();
@@ -753,10 +748,7 @@ impl UI {
             0
         };
 
-        frame.render_widget(
-            Paragraph::new(lines).scroll((scroll, 0)),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
     }
 
     /// Render the awaiting-continuation dialog at the bottom of the agent panel.
@@ -1969,10 +1961,7 @@ impl UI {
                 // Phase 2: generating
                 (
                     " Release Notes ",
-                    Line::from(Span::styled(
-                        " Esc=cancel ",
-                        Style::default().fg(Color::DarkGray),
-                    )),
+                    Line::from(Span::styled(" Esc=cancel ", Style::default().fg(Color::DarkGray))),
                     vec![Line::from(Span::styled(
                         " Generating release notes…",
                         Style::default().fg(Color::Yellow),
@@ -1987,18 +1976,12 @@ impl UI {
                         " Enter=generate   Esc=cancel ",
                         Style::default().fg(Color::DarkGray),
                     )),
-                    vec![Line::from(Span::styled(
-                        display,
-                        Style::default().fg(Color::White),
-                    ))],
+                    vec![Line::from(Span::styled(display, Style::default().fg(Color::White)))],
                 )
             } else {
                 // Phase 3: displaying
-                let lines = view
-                    .notes
-                    .lines()
-                    .map(|l| Line::from(Span::raw(format!(" {l}"))))
-                    .collect();
+                let lines =
+                    view.notes.lines().map(|l| Line::from(Span::raw(format!(" {l}")))).collect();
                 (
                     " Release Notes ",
                     Line::from(vec![
