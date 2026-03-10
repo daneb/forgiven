@@ -132,6 +132,15 @@ pub struct AskUserState {
     pub selected: usize,
 }
 
+/// State for the slash-command autocomplete dropdown.
+#[derive(Debug, Clone)]
+pub struct SlashMenuState {
+    /// Filtered command names matching the current input prefix.
+    pub items: Vec<String>,
+    /// Currently highlighted index.
+    pub selected: usize,
+}
+
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
@@ -181,6 +190,8 @@ pub struct AgentPanel {
     pub question_tx: Option<mpsc::UnboundedSender<String>>,
     /// Set when the agent has asked a question and is waiting for the user to respond.
     pub asking_user: Option<AskUserState>,
+    /// Slash-command autocomplete dropdown state. Some while the user is typing a `/` command.
+    pub slash_menu: Option<SlashMenuState>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -328,6 +339,7 @@ impl AgentPanel {
             spec_framework: None,
             question_tx: None,
             asking_user: None,
+            slash_menu: None,
         }
     }
 
@@ -454,6 +466,72 @@ impl AgentPanel {
     }
     pub fn input_newline(&mut self) {
         self.input.push('\n');
+    }
+
+    /// Recompute the slash-command dropdown based on the current input.
+    /// Call this whenever `self.input` changes in Agent mode.
+    pub fn update_slash_menu(&mut self) {
+        let Some(ref fw) = self.spec_framework else {
+            self.slash_menu = None;
+            return;
+        };
+        // Only active when the input starts with '/'
+        if !self.input.starts_with('/') {
+            self.slash_menu = None;
+            return;
+        }
+        let prefix = self.input.trim_start_matches('/');
+        let all = fw.commands();
+        let items: Vec<String> = all
+            .into_iter()
+            .filter(|cmd| cmd.starts_with(prefix))
+            .map(|s| s.to_string())
+            .collect();
+
+        if items.is_empty() {
+            self.slash_menu = None;
+            return;
+        }
+
+        match self.slash_menu.as_mut() {
+            Some(menu) => {
+                // Preserve selection index if still valid, otherwise reset.
+                let prev = menu.selected;
+                menu.items = items;
+                menu.selected = prev.min(menu.items.len().saturating_sub(1));
+            },
+            None => {
+                self.slash_menu = Some(SlashMenuState { items, selected: 0 });
+            },
+        }
+    }
+
+    /// Move the slash-menu selection by `delta` (+1 = down, -1 = up).
+    pub fn move_slash_selection(&mut self, delta: i32) {
+        if let Some(ref mut menu) = self.slash_menu {
+            let n = menu.items.len();
+            if n > 0 {
+                menu.selected = (menu.selected as i32 + delta).rem_euclid(n as i32) as usize;
+            }
+        }
+    }
+
+    /// Complete the selected slash-command into `self.input`.
+    /// Any text after the command name (context) is preserved.
+    pub fn complete_slash_selection(&mut self) {
+        let Some(ref menu) = self.slash_menu else { return };
+        let cmd = match menu.items.get(menu.selected) {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        // Preserve any context text typed after the slash-command.
+        let rest = self.input
+            .trim_start_matches('/')
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| format!(" {}", r.trim_start()))
+            .unwrap_or_default();
+        self.input = format!("/{cmd}{rest}");
+        self.slash_menu = None;
     }
 
     /// Clear conversation history and insert a visual divider showing the new model.

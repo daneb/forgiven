@@ -2227,6 +2227,29 @@ impl Editor {
             return Ok(());
         }
 
+        // Slash-command autocomplete: intercept navigation keys when the menu is visible.
+        if self.agent_panel.slash_menu.is_some() {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
+                    self.agent_panel.move_slash_selection(1);
+                    return Ok(());
+                },
+                KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
+                    self.agent_panel.move_slash_selection(-1);
+                    return Ok(());
+                },
+                KeyCode::Enter => {
+                    self.agent_panel.complete_slash_selection();
+                    return Ok(());
+                },
+                KeyCode::Esc => {
+                    self.agent_panel.slash_menu = None;
+                    return Ok(());
+                },
+                _ => {}, // fall through to normal input handling
+            }
+        }
+
         match key.code {
             // Esc — blur panel, return focus to editor.
             KeyCode::Esc => {
@@ -2241,6 +2264,7 @@ impl Editor {
             // Alt+Enter — insert a newline into the multi-line input.
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.agent_panel.input_newline();
+                self.agent_panel.update_slash_menu();
             },
             // Enter — submit the input.
             KeyCode::Enter => {
@@ -2279,10 +2303,12 @@ impl Editor {
                         }
                     });
                 });
+                self.agent_panel.update_slash_menu();
             },
             // Backspace — delete last input character.
             KeyCode::Backspace => {
                 self.agent_panel.input_backspace();
+                self.agent_panel.update_slash_menu();
             },
             // Scroll history.
             KeyCode::Up => self.agent_panel.scroll_up(),
@@ -2451,6 +2477,7 @@ impl Editor {
                     }
                 } else {
                     self.agent_panel.input_char(ch);
+                    self.agent_panel.update_slash_menu();
                 }
             },
             _ => {},

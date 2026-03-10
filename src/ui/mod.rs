@@ -8,7 +8,9 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-use crate::agent::{split_thinking, AgentPanel, AgentTask, AskUserState, ContentSegment, Role};
+use crate::agent::{
+    split_thinking, AgentPanel, AgentTask, AskUserState, ContentSegment, Role, SlashMenuState,
+};
 use crate::buffer::{Cursor, Selection};
 use crate::editor::DiffLine;
 use crate::explorer::FileExplorer;
@@ -647,6 +649,11 @@ impl UI {
             .wrap(Wrap { trim: false });
         frame.render_widget(input_para, input_area);
 
+        // Slash-command autocomplete dropdown — rendered just above the input box.
+        if let Some(ref menu) = panel.slash_menu {
+            Self::render_slash_menu(frame, menu, input_area);
+        }
+
         // Awaiting-continuation dialog — shown whenever the agent hits max rounds.
         // Rendered as a prominent overlay so it can't be missed after a long plan.
         if panel.awaiting_continuation {
@@ -658,6 +665,68 @@ impl UI {
         if let Some(ref state) = panel.asking_user {
             Self::render_ask_user_dialog(frame, state, area);
         }
+    }
+
+    /// Render the slash-command autocomplete dropdown just above the input box.
+    fn render_slash_menu(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
+        if menu.items.is_empty() {
+            return;
+        }
+
+        let n = menu.items.len() as u16;
+        // Width matches the input box; height = items + 2 borders, capped at 10 items.
+        let popup_width = input_area.width;
+        let popup_height = (n + 2).min(12);
+
+        // Position directly above the input box.
+        let x = input_area.x;
+        let y = input_area.y.saturating_sub(popup_height);
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .title(" commands ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let lines: Vec<Line> = menu
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                if i == menu.selected {
+                    Line::from(Span::styled(
+                        format!(" /{cmd}"),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        format!(" /{cmd}"),
+                        Style::default().fg(Color::White),
+                    ))
+                }
+            })
+            .collect();
+
+        // Scroll to keep selected item visible.
+        let visible_rows = inner.height as usize;
+        let scroll = if menu.selected >= visible_rows {
+            (menu.selected + 1).saturating_sub(visible_rows) as u16
+        } else {
+            0
+        };
+
+        frame.render_widget(
+            Paragraph::new(lines).scroll((scroll, 0)),
+            inner,
+        );
     }
 
     /// Render the awaiting-continuation dialog at the bottom of the agent panel.
