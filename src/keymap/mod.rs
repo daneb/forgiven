@@ -100,10 +100,10 @@ pub enum Action {
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen,          // SPC g g — open lazygit
-    GitCommitStaged,  // SPC g s — generate commit msg from staged diff
-    GitCommitLast,    // SPC g l — generate commit msg from last commit
-    GitReleaseNotes,  // SPC g n — generate release notes from last N commits
+    GitOpen,         // SPC g g — open lazygit
+    GitCommitStaged, // SPC g s — generate commit msg from staged diff
+    GitCommitLast,   // SPC g l — generate commit msg from last commit
+    GitReleaseNotes, // SPC g n — generate release notes from last N commits
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
@@ -185,7 +185,9 @@ impl KeyHandler {
         buffer_node.children.insert('n', KeyNode::leaf("next buffer", Action::BufferNext));
         buffer_node.children.insert('p', KeyNode::leaf("previous buffer", Action::BufferPrevious));
         buffer_node.children.insert('d', KeyNode::leaf("delete buffer", Action::BufferClose));
-        buffer_node.children.insert('D', KeyNode::leaf("delete buffer (discard)", Action::BufferForceClose));
+        buffer_node
+            .children
+            .insert('D', KeyNode::leaf("delete buffer (discard)", Action::BufferForceClose));
         tree.insert('b', buffer_node);
 
         // SPC f - File commands
@@ -238,9 +240,10 @@ impl KeyHandler {
         git_node
             .children
             .insert('l', KeyNode::leaf("commit msg from last commit", Action::GitCommitLast));
-        git_node
-            .children
-            .insert('n', KeyNode::leaf("release notes from last N commits", Action::GitReleaseNotes));
+        git_node.children.insert(
+            'n',
+            KeyNode::leaf("release notes from last N commits", Action::GitReleaseNotes),
+        );
         tree.insert('g', git_node);
 
         // SPC m - Markdown

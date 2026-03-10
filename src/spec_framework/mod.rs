@@ -29,30 +29,23 @@ use tracing::warn;
 // Built-in spec-kit templates (embedded at compile time)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SPECKIT_CONSTITUTION: &str =
-    include_str!("templates/speckit/constitution.md");
-const SPECKIT_SPECIFY: &str =
-    include_str!("templates/speckit/specify.md");
-const SPECKIT_PLAN: &str =
-    include_str!("templates/speckit/plan.md");
-const SPECKIT_TASKS: &str =
-    include_str!("templates/speckit/tasks.md");
-const SPECKIT_IMPLEMENT: &str =
-    include_str!("templates/speckit/implement.md");
-const SPECKIT_CLARIFY: &str =
-    include_str!("templates/speckit/clarify.md");
-const SPECKIT_ANALYZE: &str =
-    include_str!("templates/speckit/analyze.md");
+const SPECKIT_CONSTITUTION: &str = include_str!("templates/speckit/constitution.md");
+const SPECKIT_SPECIFY: &str = include_str!("templates/speckit/specify.md");
+const SPECKIT_PLAN: &str = include_str!("templates/speckit/plan.md");
+const SPECKIT_TASKS: &str = include_str!("templates/speckit/tasks.md");
+const SPECKIT_IMPLEMENT: &str = include_str!("templates/speckit/implement.md");
+const SPECKIT_CLARIFY: &str = include_str!("templates/speckit/clarify.md");
+const SPECKIT_ANALYZE: &str = include_str!("templates/speckit/analyze.md");
 
 fn speckit_templates() -> HashMap<String, &'static str> {
     [
         ("speckit.constitution", SPECKIT_CONSTITUTION),
-        ("speckit.specify",      SPECKIT_SPECIFY),
-        ("speckit.plan",         SPECKIT_PLAN),
-        ("speckit.tasks",        SPECKIT_TASKS),
-        ("speckit.implement",    SPECKIT_IMPLEMENT),
-        ("speckit.clarify",      SPECKIT_CLARIFY),
-        ("speckit.analyze",      SPECKIT_ANALYZE),
+        ("speckit.specify", SPECKIT_SPECIFY),
+        ("speckit.plan", SPECKIT_PLAN),
+        ("speckit.tasks", SPECKIT_TASKS),
+        ("speckit.implement", SPECKIT_IMPLEMENT),
+        ("speckit.clarify", SPECKIT_CLARIFY),
+        ("speckit.analyze", SPECKIT_ANALYZE),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -76,10 +69,7 @@ impl SpecFramework {
     /// Load the built-in spec-kit framework.
     pub fn spec_kit() -> Self {
         Self {
-            templates: speckit_templates()
-                .into_iter()
-                .map(|(k, v)| (k, v.to_string()))
-                .collect(),
+            templates: speckit_templates().into_iter().map(|(k, v)| (k, v.to_string())).collect(),
             name: "spec-kit".to_string(),
         }
     }
@@ -89,11 +79,7 @@ impl SpecFramework {
     /// Each `.md` file in the directory becomes a command whose name equals the
     /// file stem (e.g. `my-command.md` → `/my-command`).
     pub fn from_directory(path: &Path) -> Self {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("custom")
-            .to_string();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("custom").to_string();
 
         let mut templates = HashMap::new();
         match std::fs::read_dir(path) {

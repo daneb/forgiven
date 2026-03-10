@@ -633,8 +633,7 @@ impl Buffer {
             return;
         }
 
-        let byte_count: usize =
-            self.lines[row].chars().take(to_remove).map(|c| c.len_utf8()).sum();
+        let byte_count: usize = self.lines[row].chars().take(to_remove).map(|c| c.len_utf8()).sum();
         self.lines[row].drain(..byte_count);
         self.cursor.col = self.cursor.col.saturating_sub(to_remove);
         self.mark_modified();

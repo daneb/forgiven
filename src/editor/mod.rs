@@ -14,7 +14,6 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 
 use crate::agent::AgentPanel;
-use crate::spec_framework;
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
@@ -23,6 +22,7 @@ use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
 use crate::search::{run_search, SearchState, SearchStatus};
+use crate::spec_framework;
 use crate::ui::UI;
 use lsp_types::Diagnostic;
 use ratatui::text::Span;

@@ -58,7 +58,6 @@ impl tracing::field::Visit for MessageVisitor {
 mod agent;
 mod buffer;
 mod config;
-mod spec_framework;
 mod editor;
 mod explorer;
 mod highlight;
@@ -67,6 +66,7 @@ mod lsp;
 mod markdown;
 mod mcp;
 mod search;
+mod spec_framework;
 mod ui;
 
 use crate::config::Config;
