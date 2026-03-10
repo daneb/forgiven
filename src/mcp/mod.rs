@@ -151,6 +151,7 @@ impl McpManager {
     ///
     /// All servers are connected **concurrently** so startup time is bounded by
     /// the slowest single server rather than the sum of all servers.
+    ///
     pub async fn from_config(configs: &[McpServerConfig]) -> Self {
         use tokio::task::JoinSet;
 
@@ -285,7 +286,7 @@ impl McpManager {
 /// Spawn an MCP server process and perform the initialization handshake.
 async fn spawn_and_init(cfg: &McpServerConfig) -> Result<(McpServer, Child)> {
     let mut cmd = Command::new(&cfg.command);
-    cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()); // suppress server stderr so it doesn't pollute our TUI
+    cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
 
     for (k, v) in &cfg.env {
         // Support $VAR_NAME syntax: read the value from the current process environment

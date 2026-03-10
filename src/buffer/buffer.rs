@@ -615,6 +615,31 @@ impl Buffer {
         self.mark_modified();
     }
 
+    /// Remove one indent level from the start of the current line (Shift+Tab).
+    /// Removes up to `tab_width` leading spaces when `use_spaces` is true,
+    /// or one leading tab character otherwise.  Cursor column is clamped if it
+    /// falls inside the removed region.
+    pub fn dedent_line(&mut self, use_spaces: bool, tab_width: usize) {
+        let row = self.cursor.row;
+        let line = &self.lines[row];
+
+        let to_remove = if use_spaces {
+            line.chars().take_while(|&c| c == ' ').count().min(tab_width)
+        } else {
+            usize::from(line.starts_with('\t'))
+        };
+
+        if to_remove == 0 {
+            return;
+        }
+
+        let byte_count: usize =
+            self.lines[row].chars().take(to_remove).map(|c| c.len_utf8()).sum();
+        self.lines[row].drain(..byte_count);
+        self.cursor.col = self.cursor.col.saturating_sub(to_remove);
+        self.mark_modified();
+    }
+
     /// Delete the character at the cursor position (delete key)
     pub fn delete_char_at(&mut self) {
         let row = self.cursor.row;

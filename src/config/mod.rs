@@ -20,16 +20,23 @@ use tracing::warn;
 /// command = "uvx"
 /// args    = ["mcp-server-git"]
 /// ```
+///
+/// For isolation, wrap the command in a container via a shell wrapper script
+/// rather than embedding container logic in the editor config.  See ADR 0053.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpServerConfig {
     /// Human-readable name shown in the UI.
     pub name: String,
     /// Executable to spawn (e.g. "npx", "uvx", "/usr/local/bin/my-mcp-server").
+    /// For containerised servers, set this to "docker" and put the `run` args in
+    /// `args`, or point to a wrapper script that handles the container invocation.
     pub command: String,
     /// Arguments passed to the executable.
     #[serde(default)]
     pub args: Vec<String>,
     /// Optional environment variables to set for the server process.
+    /// Values beginning with `$` are resolved from the shell environment at
+    /// startup (e.g. `GITHUB_TOKEN = "$GITHUB_TOKEN"`).
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }

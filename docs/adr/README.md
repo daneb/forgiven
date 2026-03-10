@@ -60,6 +60,8 @@ that motivated it, what was decided, and the consequences.
 | [0050](0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution | Accepted |
 | [0051](0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation | Accepted |
 | [0052](0052-dotnet-lsp-csharp-ls.md) | .NET LSP — Switch Default to csharp-ls | Accepted |
+| [0053](0053-mcp-container-isolation.md) | MCP Non-blocking Startup (isolation superseded) | Accepted |
+| [0054](0054-editor-quality-of-life-improvements.md) | Editor Quality-of-Life Improvements | Accepted |
 
 ## What is an ADR?
 

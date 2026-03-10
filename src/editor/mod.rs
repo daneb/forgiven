@@ -212,8 +212,11 @@ pub struct Editor {
 
     // ── MCP servers ───────────────────────────────────────────────────────────
     /// Manages connected MCP servers and their tool registries.
-    /// Initialized by `setup_mcp()` after the config is loaded.
+    /// Set once the background connection task completes (see `mcp_rx`).
     mcp_manager: Option<std::sync::Arc<McpManager>>,
+    /// Receives the completed `McpManager` from the background startup task.
+    /// Polled each tick; cleared and wired into `agent_panel` on first `Ok`.
+    mcp_rx: Option<oneshot::Receiver<McpManager>>,
 
     // ── In-memory log ring buffer ─────────────────────────────────────────────
     /// Recent WARN/ERROR log entries captured from the tracing subscriber.
@@ -291,6 +294,7 @@ impl Editor {
             commit_msg_rx: None,
             commit_msg_from_staged: true,
             mcp_manager: None,
+            mcp_rx: None,
             log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -422,9 +426,10 @@ impl Editor {
 
     /// Start all LSP servers and MCP servers concurrently, then apply the results.
     ///
-    /// Because `tokio::join!` requires independent futures (no shared `&mut self`),
-    /// we extract the config data first, run both init passes in parallel, then
-    /// apply their results sequentially.
+    /// LSP startup blocks the loading screen (the editor needs completions and
+    /// diagnostics to be useful).  MCP startup is fire-and-forget: a background
+    /// task is spawned immediately and the result is wired in via `mcp_rx` once
+    /// the connections complete — the editor opens without waiting for MCP.
     pub async fn setup_services(&mut self) {
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -432,18 +437,11 @@ impl Editor {
         let mcp_servers = self.config.mcp.servers.clone();
         let notif_tx = self.lsp_manager.notification_tx();
 
-        tracing::info!(
-            "Starting {} LSP + {} MCP server(s) concurrently",
-            lsp_servers.len(),
-            mcp_servers.len()
-        );
+        // ── LSP — await before opening the editor ─────────────────────────────
+        tracing::info!("Starting {} LSP server(s)", lsp_servers.len());
+        let lsp_results =
+            crate::lsp::init_servers_parallel(&lsp_servers, workspace_root, notif_tx).await;
 
-        let (lsp_results, mcp_manager) = tokio::join!(
-            crate::lsp::init_servers_parallel(&lsp_servers, workspace_root, notif_tx),
-            McpManager::from_config(&mcp_servers),
-        );
-
-        // ── Apply LSP results ─────────────────────────────────────────────────
         for (language, result) in lsp_results {
             match result {
                 Err(e) => {
@@ -483,12 +481,18 @@ impl Editor {
             }
         }
 
-        // ── Apply MCP results ─────────────────────────────────────────────────
+        // ── MCP — fire-and-forget background task ─────────────────────────────
+        // The editor opens immediately; MCP tools become available once the
+        // background handshakes complete.  Progress is visible in the agent
+        // panel bottom bar (ADR 0048) and the diagnostics overlay (SPC d).
         if !mcp_servers.is_empty() {
-            tracing::info!("MCP ready: {}", mcp_manager.summary());
-            let arc = std::sync::Arc::new(mcp_manager);
-            self.mcp_manager = Some(std::sync::Arc::clone(&arc));
-            self.agent_panel.mcp_manager = Some(arc);
+            tracing::info!("Spawning {} MCP server(s) in background", mcp_servers.len());
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let manager = McpManager::from_config(&mcp_servers).await;
+                let _ = tx.send(manager);
+            });
+            self.mcp_rx = Some(rx);
         }
     }
 
@@ -736,8 +740,19 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // Also render whenever background polling is still in-flight so the
-            // user sees spinner/progress updates.
+            // ── MCP background connection poll ────────────────────────────────
+            if let Some(rx) = self.mcp_rx.as_mut() {
+                if let Ok(manager) = rx.try_recv() {
+                    tracing::info!("MCP ready: {}", manager.summary());
+                    let arc = std::sync::Arc::new(manager);
+                    self.mcp_manager = Some(std::sync::Arc::clone(&arc));
+                    self.agent_panel.mcp_manager = Some(arc);
+                    self.mcp_rx = None;
+                    needs_render = true;
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // Force a render whenever background work is in-flight OR the
             // which-key timer is pending (so the popup appears after 500 ms
             // even when no key event arrives to trigger a normal render).
@@ -746,6 +761,7 @@ impl Editor {
                 || self.key_handler.which_key_pending()
                 || self.search_rx.is_some()
                 || self.commit_msg_rx.is_some()
+                || self.mcp_rx.is_some()
             {
                 needs_render = true;
             }
@@ -1470,6 +1486,30 @@ impl Editor {
                         }
                         self.set_status(format!("Closed buffer: {}", name));
                     }
+                }
+            },
+            Action::BufferForceClose => {
+                if !self.buffers.is_empty() {
+                    let closing_idx = self.current_buffer_idx;
+                    if let Some(other) = self.split_other_idx {
+                        if closing_idx == other {
+                            self.split_other_idx = None;
+                            self.split_right_focused = false;
+                            self.split_highlight_cache = None;
+                        } else {
+                            self.current_buffer_idx = other;
+                            self.split_other_idx = None;
+                            self.split_right_focused = false;
+                            self.split_highlight_cache = None;
+                        }
+                    }
+                    let name = self.buffers[closing_idx].name.clone();
+                    self.buffers.remove(closing_idx);
+                    if !self.buffers.is_empty() {
+                        self.current_buffer_idx =
+                            self.current_buffer_idx.min(self.buffers.len() - 1);
+                    }
+                    self.set_status(format!("Closed buffer (discarded): {}", name));
                 }
             },
             Action::WindowSplit => {
@@ -3135,9 +3175,26 @@ impl Editor {
                         return Ok(());
                     }
                 }
-                // No ghost text — insert a literal tab character.
+                // No ghost text — insert indent (spaces or tab based on config).
+                let use_spaces = self.config.use_spaces;
+                let tab_width = self.config.tab_width;
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.insert_char('\t');
+                    if use_spaces {
+                        for _ in 0..tab_width {
+                            buf.insert_char(' ');
+                        }
+                    } else {
+                        buf.insert_char('\t');
+                    }
+                }
+                true
+            },
+            KeyCode::BackTab => {
+                // Shift+Tab — remove one indent level from the start of the line.
+                let use_spaces = self.config.use_spaces;
+                let tab_width = self.config.tab_width;
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.dedent_line(use_spaces, tab_width);
                 }
                 true
             },
@@ -3380,6 +3437,14 @@ impl Editor {
                         } else {
                             self.set_status("Pattern not found".to_string());
                         }
+                    }
+                }
+            },
+            // :12 — jump to line 12 (1-based), same as vim
+            _ if cmd.chars().all(|c| c.is_ascii_digit()) => {
+                if let Ok(n) = cmd.parse::<usize>() {
+                    if let Some(buf) = self.current_buffer_mut() {
+                        buf.goto_line(n);
                     }
                 }
             },

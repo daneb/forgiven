@@ -73,6 +73,7 @@ pub enum Action {
     BufferNext,
     BufferPrevious,
     BufferClose,
+    BufferForceClose,
     FileFind,
     FileNew,
     FileSave,
@@ -182,6 +183,7 @@ impl KeyHandler {
         buffer_node.children.insert('n', KeyNode::leaf("next buffer", Action::BufferNext));
         buffer_node.children.insert('p', KeyNode::leaf("previous buffer", Action::BufferPrevious));
         buffer_node.children.insert('d', KeyNode::leaf("delete buffer", Action::BufferClose));
+        buffer_node.children.insert('D', KeyNode::leaf("delete buffer (discard)", Action::BufferForceClose));
         tree.insert('b', buffer_node);
 
         // SPC f - File commands
