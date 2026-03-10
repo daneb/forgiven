@@ -124,6 +124,14 @@ pub struct AgentTask {
     pub done: bool,
 }
 
+/// State for the ask_user dialog while the agent is waiting for a response.
+#[derive(Debug, Clone)]
+pub struct AskUserState {
+    pub question: String,
+    pub options: Vec<String>,
+    pub selected: usize,
+}
+
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
@@ -169,6 +177,10 @@ pub struct AgentPanel {
     /// Optional prompt framework (e.g. spec-kit) that intercepts `/command` input
     /// and injects structured prompt templates before submission.
     pub spec_framework: Option<SpecFramework>,
+    /// Channel to send the user's answer back to the agentic loop when ask_user is active.
+    pub question_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Set when the agent has asked a question and is waiting for the user to respond.
+    pub asking_user: Option<AskUserState>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -253,6 +265,12 @@ pub enum StreamEvent {
     /// Request user decision on whether to continue.
     /// The loop is paused and waiting for a response via the continuation channel.
     AwaitingContinuation,
+    /// Agent is asking the user a question and waiting for their choice.
+    /// The loop is paused; the answer is returned via the question channel.
+    AskingUser {
+        question: String,
+        options: Vec<String>,
+    },
     Done,
     Error(String),
     /// API call failed and the loop is about to sleep before retrying.
@@ -308,6 +326,8 @@ impl AgentPanel {
             pasted_blocks: Vec::new(),
             mcp_manager: None,
             spec_framework: None,
+            question_tx: None,
+            asking_user: None,
         }
     }
 
@@ -517,8 +537,12 @@ TASK PLANNING RULES:\n\
 \n\
 COMMUNICATION RULES:\n\
 6. Do NOT output any text while working through tool calls. Work silently.\n\
-   Only write a single, concise final response AFTER all tools have completed.\n\
+   After ALL tools have finished, ALWAYS write a concise summary of what was\n\
+   accomplished (files changed, what was added/removed/fixed, and any caveats).\n\
    Do not narrate steps, explain retries, or announce what you are about to do.\n\
+7. Use ask_user ONLY when you genuinely cannot proceed without clarification —\n\
+   e.g., ambiguous destructive actions or mutually exclusive design choices.\n\
+   Do NOT use it to confirm routine read/write operations.\n\
 \n\
 FILE EDITING RULES:\n\
 1. ALWAYS call read_file on a file BEFORE calling edit_file or write_file on it.\n\
@@ -536,7 +560,8 @@ Available tools:\n\
 - read_file       Read a file (returns line-numbered content). REQUIRED before edits.\n\
 - write_file      Write a complete file (for new files or full rewrites only).\n\
 - edit_file       Surgical find-and-replace. old_str must match EXACTLY once.\n\
-- list_directory  List a directory's contents.\n";
+- list_directory  List a directory's contents.\n\
+- ask_user        Show the user a question dialog and wait for their choice.\n";
 
         let system = if let Some(ref ctx) = context {
             format!(
@@ -606,6 +631,9 @@ Available tools:\n\
         let (cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
         self.continuation_tx = Some(cont_tx);
 
+        let (question_tx, question_rx) = mpsc::unbounded_channel::<String>();
+        self.question_tx = Some(question_tx);
+
         let mcp = self.mcp_manager.as_ref().map(Arc::clone);
         tokio::spawn(agentic_loop(
             api_token,
@@ -616,6 +644,7 @@ Available tools:\n\
             max_rounds,
             warning_threshold,
             cont_rx,
+            question_rx,
             mcp,
         ));
         Ok(())
@@ -700,12 +729,10 @@ Available tools:\n\
                     Ok(StreamEvent::AwaitingContinuation) => {
                         active = true;
                         self.awaiting_continuation = true;
-                        let prompt = "\n\n⏸  Maximum rounds reached. Continue? (y/n)";
-                        if let Some(r) = self.streaming_reply.as_mut() {
-                            r.push_str(prompt);
-                        } else {
-                            self.streaming_reply = Some(prompt.to_string());
-                        }
+                    },
+                    Ok(StreamEvent::AskingUser { question, options }) => {
+                        active = true;
+                        self.asking_user = Some(AskUserState { question, options, selected: 0 });
                     },
                     Ok(StreamEvent::Retrying { attempt, max }) => {
                         active = true;
@@ -726,6 +753,8 @@ Available tools:\n\
                         self.scroll = 0;
                         self.stream_rx = None;
                         self.continuation_tx = None;
+                        self.question_tx = None;
+                        self.asking_user = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
                         self.status = AgentStatus::Idle;
@@ -740,6 +769,8 @@ Available tools:\n\
                         self.streaming_reply = None;
                         self.stream_rx = None;
                         self.continuation_tx = None;
+                        self.question_tx = None;
+                        self.asking_user = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
                         self.status = AgentStatus::Idle;
@@ -782,6 +813,56 @@ Available tools:\n\
                         r.push_str("\n\n✗ Stopped by user");
                     }
                 }
+            }
+        }
+    }
+
+    /// Confirm the currently-selected answer in the ask_user dialog.
+    pub fn confirm_user_question(&mut self) {
+        if let Some(ref state) = self.asking_user.take() {
+            if let Some(ref tx) = self.question_tx {
+                let answer = state
+                    .options
+                    .get(state.selected)
+                    .cloned()
+                    .unwrap_or_else(|| "Yes".to_string());
+                // Echo the choice into the reply so the user sees it in history.
+                let echo = format!("\n\n→ **{}**", answer);
+                match self.streaming_reply.as_mut() {
+                    Some(r) => r.push_str(&echo),
+                    None => self.streaming_reply = Some(echo),
+                }
+                let _ = tx.send(answer);
+            }
+        }
+    }
+
+    /// Cancel the ask_user dialog (picks the last option, typically "No"/"Cancel").
+    pub fn cancel_user_question(&mut self) {
+        if let Some(ref state) = self.asking_user.take() {
+            if let Some(ref tx) = self.question_tx {
+                let answer = state
+                    .options
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "No".to_string());
+                let echo = format!("\n\n→ **{}** (cancelled)", answer);
+                match self.streaming_reply.as_mut() {
+                    Some(r) => r.push_str(&echo),
+                    None => self.streaming_reply = Some(echo),
+                }
+                let _ = tx.send(answer);
+            }
+        }
+    }
+
+    /// Move the selection up or down in the ask_user dialog.
+    pub fn move_question_selection(&mut self, delta: i32) {
+        if let Some(ref mut state) = self.asking_user {
+            let n = state.options.len();
+            if n > 0 {
+                state.selected =
+                    (state.selected as i32 + delta).rem_euclid(n as i32) as usize;
             }
         }
     }
@@ -935,6 +1016,7 @@ async fn agentic_loop(
     max_rounds: usize,
     warning_threshold: usize,
     mut cont_rx: mpsc::UnboundedReceiver<bool>,
+    mut question_rx: mpsc::UnboundedReceiver<String>,
     mcp_manager: Option<Arc<McpManager>>,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
@@ -1234,7 +1316,43 @@ async fn agentic_loop(
                 args_summary: call.args_summary(),
             });
 
-            let result = if let Some(ref mcp) = mcp_manager {
+            let result = if call.name == "ask_user" {
+                // Parse question + options, emit an AskingUser event, and block until
+                // the user makes a selection (or the 5-minute timeout fires).
+                let args_val = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .unwrap_or_default();
+                let question = args_val
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Please choose an option")
+                    .to_string();
+                let options: Vec<String> = args_val
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|o| o.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .filter(|v: &Vec<String>| !v.is_empty())
+                    .unwrap_or_else(|| vec!["Yes".to_string(), "No".to_string()]);
+
+                let _ = tx.send(StreamEvent::AskingUser {
+                    question: question.clone(),
+                    options: options.clone(),
+                });
+
+                let answer = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(300),
+                    question_rx.recv(),
+                )
+                .await;
+
+                match answer {
+                    Ok(Some(ans)) => ans,
+                    Ok(None) | Err(_) => options.last().cloned().unwrap_or_else(|| "No".to_string()),
+                }
+            } else if let Some(ref mcp) = mcp_manager {
                 if mcp.is_mcp_tool(&call.name) {
                     mcp.call_tool(&call.name, &call.arguments).await
                 } else {

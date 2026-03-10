@@ -64,6 +64,7 @@ that motivated it, what was decided, and the consequences.
 | [0054](0054-editor-quality-of-life-improvements.md) | Editor Quality-of-Life Improvements | Accepted |
 | [0055](0055-release-notes-generation.md) | Release Notes Generation (`SPC g n`) | Accepted |
 | [0056](0056-spec-framework-integration.md) | Pluggable Prompt-Framework Integration (spec-kit) | Accepted |
+| [0057](0057-ask-user-tool.md) | Agent `ask_user` Tool | Accepted |
 
 ## What is an ADR?
 

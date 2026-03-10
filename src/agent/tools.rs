@@ -130,6 +130,28 @@ pub fn tool_definitions() -> serde_json::Value {
                     "required": ["title"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": "Pause and ask the user a question before proceeding. Use when you need clarification about intent, want approval for a destructive action, or need the user to choose between meaningful alternatives. The user sees a dialog and selects an option.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question to display to the user."
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "The choices presented to the user. Defaults to [\"Yes\", \"No\"] if omitted."
+                        }
+                    },
+                    "required": ["question"]
+                }
+            }
         }
     ])
 }
@@ -152,6 +174,12 @@ impl ToolCall {
     /// Short one-line display string used in the chat UI.
     pub fn args_summary(&self) -> String {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&self.arguments) {
+            // For ask_user, show the question text.
+            if self.name == "ask_user" {
+                if let Some(q) = val.get("question").and_then(|v| v.as_str()) {
+                    return if q.len() > 60 { format!("{}…", &q[..60]) } else { q.to_string() };
+                }
+            }
             // Show the 'path' argument if present — it's the most meaningful for display.
             if let Some(path) = val.get("path").and_then(|v| v.as_str()) {
                 return path.to_string();

@@ -2207,6 +2207,26 @@ impl Editor {
 
     /// Handle keys while the agent panel is focused.
     fn handle_agent_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // If the agent is waiting for a question answer, intercept all keys for the dialog.
+        if self.agent_panel.asking_user.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.agent_panel.move_question_selection(-1);
+                },
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.agent_panel.move_question_selection(1);
+                },
+                KeyCode::Enter => {
+                    self.agent_panel.confirm_user_question();
+                },
+                KeyCode::Esc => {
+                    self.agent_panel.cancel_user_question();
+                },
+                _ => {},
+            }
+            return Ok(());
+        }
+
         match key.code {
             // Esc — blur panel, return focus to editor.
             KeyCode::Esc => {

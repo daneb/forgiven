@@ -8,12 +8,49 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-use crate::agent::{split_thinking, AgentPanel, AgentTask, ContentSegment, Role};
+use crate::agent::{split_thinking, AgentPanel, AgentTask, AskUserState, ContentSegment, Role};
 use crate::buffer::{Cursor, Selection};
 use crate::editor::DiffLine;
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
+
+/// Per-frame render cache for the agent panel.
+/// Avoids re-parsing markdown and re-running split_thinking() for messages
+/// that have not changed since the last frame.
+struct PanelRenderCache {
+    /// Completed-message lines: valid when (msg_count, content_width) match.
+    msg_count: usize,
+    content_width: usize,
+    msg_lines: Vec<Line<'static>>,
+    /// Streaming-reply lines: valid when (byte_len, content_width) match.
+    streaming_len: usize,
+    streaming_width: usize,
+    streaming_lines: Vec<Line<'static>>,
+    /// Display-row count: valid when (msg_count, streaming_len, inner_width) match.
+    row_count_key: (usize, usize, usize),
+    row_count: usize,
+}
+
+impl Default for PanelRenderCache {
+    fn default() -> Self {
+        Self {
+            msg_count: usize::MAX, // force initial render
+            content_width: 0,
+            msg_lines: Vec::new(),
+            streaming_len: usize::MAX, // force initial render
+            streaming_width: 0,
+            streaming_lines: Vec::new(),
+            row_count_key: (usize::MAX, 0, 0),
+            row_count: 1,
+        }
+    }
+}
+
+thread_local! {
+    static PANEL_CACHE: std::cell::RefCell<PanelRenderCache> =
+        std::cell::RefCell::new(PanelRenderCache::default());
+}
 
 /// Data for the full-screen apply-diff overlay (Mode::ApplyDiff).
 pub struct ApplyDiffView<'a> {
@@ -393,71 +430,99 @@ impl UI {
         let (task_area, input_area) =
             if task_strip_height > 0 { (Some(vchunks[1]), vchunks[2]) } else { (None, vchunks[1]) };
 
-        // ── Chat history ──────────────────────────────────────────────────────
-        let mut lines: Vec<Line> = Vec::new();
+        // ── Chat history (cache-aware) ────────────────────────────────────────
+        // render_message_content() runs the markdown parser + split_thinking()
+        // which is expensive.  We cache the rendered Line<'static> vectors and
+        // only recompute when content or width actually changes.
         let content_width = history_area.width.saturating_sub(4) as usize;
-
-        for msg in &panel.messages {
-            // System-role messages are display-only dividers (e.g. model-switch notices).
-            // Render them as a plain dim separator line rather than a chat bubble.
-            if matches!(msg.role, Role::System) {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  {}  ", msg.content),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-                )]));
-                lines.push(Line::from(""));
-                continue;
-            }
-            let (label, color) = match msg.role {
-                Role::User => ("You", Color::Green),
-                Role::Assistant => ("Copilot", Color::Cyan),
-                Role::System => unreachable!(),
-            };
-            lines.push(Line::from(vec![Span::styled(
-                format!("╔ {label} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )]));
-            // Render via the think-aware renderer: thinking blocks are shown as
-            // plain dim text; everything else goes through the markdown renderer.
-            lines.extend(render_message_content(&msg.content, content_width));
-            lines.push(Line::from(""));
-        }
-
-        // Show in-progress streaming reply.
-        if let Some(ref partial) = panel.streaming_reply {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "╔ Copilot ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "▋",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
-                ),
-            ]));
-            lines.extend(render_message_content(partial, content_width));
-        }
-
-        // Scroll: panel.scroll=0 means pinned to bottom (newest); higher = scrolled up.
-        // We use display rows (not logical lines) so that wrapped code-block lines don't
-        // cause the bottom of the panel to be clipped.
-        let inner_width = history_area.width.saturating_sub(2) as usize;
+        let inner_width   = history_area.width.saturating_sub(2) as usize;
         let visible_height = history_area.height.saturating_sub(2) as usize;
 
-        // Approximate display rows per logical Line by summing span character counts
-        // and dividing by the inner panel width (same heuristic ratatui uses for Wrap).
-        let total_display_rows: usize = lines
-            .iter()
-            .map(|l| {
-                let cols: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-                if inner_width == 0 {
-                    1
-                } else {
-                    cols.div_ceil(inner_width).max(1)
+        let cur_msg_count    = panel.messages.len();
+        let cur_streaming_len = panel.streaming_reply.as_ref().map(|s| s.len()).unwrap_or(0);
+
+        let (lines, total_display_rows) = PANEL_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+
+            // — Completed messages —
+            if cache.msg_count != cur_msg_count || cache.content_width != content_width {
+                let mut ml: Vec<Line<'static>> = Vec::new();
+                for msg in &panel.messages {
+                    if matches!(msg.role, Role::System) {
+                        ml.push(Line::from(vec![Span::styled(
+                            format!("  {}  ", msg.content),
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                        )]));
+                        ml.push(Line::from(""));
+                        continue;
+                    }
+                    let (label, color) = match msg.role {
+                        Role::User      => ("You",     Color::Green),
+                        Role::Assistant => ("Copilot", Color::Cyan),
+                        Role::System    => unreachable!(),
+                    };
+                    ml.push(Line::from(vec![Span::styled(
+                        format!("╔ {label} "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    )]));
+                    ml.extend(render_message_content(&msg.content, content_width));
+                    ml.push(Line::from(""));
                 }
-            })
-            .sum::<usize>()
-            .max(1);
+                cache.msg_lines    = ml;
+                cache.msg_count    = cur_msg_count;
+                cache.content_width = content_width;
+            }
+
+            // — Streaming reply —
+            if cache.streaming_len != cur_streaming_len || cache.streaming_width != content_width {
+                if let Some(ref partial) = panel.streaming_reply {
+                    let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
+                        Span::styled(
+                            "╔ Copilot ",
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "▋",
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+                        ),
+                    ])];
+                    sl.extend(render_message_content(partial, content_width));
+                    cache.streaming_lines = sl;
+                } else {
+                    cache.streaming_lines.clear();
+                }
+                cache.streaming_len   = cur_streaming_len;
+                cache.streaming_width = content_width;
+            }
+
+            // — Display-row count —
+            let row_key = (cur_msg_count, cur_streaming_len, inner_width);
+            if cache.row_count_key != row_key {
+                let total: usize = cache
+                    .msg_lines
+                    .iter()
+                    .chain(cache.streaming_lines.iter())
+                    .map(|l| {
+                        let cols: usize =
+                            l.spans.iter().map(|s| s.content.chars().count()).sum();
+                        if inner_width == 0 { 1 } else { cols.div_ceil(inner_width).max(1) }
+                    })
+                    .sum::<usize>()
+                    + 2; // two trailing buffer lines
+                cache.row_count     = total.max(1);
+                cache.row_count_key = row_key;
+            }
+
+            // Build the combined line Vec for ratatui.
+            // Cloning pre-built Line<'static> objects is far cheaper than
+            // re-running the markdown parser on every message every frame.
+            let mut lines = cache.msg_lines.clone();
+            lines.extend(cache.streaming_lines.iter().cloned());
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+
+            (lines, cache.row_count)
+        });
 
         let max_scroll = total_display_rows.saturating_sub(visible_height);
         let scroll = panel.scroll.min(max_scroll);
@@ -581,6 +646,123 @@ impl UI {
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
         frame.render_widget(input_para, input_area);
+
+        // Awaiting-continuation dialog — shown whenever the agent hits max rounds.
+        // Rendered as a prominent overlay so it can't be missed after a long plan.
+        if panel.awaiting_continuation {
+            Self::render_continuation_dialog(frame, panel.current_round, panel.max_rounds, area);
+        }
+
+        // If the agent is waiting for a question answer, render the dialog on top.
+        // Constrain to the agent panel area so it never overlaps the explorer.
+        if let Some(ref state) = panel.asking_user {
+            Self::render_ask_user_dialog(frame, state, area);
+        }
+    }
+
+    /// Render the awaiting-continuation dialog at the bottom of the agent panel.
+    fn render_continuation_dialog(
+        frame: &mut Frame,
+        current_round: usize,
+        max_rounds: usize,
+        area: Rect,
+    ) {
+        let dialog_width = ((area.width * 92) / 100).max(20);
+        // Height: 2 borders + 1 message + 1 blank + 1 hint.
+        let dialog_height = 5u16.min(area.height.saturating_sub(2));
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + area.height.saturating_sub(dialog_height);
+        let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .title(format!(" ⏸  Paused — round {current_round}/{max_rounds} "))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let lines = vec![
+            Line::from(Span::styled(
+                "Maximum rounds reached. Continue the plan?",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "y = continue   n = stop",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    /// Render the ask_user dialog anchored to the bottom of the agent panel.
+    /// Constrained to the panel area so it never overlaps the file explorer.
+    /// Width is kept moderate so the dialog is taller rather than wider.
+    fn render_ask_user_dialog(frame: &mut Frame, state: &AskUserState, area: Rect) {
+        let n_opts = state.options.len() as u16;
+        // Use 92% of the panel width — moderate enough to be taller than wide.
+        let dialog_width = ((area.width * 92) / 100).max(20);
+        // Inner width (subtract 2 for borders) used for word-wrap line count.
+        let inner_w = dialog_width.saturating_sub(2) as usize;
+        // Estimate wrapped line count, adding 50% headroom for word-break overheads.
+        let q_chars = state.question.chars().count();
+        let q_lines_est = if inner_w == 0 { 1 } else { ((q_chars + inner_w - 1) / inner_w).max(1) };
+        let q_lines = ((q_lines_est * 3) / 2).max(1) as u16;
+        // 2 borders + q_lines + 1 blank + options + 1 blank + 1 hint.
+        let dialog_height = (2 + q_lines + 1 + n_opts + 1 + 1).min(area.height.saturating_sub(2));
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        // Pin to the bottom of the panel so output above stays visible.
+        let y = area.y + area.height.saturating_sub(dialog_height);
+        let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .title(" ❓ Question ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        // Render the question text word-wrapped in its own paragraph.
+        let q_para = Paragraph::new(Span::styled(
+            state.question.clone(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ))
+        .wrap(Wrap { trim: false });
+
+        let q_area = Rect::new(inner.x, inner.y, inner.width, q_lines.min(inner.height));
+        frame.render_widget(q_para, q_area);
+
+        // Render options + hint below the question.
+        let opts_y = inner.y + q_lines + 1; // +1 for blank line
+        if opts_y < inner.y + inner.height {
+            let mut opt_lines: Vec<Line> = Vec::new();
+            for (i, option) in state.options.iter().enumerate() {
+                let (prefix, style) = if i == state.selected {
+                    ("▶ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    ("  ", Style::default().fg(Color::White))
+                };
+                opt_lines.push(Line::from(Span::styled(format!("{prefix}{option}"), style)));
+            }
+            opt_lines.push(Line::from(""));
+            opt_lines.push(Line::from(Span::styled(
+                "↑/↓ or j/k = move   Enter = confirm   Esc = cancel",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let remaining = inner.height.saturating_sub(q_lines + 1);
+            let opts_area = Rect::new(inner.x, opts_y, inner.width, remaining);
+            frame.render_widget(Paragraph::new(opt_lines), opts_area);
+        }
     }
 
     /// Render the file explorer tree on the left side.
