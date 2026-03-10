@@ -22,6 +22,18 @@ pub struct ApplyDiffView<'a> {
     pub scroll: usize,
 }
 
+/// Data for the release notes popup (Mode::ReleaseNotes).
+pub struct ReleaseNotesView<'a> {
+    /// User's count input (phase 1: count-entry).
+    pub count_input: &'a str,
+    /// True while the AI request is in flight (phase 2: generating).
+    pub generating: bool,
+    /// Completed release notes text (phase 3: displaying).
+    pub notes: &'a str,
+    /// Vertical scroll offset for the notes display.
+    pub scroll: u16,
+}
+
 /// Data for the diagnostics overlay (Mode::Diagnostics).
 pub struct DiagnosticsData<'a> {
     /// MCP: (server_name, tool_count) for each connected server.
@@ -90,6 +102,8 @@ impl UI {
         split_right_focused: bool,
         // Commit message buffer (Mode::CommitMsg only).
         commit_msg: Option<&str>,
+        // Release notes popup data (Mode::ReleaseNotes only).
+        release_notes: Option<&ReleaseNotesView<'_>>,
         // Diagnostics overlay data (Mode::Diagnostics only).
         diag_overlay: Option<&DiagnosticsData<'_>>,
         // Time from process start to the editor being ready; displayed on the welcome screen.
@@ -307,6 +321,11 @@ impl UI {
         // Render commit message popup if active
         if let Some(msg) = commit_msg {
             Self::render_commit_msg_popup(frame, msg, size);
+        }
+
+        // Render release notes popup if active
+        if let Some(view) = release_notes {
+            Self::render_release_notes_popup(frame, view, size);
         }
 
         // Render diagnostics overlay if active
@@ -1488,6 +1507,7 @@ impl UI {
             Mode::NewFolder => "MKDIR",
             Mode::ApplyDiff => "DIFF",
             Mode::CommitMsg => "COMMIT",
+            Mode::ReleaseNotes => "RELEASE",
             Mode::Diagnostics => "DIAG",
         };
 
@@ -1509,6 +1529,7 @@ impl UI {
             Mode::NewFolder => Color::LightGreen,
             Mode::ApplyDiff => Color::Cyan,
             Mode::CommitMsg => Color::LightYellow,
+            Mode::ReleaseNotes => Color::LightCyan,
             Mode::Diagnostics => Color::LightCyan,
         };
 
@@ -1650,6 +1671,83 @@ impl UI {
                 Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
             ));
         frame.render_widget(Paragraph::new(all_lines).block(block), popup_area);
+    }
+
+    /// Render the centred release notes popup (Mode::ReleaseNotes).
+    fn render_release_notes_popup(frame: &mut Frame, view: &ReleaseNotesView<'_>, area: Rect) {
+        let popup_width = 90.min(area.width);
+        let popup_height = (area.height * 3 / 4).max(10).min(area.height);
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let (title_str, hint_line, body_lines): (_, Line<'static>, Vec<Line<'static>>) =
+            if view.generating {
+                // Phase 2: generating
+                (
+                    " Release Notes ",
+                    Line::from(Span::styled(
+                        " Esc=cancel ",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    vec![Line::from(Span::styled(
+                        " Generating release notes…",
+                        Style::default().fg(Color::Yellow),
+                    ))],
+                )
+            } else if view.notes.is_empty() {
+                // Phase 1: count entry
+                let display = format!(" Commits to include: {}_", view.count_input);
+                (
+                    " Release Notes ",
+                    Line::from(Span::styled(
+                        " Enter=generate   Esc=cancel ",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    vec![Line::from(Span::styled(
+                        display,
+                        Style::default().fg(Color::White),
+                    ))],
+                )
+            } else {
+                // Phase 3: displaying
+                let lines = view
+                    .notes
+                    .lines()
+                    .map(|l| Line::from(Span::raw(format!(" {l}"))))
+                    .collect();
+                (
+                    " Release Notes ",
+                    Line::from(vec![
+                        Span::styled(" y", Style::default().fg(Color::Green)),
+                        Span::styled("=copy  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("j/k", Style::default().fg(Color::Green)),
+                        Span::styled("=scroll  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("Esc", Style::default().fg(Color::Green)),
+                        Span::styled("=close ", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    lines,
+                )
+            };
+
+        let mut all_lines = body_lines;
+        all_lines.insert(0, hint_line);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightCyan))
+            .title(Span::styled(
+                title_str,
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ));
+
+        let para = Paragraph::new(all_lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((view.scroll, 0));
+        frame.render_widget(para, popup_area);
     }
 
     /// Render the centred rename popup (Mode::RenameFile).

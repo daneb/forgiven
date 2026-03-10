@@ -1597,6 +1597,7 @@ pub async fn one_shot_complete(
     model_id: &str,
     system: &str,
     user: &str,
+    max_tokens: u32,
 ) -> Result<String> {
     let body = serde_json::json!({
         "model": model_id,
@@ -1606,7 +1607,7 @@ pub async fn one_shot_complete(
         ],
         "stream": false,
         "temperature": 0.3,
-        "max_tokens": 256
+        "max_tokens": max_tokens
     });
 
     let client = reqwest::Client::new();

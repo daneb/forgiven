@@ -22,6 +22,7 @@ pub enum Mode {
     NewFolder,       // New folder popup: user types a folder name from the explorer
     ApplyDiff,       // Full-screen diff preview before applying agent code block
     CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
+    ReleaseNotes,    // Release notes generation popup (SPC g n)
     Diagnostics,     // Read-only diagnostics overlay (SPC d)
 }
 
@@ -99,9 +100,10 @@ pub enum Action {
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen,         // SPC g g — open lazygit
-    GitCommitStaged, // SPC g s — generate commit msg from staged diff
-    GitCommitLast,   // SPC g l — generate commit msg from last commit
+    GitOpen,          // SPC g g — open lazygit
+    GitCommitStaged,  // SPC g s — generate commit msg from staged diff
+    GitCommitLast,    // SPC g l — generate commit msg from last commit
+    GitReleaseNotes,  // SPC g n — generate release notes from last N commits
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
@@ -236,6 +238,9 @@ impl KeyHandler {
         git_node
             .children
             .insert('l', KeyNode::leaf("commit msg from last commit", Action::GitCommitLast));
+        git_node
+            .children
+            .insert('n', KeyNode::leaf("release notes from last N commits", Action::GitReleaseNotes));
         tree.insert('g', git_node);
 
         // SPC m - Markdown

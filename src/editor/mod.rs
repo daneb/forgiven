@@ -210,6 +210,16 @@ pub struct Editor {
     /// True when generating from staged diff (`SPC g s`); false = last commit (`SPC g l`).
     commit_msg_from_staged: bool,
 
+    // ── Release notes generation ──────────────────────────────────────────────
+    /// Count input string while in the count-entry phase of Mode::ReleaseNotes.
+    release_notes_count_input: String,
+    /// In-flight background task fetching AI-generated release notes.
+    release_notes_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    /// Completed release notes text shown in the popup.
+    release_notes_buffer: String,
+    /// Scroll offset for the release notes display popup.
+    release_notes_scroll: u16,
+
     // ── MCP servers ───────────────────────────────────────────────────────────
     /// Manages connected MCP servers and their tool registries.
     /// Set once the background connection task completes (see `mcp_rx`).
@@ -293,6 +303,10 @@ impl Editor {
             commit_msg_buffer: String::new(),
             commit_msg_rx: None,
             commit_msg_from_staged: true,
+            release_notes_count_input: String::from("10"),
+            release_notes_rx: None,
+            release_notes_buffer: String::new(),
+            release_notes_scroll: 0,
             mcp_manager: None,
             mcp_rx: None,
             log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
@@ -740,6 +754,35 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Release-notes AI response poll ────────────────────────────────
+            let release_notes_done = if let Some(rx) = self.release_notes_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(_) => Some(Err(anyhow::anyhow!("release notes channel closed"))),
+                }
+            } else {
+                None
+            };
+            if let Some(result) = release_notes_done {
+                self.release_notes_rx = None;
+                needs_render = true;
+                match result {
+                    Ok(notes) => {
+                        self.release_notes_buffer = strip_markdown_fence(&notes);
+                        self.set_status(
+                            "Release notes ready — y=copy to clipboard, j/k=scroll, Esc=close"
+                                .to_string(),
+                        );
+                    },
+                    Err(e) => {
+                        self.mode = Mode::Normal;
+                        self.set_status(format!("Failed to generate release notes: {e}"));
+                    },
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // ── MCP background connection poll ────────────────────────────────
             if let Some(rx) = self.mcp_rx.as_mut() {
                 if let Ok(manager) = rx.try_recv() {
@@ -761,6 +804,7 @@ impl Editor {
                 || self.key_handler.which_key_pending()
                 || self.search_rx.is_some()
                 || self.commit_msg_rx.is_some()
+                || self.release_notes_rx.is_some()
                 || self.mcp_rx.is_some()
             {
                 needs_render = true;
@@ -1067,6 +1111,17 @@ impl Editor {
         let commit_msg_buf =
             if mode == Mode::CommitMsg { Some(self.commit_msg_buffer.as_str()) } else { None };
 
+        let release_notes_view = if mode == Mode::ReleaseNotes {
+            Some(crate::ui::ReleaseNotesView {
+                count_input: self.release_notes_count_input.as_str(),
+                generating: self.release_notes_rx.is_some(),
+                notes: self.release_notes_buffer.as_str(),
+                scroll: self.release_notes_scroll,
+            })
+        } else {
+            None
+        };
+
         let mcp_failed_empty: Vec<(String, String)> = Vec::new();
         let recent_logs_owned: Vec<(String, String)> =
             self.log_buffer.lock().map(|g| g.iter().cloned().collect()).unwrap_or_default();
@@ -1117,6 +1172,7 @@ impl Editor {
                 split_hl_ref,
                 split_right_focused,
                 commit_msg_buf,
+                release_notes_view.as_ref(),
                 diag_overlay.as_ref(),
                 self.startup_elapsed,
             );
@@ -1229,6 +1285,7 @@ impl Editor {
             Mode::NewFolder => self.handle_new_folder_mode(key)?,
             Mode::ApplyDiff => self.handle_apply_diff_mode(key)?,
             Mode::CommitMsg => self.handle_commit_msg_mode(key)?,
+            Mode::ReleaseNotes => self.handle_release_notes_mode(key)?,
             Mode::Diagnostics => {
                 // Any key closes the overlay.
                 self.mode = Mode::Normal;
@@ -1669,6 +1726,7 @@ impl Editor {
             },
             Action::GitCommitStaged => self.start_commit_msg(true),
             Action::GitCommitLast => self.start_commit_msg(false),
+            Action::GitReleaseNotes => self.start_release_notes(),
             // ── Markdown preview ──────────────────────────────────────────────
             Action::MarkdownPreviewToggle => {
                 if self.mode == Mode::MarkdownPreview {
@@ -3802,7 +3860,7 @@ impl Editor {
             let user = format!("Write a commit message for this diff:\n\n```\n{diff_text}\n```");
             let result = async {
                 let api_token = crate::agent::acquire_copilot_token().await?;
-                crate::agent::one_shot_complete(&api_token, &model_id, system, &user).await
+                crate::agent::one_shot_complete(&api_token, &model_id, system, &user, 256).await
             }
             .await;
             let _ = tx.send(result);
@@ -3854,6 +3912,122 @@ impl Editor {
             // Regular characters
             KeyCode::Char(ch) => {
                 self.commit_msg_buffer.push(ch);
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
+    /// Enter `Mode::ReleaseNotes` — count-input phase.
+    fn start_release_notes(&mut self) {
+        self.release_notes_buffer.clear();
+        self.release_notes_count_input = String::from("10");
+        self.release_notes_scroll = 0;
+        self.mode = Mode::ReleaseNotes;
+        self.set_status(
+            "Enter number of commits (default 10) then press Enter to generate release notes"
+                .to_string(),
+        );
+    }
+
+    /// Run git log, spawn AI task, transition to generating phase.
+    fn trigger_release_notes_generation(&mut self) {
+        let count: usize =
+            self.release_notes_count_input.trim().parse::<usize>().unwrap_or(10).clamp(1, 200);
+
+        let log_output = std::process::Command::new("git")
+            .args(["log", "--format=%H%n%s%n%b%n---", &format!("-{count}")])
+            .output();
+
+        let log_text = match log_output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => {
+                self.mode = Mode::Normal;
+                self.set_status(format!("git error: {e}"));
+                return;
+            },
+        };
+
+        if log_text.trim().is_empty() {
+            self.set_status("No commits found".to_string());
+            return;
+        }
+
+        let model_id = self.agent_panel.selected_model_id().to_string();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let system = "You are a technical writer creating release notes for a software project. \
+                Given a list of git commits, produce clean, user-friendly release notes in markdown. \
+                Group related changes under headings like '### Features', '### Bug Fixes', '### Improvements'. \
+                Be concise but descriptive. Omit merge commits and trivial chore changes. \
+                Output markdown only — no preamble, no explanation.";
+            let user = format!(
+                "Generate release notes from these {count} commits:\n\n```\n{log_text}\n```"
+            );
+            let result = async {
+                let api_token = crate::agent::acquire_copilot_token().await?;
+                crate::agent::one_shot_complete(&api_token, &model_id, system, &user, 1024).await
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+
+        self.release_notes_rx = Some(rx);
+        self.set_status(format!("Generating release notes from {count} commits…"));
+    }
+
+    /// Handle key events while in `Mode::ReleaseNotes`.
+    fn handle_release_notes_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // Phase 2: generating — only Esc cancels.
+        if self.release_notes_rx.is_some() {
+            if key.code == KeyCode::Esc {
+                self.release_notes_rx = None;
+                self.mode = Mode::Normal;
+                self.set_status("Release notes cancelled".to_string());
+            }
+            return Ok(());
+        }
+
+        // Phase 3: displaying the result.
+        if !self.release_notes_buffer.is_empty() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.mode = Mode::Normal;
+                    self.release_notes_buffer.clear();
+                    self.release_notes_scroll = 0;
+                    self.set_status("Release notes closed".to_string());
+                },
+                KeyCode::Char('y') => {
+                    let text = self.release_notes_buffer.clone();
+                    self.sync_system_clipboard(&text);
+                    self.set_status("Release notes copied to clipboard".to_string());
+                },
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.release_notes_scroll = self.release_notes_scroll.saturating_add(1);
+                },
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.release_notes_scroll = self.release_notes_scroll.saturating_sub(1);
+                },
+                _ => {},
+            }
+            return Ok(());
+        }
+
+        // Phase 1: count-entry input.
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.release_notes_count_input = String::from("10");
+                self.set_status("Cancelled".to_string());
+            },
+            KeyCode::Enter => {
+                self.trigger_release_notes_generation();
+            },
+            KeyCode::Backspace => {
+                self.release_notes_count_input.pop();
+            },
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                self.release_notes_count_input.push(ch);
             },
             _ => {},
         }
@@ -3949,6 +4123,24 @@ impl Editor {
             Err(e) => self.set_status(format!("Failed to open browser: {e}")),
         }
     }
+}
+
+/// Strip a wrapping code fence that the AI may add despite being told not to.
+/// Handles ` ```markdown `, ` ```md `, and plain ` ``` ` opening fences.
+fn strip_markdown_fence(s: &str) -> String {
+    let trimmed = s.trim();
+    let after_open = trimmed
+        .strip_prefix("```markdown")
+        .or_else(|| trimmed.strip_prefix("```md"))
+        .or_else(|| trimmed.strip_prefix("```"));
+    if let Some(rest) = after_open {
+        // Strip the newline immediately after the opening fence, then the closing fence.
+        let body = rest.strip_prefix('\n').unwrap_or(rest);
+        if let Some(stripped) = body.strip_suffix("```") {
+            return stripped.trim_end().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Compute a line-level LCS diff between two slices of strings.

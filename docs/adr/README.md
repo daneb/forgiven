@@ -62,6 +62,7 @@ that motivated it, what was decided, and the consequences.
 | [0052](0052-dotnet-lsp-csharp-ls.md) | .NET LSP — Switch Default to csharp-ls | Accepted |
 | [0053](0053-mcp-container-isolation.md) | MCP Non-blocking Startup (isolation superseded) | Accepted |
 | [0054](0054-editor-quality-of-life-improvements.md) | Editor Quality-of-Life Improvements | Accepted |
+| [0055](0055-release-notes-generation.md) | Release Notes Generation (`SPC g n`) | Accepted |
 
 ## What is an ADR?
 
