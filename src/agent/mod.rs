@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::mcp::McpManager;
+use crate::spec_framework::SpecFramework;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data types
@@ -165,6 +166,9 @@ pub struct AgentPanel {
     /// MCP manager shared with the agentic loop.  Set by the editor at startup
     /// after loading the config and spawning MCP server processes.
     pub mcp_manager: Option<Arc<McpManager>>,
+    /// Optional prompt framework (e.g. spec-kit) that intercepts `/command` input
+    /// and injects structured prompt templates before submission.
+    pub spec_framework: Option<SpecFramework>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -303,6 +307,7 @@ impl AgentPanel {
             code_block_idx: 0,
             pasted_blocks: Vec::new(),
             mcp_manager: None,
+            spec_framework: None,
         }
     }
 
@@ -471,6 +476,25 @@ impl AgentPanel {
             }
             combined
         };
+        // Slash-command interception: if a prompt framework is active and the user
+        // typed "/<command> [context]", resolve the template and rebuild the message.
+        // The template becomes the structured instruction; any trailing text is
+        // appended as "user context" and the combined string is sent as the user turn.
+        let user_text = if let Some(ref fw) = self.spec_framework {
+            if let Some((template, rest)) = fw.resolve(&user_text) {
+                // Append whatever the user typed after the command as context.
+                if rest.is_empty() {
+                    template.to_string()
+                } else {
+                    format!("{template}{rest}")
+                }
+            } else {
+                user_text
+            }
+        } else {
+            user_text
+        };
+
         let root_display = project_root.display().to_string();
 
         // Build a shallow file tree so the model knows the project layout upfront

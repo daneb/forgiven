@@ -58,6 +58,7 @@ impl tracing::field::Visit for MessageVisitor {
 mod agent;
 mod buffer;
 mod config;
+mod spec_framework;
 mod editor;
 mod explorer;
 mod highlight;

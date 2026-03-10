@@ -14,6 +14,7 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 
 use crate::agent::AgentPanel;
+use crate::spec_framework;
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
@@ -275,7 +276,12 @@ impl Editor {
             last_edit_instant: None,
             copilot_auth_rx: None,
             status_sticky: false,
-            agent_panel: AgentPanel::new(),
+            agent_panel: {
+                let mut panel = AgentPanel::new();
+                panel.spec_framework =
+                    spec_framework::load_from_config(&config.agent.spec_framework);
+                panel
+            },
             clipboard: None::<(String, ClipboardType)>,
             highlighter: Highlighter::new(),
             highlight_cache: None,

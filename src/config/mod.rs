@@ -85,6 +85,20 @@ pub struct LspConfig {
     pub servers: Vec<LspServerConfig>,
 }
 
+/// Configuration for the agent panel.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentConfig {
+    /// Which prompt framework to enable for slash commands in the agent panel.
+    ///
+    /// | value            | effect                                               |
+    /// |------------------|------------------------------------------------------|
+    /// | `"none"` / `""`  | disabled — no slash-command interception (default)  |
+    /// | `"spec-kit"`     | built-in Spec-Driven Development workflow           |
+    /// | `/path/to/dir`   | custom framework loaded from a directory of `.md`   |
+    #[serde(default)]
+    pub spec_framework: String,
+}
+
 /// Top-level editor configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -96,6 +110,8 @@ pub struct Config {
     pub lsp: LspConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
     /// Preferred Copilot model ID (e.g., "gpt-4o", "claude-3.5-sonnet").
     /// Falls back to "gpt-4o" if not set or if the model is no longer available.
     #[serde(default = "default_copilot_model")]
@@ -132,6 +148,7 @@ impl Default for Config {
             use_spaces: default_use_spaces(),
             lsp: LspConfig::default(),
             mcp: McpConfig::default(),
+            agent: AgentConfig::default(),
             default_copilot_model: default_copilot_model(),
             max_agent_rounds: default_max_agent_rounds(),
             agent_warning_threshold: default_agent_warning_threshold(),
