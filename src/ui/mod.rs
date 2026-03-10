@@ -21,17 +21,22 @@ use crate::search::{SearchFocus, SearchState, SearchStatus};
 /// Avoids re-parsing markdown and re-running split_thinking() for messages
 /// that have not changed since the last frame.
 struct PanelRenderCache {
-    /// Completed-message lines: valid when (msg_count, content_width) match.
+    /// Completed-message lines + their exact ratatui row count.
+    /// Valid when (msg_count, content_width) match.
     msg_count: usize,
     content_width: usize,
     msg_lines: Vec<Line<'static>>,
-    /// Streaming-reply lines: valid when (byte_len, content_width) match.
+    msg_row_count: usize,
+    /// Streaming-reply lines + their exact ratatui row count.
+    /// Valid when (streaming_len, streaming_width) match.
     streaming_len: usize,
     streaming_width: usize,
     streaming_lines: Vec<Line<'static>>,
-    /// Display-row count: valid when (msg_count, streaming_len, inner_width) match.
-    row_count_key: (usize, usize, usize),
-    row_count: usize,
+    streaming_row_count: usize,
+    /// Cached MCP status bottom-bar line.
+    /// Valid when (connected_count, failed_count) match.
+    mcp_status_key: (usize, usize),
+    mcp_bottom: Option<Line<'static>>,
 }
 
 impl Default for PanelRenderCache {
@@ -40,13 +45,28 @@ impl Default for PanelRenderCache {
             msg_count: usize::MAX, // force initial render
             content_width: 0,
             msg_lines: Vec::new(),
+            msg_row_count: 0,
             streaming_len: usize::MAX, // force initial render
             streaming_width: 0,
             streaming_lines: Vec::new(),
-            row_count_key: (usize::MAX, 0, 0),
-            row_count: 1,
+            streaming_row_count: 0,
+            mcp_status_key: (usize::MAX, usize::MAX),
+            mcp_bottom: None,
         }
     }
+}
+
+/// Returns the exact number of terminal rows that `lines` would occupy when
+/// rendered in a [`Paragraph`] with `Wrap { trim: false }` at `inner_width`
+/// columns.  Falls back to `lines.len()` (one row each) when `inner_width`
+/// is zero to avoid a division-by-zero in ratatui's layout code.
+fn wrapped_line_count(lines: &[Line<'static>], inner_width: usize) -> usize {
+    if inner_width == 0 || lines.is_empty() {
+        return lines.len();
+    }
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width as u16)
 }
 
 thread_local! {
@@ -470,9 +490,10 @@ impl UI {
                     ml.extend(render_message_content(&msg.content, content_width));
                     ml.push(Line::from(""));
                 }
-                cache.msg_lines    = ml;
-                cache.msg_count    = cur_msg_count;
+                cache.msg_lines     = ml;
+                cache.msg_count     = cur_msg_count;
                 cache.content_width = content_width;
+                cache.msg_row_count = wrapped_line_count(&cache.msg_lines, inner_width);
             }
 
             // — Streaming reply —
@@ -493,26 +514,9 @@ impl UI {
                 } else {
                     cache.streaming_lines.clear();
                 }
-                cache.streaming_len   = cur_streaming_len;
-                cache.streaming_width = content_width;
-            }
-
-            // — Display-row count —
-            let row_key = (cur_msg_count, cur_streaming_len, inner_width);
-            if cache.row_count_key != row_key {
-                let total: usize = cache
-                    .msg_lines
-                    .iter()
-                    .chain(cache.streaming_lines.iter())
-                    .map(|l| {
-                        let cols: usize =
-                            l.spans.iter().map(|s| s.content.chars().count()).sum();
-                        if inner_width == 0 { 1 } else { cols.div_ceil(inner_width).max(1) }
-                    })
-                    .sum::<usize>()
-                    + 2; // two trailing buffer lines
-                cache.row_count     = total.max(1);
-                cache.row_count_key = row_key;
+                cache.streaming_len         = cur_streaming_len;
+                cache.streaming_width       = content_width;
+                cache.streaming_row_count   = wrapped_line_count(&cache.streaming_lines, inner_width);
             }
 
             // Build the combined line Vec for ratatui.
@@ -523,7 +527,14 @@ impl UI {
             lines.push(Line::from(""));
             lines.push(Line::from(""));
 
-            (lines, cache.row_count)
+            // Total display rows = independently cached per-sub-Vec counts + 2
+            // buffer lines.  Because each Line's row count depends only on its
+            // own content and inner_width (not on surrounding lines), the counts
+            // are additive and do not need the combined Vec — this avoids an
+            // extra full clone on every streaming frame.
+            let total_display_rows = (cache.msg_row_count + cache.streaming_row_count + 2).max(1);
+
+            (lines, total_display_rows)
         });
 
         let max_scroll = total_display_rows.saturating_sub(visible_height);
@@ -535,13 +546,14 @@ impl UI {
         let model_label = panel.selected_model_display();
         let status_suffix =
             panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
-        let scroll_suffix = if scroll > 0 {
-            let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
-            format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ")
+        let scroll_suffix: std::borrow::Cow<'static, str> = if scroll > 0 {
+            let pct =
+                if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
+            format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ").into()
         } else if total_display_rows > visible_height {
-            "  (↑ to scroll up) ".to_string()
+            "  (↑ to scroll up) ".into()
         } else {
-            " ".to_string()
+            " ".into()
         };
 
         let token_span = if panel.last_prompt_tokens > 0 {
@@ -567,35 +579,53 @@ impl UI {
             Span::raw(format!("{status_suffix}{scroll_suffix}")),
         ]);
 
-        let mcp_bottom = match &panel.mcp_manager {
-            None => Line::from(Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray))),
-            Some(mcp) => {
-                let mut spans = vec![Span::raw(" MCP: ")];
-                // Connected servers — green.
-                let connected: Vec<String> = mcp
-                    .connected_servers()
-                    .into_iter()
-                    .map(|(name, count)| format!("{} ({})", name, count))
-                    .collect();
-                if !connected.is_empty() {
-                    spans.push(Span::styled(
-                        connected.join(", "),
-                        Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
-                    ));
-                } else {
-                    spans.push(Span::styled("no tools", Style::default().fg(Color::DarkGray)));
-                }
-                // Failed servers — red with ⚠ prefix.
-                for (name, reason) in &mcp.failed_servers {
-                    spans.push(Span::styled(
-                        format!("  ⚠ {}: {}", name, reason),
-                        Style::default().fg(Color::Red),
-                    ));
-                }
-                spans.push(Span::raw(" "));
-                Line::from(spans)
-            },
-        };
+        // MCP status bottom-bar — rebuilt only when manager presence or failed-
+        // server count changes (both are stable after startup), then cloned from
+        // the cache every frame instead of rebuilding with format!/join/collect.
+        let mcp_bottom = PANEL_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            let mcp_key = (
+                panel.mcp_manager.is_some() as usize,
+                panel.mcp_manager.as_ref().map_or(0, |m| m.failed_servers.len()),
+            );
+            if cache.mcp_status_key != mcp_key {
+                let line = match &panel.mcp_manager {
+                    None => {
+                        Line::from(Span::styled(" MCP: none ", Style::default().fg(Color::DarkGray)))
+                    },
+                    Some(mcp) => {
+                        let mut spans = vec![Span::raw(" MCP: ")];
+                        let connected: Vec<String> = mcp
+                            .connected_servers()
+                            .into_iter()
+                            .map(|(name, count)| format!("{} ({})", name, count))
+                            .collect();
+                        if !connected.is_empty() {
+                            spans.push(Span::styled(
+                                connected.join(", "),
+                                Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+                            ));
+                        } else {
+                            spans.push(Span::styled(
+                                "no tools",
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        for (name, reason) in &mcp.failed_servers {
+                            spans.push(Span::styled(
+                                format!("  ⚠ {}: {}", name, reason),
+                                Style::default().fg(Color::Red),
+                            ));
+                        }
+                        spans.push(Span::raw(" "));
+                        Line::from(spans)
+                    },
+                };
+                cache.mcp_bottom = Some(line);
+                cache.mcp_status_key = mcp_key;
+            }
+            cache.mcp_bottom.clone().unwrap_or_default()
+        });
 
         let history_block = Block::default()
             .title(title_line)
@@ -780,7 +810,7 @@ impl UI {
         let inner_w = dialog_width.saturating_sub(2) as usize;
         // Estimate wrapped line count, adding 50% headroom for word-break overheads.
         let q_chars = state.question.chars().count();
-        let q_lines_est = if inner_w == 0 { 1 } else { ((q_chars + inner_w - 1) / inner_w).max(1) };
+        let q_lines_est = if inner_w == 0 { 1 } else { q_chars.div_ceil(inner_w).max(1) };
         let q_lines = ((q_lines_est * 3) / 2).max(1) as u16;
         // 2 borders + q_lines + 1 blank + options + 1 blank + 1 hint.
         let dialog_height = (2 + q_lines + 1 + n_opts + 1 + 1).min(area.height.saturating_sub(2));
