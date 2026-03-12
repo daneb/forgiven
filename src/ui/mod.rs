@@ -9,7 +9,8 @@ use ratatui::{
 use std::path::PathBuf;
 
 use crate::agent::{
-    split_thinking, AgentPanel, AgentTask, AskUserState, ContentSegment, Role, SlashMenuState,
+    split_thinking, AgentPanel, AgentTask, AskUserState, AtPickerState, ContentSegment, Role,
+    SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
 use crate::editor::DiffLine;
@@ -421,9 +422,10 @@ impl UI {
             .sum();
         // At least 1 text line; at most 10 text lines to keep history visible.
         let input_text_lines = total_wrapped.clamp(1, 10) as u16;
-        // Each pasted block adds one summary line to the input box.
+        // Each pasted block adds one summary line; each file block adds one badge line.
         let paste_summary_lines = panel.pasted_blocks.len() as u16;
-        let input_height = input_text_lines + paste_summary_lines + 2; // +2 for top/bottom borders
+        let file_summary_lines = panel.file_blocks.len() as u16;
+        let input_height = input_text_lines + paste_summary_lines + file_summary_lines + 2; // +2 borders
 
         // Task strip height: 0 when empty, otherwise tasks + 2 border rows (capped at 8).
         let task_strip_height =
@@ -644,12 +646,14 @@ impl UI {
         // ── Input box ─────────────────────────────────────────────────────────
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+T=model, Tab=back)".to_string()
+            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+P=attach file, Ctrl+T=model)"
+                .to_string()
         } else if panel.has_code_to_apply()
             && panel.input.is_empty()
             && panel.pasted_blocks.is_empty()
+            && panel.file_blocks.is_empty()
         {
-            " Message Copilot… | [a] diff+apply  Ctrl+T=model ".to_string()
+            " Message Copilot… | [a] diff+apply  Ctrl+P=attach  Ctrl+T=model ".to_string()
         } else {
             " Message Copilot… (Ctrl+T=model) ".to_string()
         };
@@ -657,16 +661,27 @@ impl UI {
         let input_block =
             Block::default().title(hint).borders(Borders::ALL).border_style(border_style);
 
-        // Build input content: one summary line per pasted block, then the typed input.
-        let paste_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
+        // Build input content: file block badges first (green), then pasted block
+        // badges (cyan), then the typed text.
+        let file_style = Style::default().fg(Color::LightGreen).add_modifier(Modifier::DIM);
         let mut input_lines: Vec<Line> = panel
-            .pasted_blocks
+            .file_blocks
             .iter()
-            .map(|(_, n)| {
-                let label = format!("⎘  Pasted {} line{}", n, if *n == 1 { "" } else { "s" });
-                Line::from(Span::styled(label, paste_style))
+            .map(|(name, _, line_count)| {
+                let label = format!(
+                    "  {} ({} line{})",
+                    name,
+                    line_count,
+                    if *line_count == 1 { "" } else { "s" }
+                );
+                Line::from(Span::styled(label, file_style))
             })
             .collect();
+        let paste_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
+        input_lines.extend(panel.pasted_blocks.iter().map(|(_, n)| {
+            let label = format!("⎘  Pasted {} line{}", n, if *n == 1 { "" } else { "s" });
+            Line::from(Span::styled(label, paste_style))
+        }));
         let typed = if focused { format!("{}_", panel.input) } else { panel.input.clone() };
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
@@ -676,6 +691,11 @@ impl UI {
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
         frame.render_widget(input_para, input_area);
+
+        // Ctrl+P file-context picker — rendered just above the input box.
+        if let Some(ref picker) = panel.at_picker {
+            Self::render_at_picker(frame, picker, input_area);
+        }
 
         // Slash-command autocomplete dropdown — rendered just above the input box.
         if let Some(ref menu) = panel.slash_menu {
@@ -749,6 +769,122 @@ impl UI {
         };
 
         frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    }
+
+    /// Render the Ctrl+P file-context picker overlay above the agent input box.
+    fn render_at_picker(frame: &mut Frame, picker: &AtPickerState, input_area: Rect) {
+        if input_area.y == 0 {
+            return; // No vertical space above the input box.
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let n_results = picker.results.len().min(15) as u16;
+
+        // Height: 1 query line + results + 1 hint line + 2 borders.
+        // Cannot exceed the space available above the input box.
+        let popup_height = (1_u16 + n_results + 1 + 2).min(input_area.y);
+        if popup_height < 3 {
+            return;
+        }
+
+        let popup_width = input_area.width;
+        let x = input_area.x;
+        let y = input_area.y.saturating_sub(popup_height);
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .title(" Attach file  (↑/↓ navigate · Enter attach · Esc cancel) ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightGreen));
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        if inner.height == 0 {
+            return;
+        }
+
+        // Split: query line (1 row) + rest for results.
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        let query_area = layout[0];
+        let results_area = layout[1];
+
+        // Query line with cursor underscore.
+        let query_display = format!("> {}_", picker.query);
+        frame.render_widget(
+            Paragraph::new(Span::styled(query_display, Style::default().fg(Color::White))),
+            query_area,
+        );
+
+        if results_area.height == 0 {
+            return;
+        }
+
+        // Results — fuzzy highlighted (same logic as render_file_picker).
+        let mut lines: Vec<Line> = picker
+            .results
+            .iter()
+            .enumerate()
+            .take(15)
+            .map(|(i, (path, match_indices))| {
+                let display = path.strip_prefix(&cwd).unwrap_or(path).to_string_lossy().to_string();
+                let is_selected = i == picker.selected;
+                let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
+                let prefix = if is_selected { "► " } else { "  " };
+
+                let mut spans = vec![Span::styled(
+                    prefix,
+                    Style::default().bg(bg).fg(if is_selected {
+                        Color::White
+                    } else {
+                        Color::DarkGray
+                    }),
+                )];
+
+                // Build multi-span line: group consecutive chars that share the same
+                // match/non-match style into a single Span rather than creating one Span
+                // per character.  binary_search() replaces the O(N) Vec::contains() call;
+                // match_indices is sorted because fuzzy_score() scans left-to-right.
+                let chars: Vec<char> = display.chars().collect();
+                let mut seg = String::new();
+                let mut seg_is_match: Option<bool> = None;
+                for (ci, &ch) in chars.iter().enumerate() {
+                    let is_match = match_indices.binary_search(&ci).is_ok();
+                    if seg_is_match == Some(!is_match) && !seg.is_empty() {
+                        let style = if seg_is_match == Some(true) {
+                            Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().bg(bg).fg(Color::White)
+                        };
+                        spans.push(Span::styled(std::mem::take(&mut seg), style));
+                    }
+                    seg.push(ch);
+                    seg_is_match = Some(is_match);
+                }
+                if !seg.is_empty() {
+                    let style = if seg_is_match == Some(true) {
+                        Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().bg(bg).fg(Color::White)
+                    };
+                    spans.push(Span::styled(seg, style));
+                }
+                Line::from(spans)
+            })
+            .collect();
+
+        // Footer hint.
+        lines.push(Line::from(Span::styled(
+            "  type to filter",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let scroll = (picker.selected as u16).saturating_sub(results_area.height.saturating_sub(2));
+        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), results_area);
     }
 
     /// Render the awaiting-continuation dialog at the bottom of the agent panel.
@@ -983,14 +1119,17 @@ impl UI {
             let viewport_height = area.height as usize;
             let viewport_width = area.width as usize;
 
-            // Calculate visible line range
+            // `lines` is a viewport-clipped slice: element 0 corresponds to `scroll_row`.
+            // Only as many entries as are visible were cloned — see editor/mod.rs buffer_data
+            // builder.  Use relative indexing (row - start_line) to address into the slice;
+            // `row` itself stays absolute so diagnostic/selection comparisons stay correct.
             let start_line = *scroll_row;
-            let end_line = (start_line + viewport_height).min(lines.len());
+            let end_line = start_line + lines.len().min(viewport_height);
 
             // Build visible lines
             let mut visible_lines = Vec::new();
             for row in start_line..end_line {
-                if let Some(line_text) = lines.get(row) {
+                if let Some(line_text) = lines.get(row - start_line) {
                     // Check if this line has any diagnostics
                     let has_diagnostic =
                         diagnostics.iter().any(|d| d.range.start.line as usize == row);
@@ -1553,16 +1692,17 @@ impl UI {
                         Color::Reset
                     }),
                 )];
+                // Group consecutive chars with the same match/non-match style.
+                // binary_search() replaces the O(N) Vec::contains() calls;
+                // match_indices is sorted because fuzzy_score() scans left-to-right.
                 let chars: Vec<char> = display.chars().collect();
-                let mut ci = 0;
                 let mut seg = String::new();
+                let mut seg_is_match: Option<bool> = None;
                 for (char_idx, &ch) in chars.iter().enumerate() {
-                    let is_match = match_indices.contains(&char_idx);
-                    let was_match = char_idx > 0 && match_indices.contains(&(char_idx - 1));
-                    if is_match != was_match && !seg.is_empty() {
-                        // Flush the segment with previous style
-                        let prev_is_match = !is_match;
-                        let style = if prev_is_match {
+                    let is_match = match_indices.binary_search(&char_idx).is_ok();
+                    if seg_is_match == Some(!is_match) && !seg.is_empty() {
+                        // Flush the segment with the previous style.
+                        let style = if seg_is_match == Some(true) {
                             Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
                         } else if is_selected {
                             Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)
@@ -1572,12 +1712,11 @@ impl UI {
                         spans.push(Span::styled(std::mem::take(&mut seg), style));
                     }
                     seg.push(ch);
-                    ci = char_idx;
+                    seg_is_match = Some(is_match);
                 }
-                // Flush the last segment
+                // Flush the last segment.
                 if !seg.is_empty() {
-                    let last_is_match = match_indices.contains(&ci);
-                    let style = if last_is_match {
+                    let style = if seg_is_match == Some(true) {
                         Style::default().bg(bg).fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else if is_selected {
                         Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)

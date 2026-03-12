@@ -72,6 +72,14 @@ pub struct LspServerConfig {
     /// Optional arguments passed to the executable.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional environment variables injected into the server process.
+    ///
+    /// Values prefixed with `$` are resolved from the host environment at
+    /// startup (e.g. `RUSTUP_TOOLCHAIN = "$RUSTUP_TOOLCHAIN"`).
+    /// Useful for disambiguating toolchains when multiple Rust installations
+    /// coexist (Homebrew + rustup) by setting `RUSTUP_TOOLCHAIN = "stable"`.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
     /// Optional initialization options forwarded verbatim to the LSP server's
     /// `initialize` request. Merged with forgiven's built-in defaults; user
     /// values take precedence.

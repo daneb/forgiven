@@ -49,6 +49,10 @@ pub struct DiagnosticInfo {
 pub struct LspClient {
     /// The language server process
     process: Option<Child>,
+    /// PID of the child, kept separately so we can kill the whole process
+    /// group (child + any grandchildren like rust-analyzer-proc-macro-srv)
+    /// even after `process` has been taken in shutdown().
+    child_pid: Option<u32>,
 
     /// Send messages to the LSP server (via background writer thread)
     writer_tx: std_mpsc::Sender<Message>,
@@ -79,18 +83,27 @@ impl LspClient {
         args: &[&str],
         workspace_root: PathBuf,
         notification_tx: mpsc::UnboundedSender<LspNotificationMsg>,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Self> {
         info!("Spawning LSP server: {} {:?}", command, args);
 
         // Ensure common tool directories are on PATH so language servers installed
         // via rustup, npm, pip etc. can be found even when launched from a minimal env.
+        //
+        // ORDERING MATTERS: rustup/cargo dirs must come BEFORE Homebrew so that
+        // `rustc`, `rust-analyzer` etc. resolve to the rustup-managed binaries.
+        // We always strip-and-prepend these preferred dirs even if they're already
+        // present in PATH, to guarantee correct precedence regardless of how the
+        // user's shell is configured.
         let path_env = std::env::var("PATH").unwrap_or_default();
         let home = std::env::var("HOME").unwrap_or_default();
+        // Preferred dirs — prepended unconditionally (rustup must beat Homebrew).
+        let preferred_dirs: Vec<String> =
+            vec![format!("{}/.cargo/bin", home), format!("{}/.local/bin", home)];
+        // Fallback dirs — only added if not already present.
         let mut extra_dirs: Vec<String> = vec![
-            format!("{}/.cargo/bin", home),
-            format!("{}/.local/bin", home),
             "/usr/local/bin".to_string(),
-            // Homebrew on Apple Silicon and Intel
+            // Homebrew on Apple Silicon and Intel — intentionally after rustup
             "/opt/homebrew/bin".to_string(),
             "/opt/homebrew/opt/node/bin".to_string(),
             "/usr/local/opt/node/bin".to_string(),
@@ -116,27 +129,55 @@ impl LspClient {
             }
         }
 
-        // Collect the extra dirs that aren't already present, then append the
-        // existing PATH — done in two steps to avoid a borrow/move conflict on
-        // `path_env` within a single iterator chain.
-        let mut path_parts: Vec<String> = extra_dirs
-            .iter()
-            .filter(|d| !d.is_empty() && !path_env.contains(d.as_str()))
-            .cloned()
-            .collect();
-        path_parts.push(path_env);
+        // Build the final PATH:
+        //   1. preferred_dirs  (always prepended — rustup beats Homebrew)
+        //   2. extra fallback dirs not yet in PATH
+        //   3. original PATH
+        // Strip preferred dirs from the original PATH first so they don't appear twice.
+        let stripped_path: String = path_env
+            .split(':')
+            .filter(|seg| !preferred_dirs.iter().any(|p| p == seg))
+            .collect::<Vec<_>>()
+            .join(":");
+        let mut path_parts: Vec<String> = preferred_dirs;
+        for d in &extra_dirs {
+            if !d.is_empty() && !stripped_path.contains(d.as_str()) {
+                path_parts.push(d.clone());
+            }
+        }
+        path_parts.push(stripped_path);
         let augmented_path = path_parts.join(":");
 
-        let mut process = Command::new(command)
-            .args(args)
+        // Resolve user-supplied env vars (strip leading `$` and look up from host env).
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .env("PATH", &augmented_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped()) // capture so we can log it (null would block the child)
-            .spawn()
-            .with_context(|| {
-                format!("Failed to spawn LSP server '{}' (PATH={})", command, augmented_path)
-            })?;
+            .stderr(Stdio::piped()); // capture so we can log it (null would block the child)
+        for (key, val) in extra_env {
+            let resolved = if let Some(var_name) = val.strip_prefix('$') {
+                std::env::var(var_name).unwrap_or_else(|_| {
+                    warn!("LSP env var ${} not set, leaving empty", var_name);
+                    String::new()
+                })
+            } else {
+                val.clone()
+            };
+            cmd.env(key, resolved);
+        }
+        // Put the child in its own process group so that shutdown() can kill
+        // the entire group (including grandchildren like rust-analyzer-proc-macro-srv)
+        // with a single signal, preventing process leaks across editor restarts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut process = cmd.spawn().with_context(|| {
+            format!("Failed to spawn LSP server '{}' (PATH={})", command, augmented_path)
+        })?;
+        let child_pid = process.id();
 
         let child_stdin =
             process.stdin.take().ok_or_else(|| anyhow::anyhow!("Failed to get child stdin"))?;
@@ -221,6 +262,7 @@ impl LspClient {
 
         Ok(Self {
             process: Some(process),
+            child_pid: Some(child_pid),
             writer_tx,
             reader_rx,
             next_request_id: 1,
@@ -710,6 +752,16 @@ impl LspClient {
             // Do NOT wait() here — we might be called from Drop in an async context.
             // The OS will reap the process eventually.
         }
+
+        // Kill the entire process group (child + grandchildren like proc-macro-srv).
+        // We do this AFTER killing the direct child so the group kill is a belt-and-
+        // suspenders backstop rather than the primary signal.
+        // process_group(0) on spawn ensured PGID == child PID, so `-pid` targets
+        // the whole group without needing libc or unsafe code.
+        #[cfg(unix)]
+        if let Some(pid) = self.child_pid.take() {
+            let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).status();
+        }
     }
 }
 
@@ -869,6 +921,65 @@ impl Default for LspManager {
 // Parallel startup helper
 // =============================================================================
 
+/// Return only the LSP server configs that are relevant for `workspace_root`.
+///
+/// For well-known languages we require a language-specific indicator file to
+/// exist in the workspace root before attempting to spawn the server.  This
+/// prevents slow timeout-based failures (e.g. `rust-analyzer` on a TypeScript
+/// project) from blocking editor startup.
+///
+/// * `copilot` is always included — it is a cross-language completion engine.
+/// * Languages not in the known list are always included (opt-out rather than
+///   opt-in, so a user-configured server is never silently dropped).
+pub fn filter_servers_for_workspace(
+    servers: &[crate::config::LspServerConfig],
+    workspace_root: &std::path::Path,
+) -> Vec<crate::config::LspServerConfig> {
+    servers.iter().filter(|s| server_relevant_for_workspace(s, workspace_root)).cloned().collect()
+}
+
+fn server_relevant_for_workspace(
+    server: &crate::config::LspServerConfig,
+    workspace_root: &std::path::Path,
+) -> bool {
+    // Copilot is a cross-language completion engine — always start it.
+    if server.language == "copilot" {
+        return true;
+    }
+
+    // For well-known languages, require an indicator file in the workspace root.
+    let indicators: &[&str] = match server.language.as_str() {
+        "rust" => &["Cargo.toml"],
+        "python" => &["pyproject.toml", "setup.py", "requirements.txt"],
+        "typescript" | "javascript" => &["tsconfig.json", "package.json"],
+        "go" => &["go.mod"],
+        "c" | "cpp" | "c++" => &["CMakeLists.txt", "compile_commands.json"],
+        "java" => &["pom.xml", "build.gradle", "build.gradle.kts"],
+        "ruby" => &["Gemfile"],
+        "php" => &["composer.json"],
+        // C# uses *.csproj — handled separately below.
+        "csharp" => {
+            return workspace_root
+                .read_dir()
+                .ok()
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| e.path().extension().map(|ext| ext == "csproj").unwrap_or(false))
+                })
+                .unwrap_or(false);
+        },
+        // Unknown language — don't block it.
+        _ => return true,
+    };
+
+    let found = indicators.iter().any(|name| workspace_root.join(name).exists());
+    if !found {
+        info!("LSP '{}': no indicator file found in workspace, skipping", server.language);
+    }
+    found
+}
+
 /// Spawn and initialize all LSP servers concurrently.
 ///
 /// Returns one `(language, Result<LspClient>)` per configured server in the
@@ -887,6 +998,7 @@ pub async fn init_servers_parallel(
         let language = server.language.clone();
         let command = server.command.clone();
         let args: Vec<String> = server.args.clone();
+        let env = server.env.clone();
         let user_init_options = server.initialization_options.clone();
         let root = workspace_root.clone();
         let tx = notification_tx.clone();
@@ -894,7 +1006,7 @@ pub async fn init_servers_parallel(
         join_set.spawn(async move {
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let result = async {
-                let mut client = LspClient::spawn(&command, &args_ref, root, tx)?;
+                let mut client = LspClient::spawn(&command, &args_ref, root, tx, &env)?;
 
                 // Build built-in defaults for servers that need special initialization.
                 let builtin: Option<serde_json::Value> = if language == "copilot" {

@@ -141,6 +141,23 @@ pub struct SlashMenuState {
     pub selected: usize,
 }
 
+/// Maximum number of lines included from a file attached via the Ctrl+P picker.
+/// Files exceeding this limit are truncated and a warning is appended.
+pub const AT_PICKER_MAX_LINES: usize = 500;
+
+/// Transient state for the Ctrl+P file-context picker overlay in the agent panel.
+/// `None` when the picker is closed; `Some` while it is open.
+#[derive(Debug, Clone)]
+pub struct AtPickerState {
+    /// Search query as the user types.
+    pub query: String,
+    /// Fuzzy-filtered results: (absolute path, matched char indices for highlighting).
+    /// Recomputed on the editor side each time `query` changes.
+    pub results: Vec<(PathBuf, Vec<usize>)>,
+    /// Index of the currently highlighted row.
+    pub selected: usize,
+}
+
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
@@ -192,6 +209,13 @@ pub struct AgentPanel {
     pub asking_user: Option<AskUserState>,
     /// Slash-command autocomplete dropdown state. Some while the user is typing a `/` command.
     pub slash_menu: Option<SlashMenuState>,
+    /// Files attached via Ctrl+P picker: (display_name, content, line_count).
+    /// display_name is the cwd-relative path shown as a badge.
+    /// content is the (possibly truncated) file text injected at submit time.
+    /// Cleared by `submit()` via `std::mem::take`.
+    pub file_blocks: Vec<(String, String, usize)>,
+    /// Ctrl+P file-context picker state. `Some` while the overlay is open.
+    pub at_picker: Option<AtPickerState>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -340,6 +364,8 @@ impl AgentPanel {
             question_tx: None,
             asking_user: None,
             slash_menu: None,
+            file_blocks: Vec::new(),
+            at_picker: None,
         }
     }
 
@@ -554,20 +580,32 @@ impl AgentPanel {
         warning_threshold: usize,
         preferred_model: &str,
     ) -> Result<()> {
-        if self.input.trim().is_empty() && self.pasted_blocks.is_empty() {
+        if self.input.trim().is_empty()
+            && self.pasted_blocks.is_empty()
+            && self.file_blocks.is_empty()
+        {
             return Ok(());
         }
 
         let typed_text = std::mem::take(&mut self.input);
         let pasted = std::mem::take(&mut self.pasted_blocks);
-        let user_text = if pasted.is_empty() {
+        let files = std::mem::take(&mut self.file_blocks);
+
+        // Assemble user text: file blocks first (structured context), then pasted
+        // blocks (ad-hoc snippets), then typed input.  Each section separated by \n\n.
+        let mut parts: Vec<String> = Vec::new();
+        for (name, content, _) in &files {
+            parts.push(format!("File: {name}\n\n```\n{content}\n```"));
+        }
+        for (text, _) in &pasted {
+            parts.push(text.clone());
+        }
+        let user_text = if parts.is_empty() {
             typed_text
         } else {
-            let mut combined =
-                pasted.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n\n");
+            let mut combined = parts.join("\n\n");
             if !typed_text.trim().is_empty() {
-                combined.push('\n');
-                combined.push('\n');
+                combined.push_str("\n\n");
                 combined.push_str(&typed_text);
             }
             combined

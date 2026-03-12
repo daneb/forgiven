@@ -66,6 +66,7 @@ that motivated it, what was decided, and the consequences.
 | [0056](0056-spec-framework-integration.md) | Pluggable Prompt-Framework Integration (spec-kit) | Accepted |
 | [0057](0057-ask-user-tool.md) | Agent `ask_user` Tool | Accepted |
 | [0058](0058-agent-panel-render-performance.md) | Agent Panel Rendering Performance | Accepted |
+| [0059](0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) | Accepted |
 
 ## What is an ADR?
 

@@ -457,8 +457,9 @@ impl Editor {
         let mcp_servers = self.config.mcp.servers.clone();
         let notif_tx = self.lsp_manager.notification_tx();
 
-        // ── LSP — await before opening the editor ─────────────────────────────
-        tracing::info!("Starting {} LSP server(s)", lsp_servers.len());
+        // ── LSP — filter to workspace-relevant servers, then await ────────────
+        let lsp_servers = crate::lsp::filter_servers_for_workspace(&lsp_servers, &workspace_root);
+        tracing::info!("Starting {} LSP server(s) for this workspace", lsp_servers.len());
         let lsp_results =
             crate::lsp::init_servers_parallel(&lsp_servers, workspace_root, notif_tx).await;
 
@@ -899,15 +900,19 @@ impl Editor {
             buf.scroll_to_cursor(viewport_height, viewport_width);
         }
 
-        // Get buffer data before drawing to avoid borrow issues
+        // Get buffer data before drawing to avoid borrow issues.
+        // Only clone the lines that are actually visible in the viewport — for a
+        // 10 000-line file this reduces the per-frame allocation from O(N_total)
+        // to O(viewport_height) (typically ~50 lines).
         let buffer_data = self.current_buffer().map(|buf| {
+            let vis_end = (buf.scroll_row + viewport_height).min(buf.lines().len());
             (
                 buf.name.clone(),
                 buf.is_modified,
                 buf.cursor.clone(),
                 buf.scroll_row,
                 buf.scroll_col,
-                buf.lines().to_vec(),
+                buf.lines()[buf.scroll_row..vis_end].to_vec(),
                 buf.selection.clone(),
             )
         });
@@ -1014,15 +1019,18 @@ impl Editor {
         };
 
         // ── Split pane data ────────────────────────────────────────────────────
+        // Same viewport-clipped approach as the primary buffer: only the visible
+        // rows are cloned.
         let split_buffer_data = self.split_other_idx.and_then(|idx| {
             self.buffers.get(idx).map(|buf| {
+                let vis_end = (buf.scroll_row + viewport_height).min(buf.lines().len());
                 (
                     buf.name.clone(),
                     buf.is_modified,
                     buf.cursor.clone(),
                     buf.scroll_row,
                     buf.scroll_col,
-                    buf.lines().to_vec(),
+                    buf.lines()[buf.scroll_row..vis_end].to_vec(),
                     buf.selection.clone(),
                 )
             })
@@ -2227,6 +2235,11 @@ impl Editor {
             return Ok(());
         }
 
+        // Ctrl+P file-context picker: intercept all keys while the overlay is open.
+        if self.agent_panel.at_picker.is_some() {
+            return self.handle_at_picker_key(key);
+        }
+
         // Slash-command autocomplete: intercept navigation keys when the menu is visible.
         if self.agent_panel.slash_menu.is_some() {
             match key.code {
@@ -2317,6 +2330,10 @@ impl Editor {
             // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
             // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
             // On first press, fetches the live model list from the Copilot API.
+            // Ctrl+P — open the file-context picker (attach a file to agent message).
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_at_picker();
+            },
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Eagerly load models if not yet fetched (brief one-time network call).
                 let was_empty = self.agent_panel.available_models.is_empty();
@@ -3256,6 +3273,155 @@ impl Editor {
                 self.scan_directory(&path, depth + 1);
             }
         }
+    }
+
+    // ── Ctrl+P agent file-context picker ─────────────────────────────────────
+
+    /// Read a file for use as agent context.
+    ///
+    /// Returns `(display_name, content, line_count)` where `display_name` is the
+    /// cwd-relative path, `content` is the (possibly truncated) file text, and
+    /// `line_count` is the number of lines in the returned content.
+    /// Files exceeding `AT_PICKER_MAX_LINES` are truncated and a notice is appended.
+    fn read_file_for_context(
+        path: &std::path::Path,
+        project_root: &std::path::Path,
+    ) -> std::io::Result<(String, String, usize)> {
+        use crate::agent::AT_PICKER_MAX_LINES;
+
+        let display_name =
+            path.strip_prefix(project_root).unwrap_or(path).to_string_lossy().into_owned();
+
+        let raw = std::fs::read_to_string(path)?;
+        let all_lines: Vec<&str> = raw.lines().collect();
+        let total = all_lines.len();
+
+        let (content, line_count) = if total > AT_PICKER_MAX_LINES {
+            let truncated = all_lines[..AT_PICKER_MAX_LINES].join("\n");
+            let warned =
+                format!("{truncated}\n\n[Truncated: showing {AT_PICKER_MAX_LINES}/{total} lines]");
+            (warned, AT_PICKER_MAX_LINES)
+        } else {
+            (raw, total)
+        };
+
+        Ok((display_name, content, line_count))
+    }
+
+    /// Open the Ctrl+P file-context picker in the agent panel.
+    ///
+    /// Rescans the project files (always fresh) and initialises `at_picker` with
+    /// an unfiltered list of all files.
+    fn open_at_picker(&mut self) {
+        self.scan_files();
+        let results: Vec<(PathBuf, Vec<usize>)> =
+            self.file_all.iter().map(|p| (p.clone(), vec![])).collect();
+        let total = results.len();
+        self.agent_panel.at_picker =
+            Some(crate::agent::AtPickerState { query: String::new(), results, selected: 0 });
+        self.set_status(format!("Attach file ({total} files) — type to filter"));
+    }
+
+    /// Recompute `at_picker.results` from `file_all` using the current query.
+    fn refilter_at_picker(&mut self) {
+        let query = match self.agent_panel.at_picker.as_ref() {
+            Some(p) => p.query.clone(),
+            None => return,
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let results: Vec<(PathBuf, Vec<usize>)> = if query.is_empty() {
+            self.file_all.iter().map(|p| (p.clone(), vec![])).collect()
+        } else {
+            let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self
+                .file_all
+                .iter()
+                .filter_map(|p| {
+                    let display = p.strip_prefix(&cwd).unwrap_or(p).to_string_lossy().to_string();
+                    Self::fuzzy_score(&query, &display).map(|(sc, idxs)| (sc, p.clone(), idxs))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.into_iter().map(|(_, p, idxs)| (p, idxs)).collect()
+        };
+
+        if let Some(ref mut picker) = self.agent_panel.at_picker {
+            let max = results.len().saturating_sub(1);
+            picker.selected = picker.selected.min(max);
+            picker.results = results;
+        }
+    }
+
+    /// Handle a key event while the Ctrl+P file-context picker is open.
+    fn handle_at_picker_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.agent_panel.at_picker = None;
+                self.set_status(String::new());
+            },
+
+            KeyCode::Up | KeyCode::BackTab => {
+                if let Some(ref mut picker) = self.agent_panel.at_picker {
+                    if picker.selected > 0 {
+                        picker.selected -= 1;
+                    }
+                }
+            },
+
+            KeyCode::Down | KeyCode::Tab => {
+                if let Some(ref mut picker) = self.agent_panel.at_picker {
+                    let max = picker.results.len().saturating_sub(1);
+                    if picker.selected < max {
+                        picker.selected += 1;
+                    }
+                }
+            },
+
+            KeyCode::Enter => {
+                // Read the selected file and push it into file_blocks.
+                let path_opt = self
+                    .agent_panel
+                    .at_picker
+                    .as_ref()
+                    .and_then(|p| p.results.get(p.selected))
+                    .map(|(path, _)| path.clone());
+
+                if let Some(path) = path_opt {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    match Self::read_file_for_context(&path, &cwd) {
+                        Ok((display_name, content, line_count)) => {
+                            let msg = format!(
+                                "Attached: {display_name} ({line_count} line{})",
+                                if line_count == 1 { "" } else { "s" }
+                            );
+                            self.agent_panel.file_blocks.push((display_name, content, line_count));
+                            self.set_status(msg);
+                        },
+                        Err(e) => {
+                            self.set_status(format!("Cannot read file: {e}"));
+                        },
+                    }
+                }
+                self.agent_panel.at_picker = None;
+            },
+
+            KeyCode::Backspace => {
+                if let Some(ref mut picker) = self.agent_panel.at_picker {
+                    picker.query.pop();
+                }
+                self.refilter_at_picker();
+            },
+
+            KeyCode::Char(ch) => {
+                if let Some(ref mut picker) = self.agent_panel.at_picker {
+                    picker.query.push(ch);
+                }
+                self.refilter_at_picker();
+            },
+
+            _ => {},
+        }
+        Ok(())
     }
 
     /// Handle keys in Insert mode
