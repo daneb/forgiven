@@ -189,6 +189,11 @@ pub struct Editor {
     /// Parent directory in which the new folder will be created.
     new_folder_parent: Option<std::path::PathBuf>,
 
+    // ── Explorer file-info overlay ────────────────────────────────────────────
+    /// When `true` a file-info popup is shown for the currently selected entry.
+    /// Toggled by `i` in Mode::Explorer; cleared when focus leaves the explorer.
+    show_file_info: bool,
+
     // ── Apply-diff overlay (Mode::ApplyDiff) ──────────────────────────────────
     apply_diff_path: Option<std::path::PathBuf>,
     apply_diff_content: Option<String>,
@@ -299,6 +304,7 @@ impl Editor {
             delete_confirm_path: None,
             new_folder_buffer: String::new(),
             new_folder_parent: None,
+            show_file_info: false,
             apply_diff_path: None,
             apply_diff_content: None,
             apply_diff_lines: Vec::new(),
@@ -1160,6 +1166,42 @@ impl Editor {
             None
         };
 
+        // File-info popup: stat the selected explorer entry once per frame while active.
+        // `fs::metadata` on a local filesystem is effectively instantaneous (~1 µs).
+        let file_info_data: Option<crate::ui::FileInfoData> = if self.show_file_info {
+            self.file_explorer.selected_path().and_then(|path| {
+                std::fs::metadata(&path).ok().map(|meta| {
+                    #[cfg(unix)]
+                    let permissions = {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mode = meta.permissions().mode();
+                        let bits: &[(u32, char)] = &[
+                            (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
+                            (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
+                            (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+                        ];
+                        Some(
+                            bits.iter()
+                                .map(|(mask, ch)| if mode & mask != 0 { *ch } else { '-' })
+                                .collect::<String>(),
+                        )
+                    };
+                    #[cfg(not(unix))]
+                    let permissions: Option<String> = None;
+                    crate::ui::FileInfoData {
+                        is_dir: meta.is_dir(),
+                        size_bytes: if meta.is_file() { Some(meta.len()) } else { None },
+                        modified: meta.modified().ok(),
+                        created: meta.created().ok(),
+                        permissions,
+                        path,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         self.terminal.draw(|frame| {
             UI::render(
                 frame,
@@ -1189,6 +1231,7 @@ impl Editor {
                 release_notes_view.as_ref(),
                 diag_overlay.as_ref(),
                 self.startup_elapsed,
+                file_info_data.as_ref(),
             );
         })?;
 
@@ -1346,6 +1389,9 @@ impl Editor {
             | Action::DeleteLine
             | Action::DeleteToLineEnd
             | Action::DeleteWord
+            | Action::DeleteToChar { .. }
+            | Action::YankToChar { .. }
+            | Action::ChangeToChar { .. }
             | Action::DeleteSelection
             | Action::ChangeLine
             | Action::ChangeWord
@@ -1833,6 +1879,58 @@ impl Editor {
                     self.clipboard = Some((text, ClipboardType::Charwise));
                 }
                 self.notify_lsp_change();
+            },
+            Action::DeleteToChar { ch, inclusive } => {
+                let deleted = self.current_buffer_mut().and_then(|buf| {
+                    let target = buf.find_char_forward(ch)?;
+                    let end_col = if inclusive { target + 1 } else { target };
+                    Some(buf.delete_to_col(end_col))
+                });
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                }
+                self.notify_lsp_change();
+            },
+            Action::YankToChar { ch, inclusive } => {
+                let yanked = self.current_buffer().and_then(|buf| {
+                    let target = buf.find_char_forward(ch)?;
+                    let end_col = if inclusive { target + 1 } else { target };
+                    Some(buf.yank_to_col(end_col))
+                });
+                if let Some(text) = yanked {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                }
+            },
+            Action::ChangeToChar { ch, inclusive } => {
+                let deleted = self.current_buffer_mut().and_then(|buf| {
+                    let target = buf.find_char_forward(ch)?;
+                    let end_col = if inclusive { target + 1 } else { target };
+                    Some(buf.delete_to_col(end_col))
+                });
+                if let Some(text) = deleted {
+                    self.sync_system_clipboard(&text);
+                    self.clipboard = Some((text, ClipboardType::Charwise));
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Insert;
+            },
+            Action::FindCharForward { ch, inclusive } => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    if let Some(target) = buf.find_char_forward(ch) {
+                        let col = if inclusive { target } else { target.saturating_sub(1) };
+                        buf.move_to_col(col);
+                    }
+                }
+            },
+            Action::FindCharBackward { ch, inclusive } => {
+                if let Some(buf) = self.current_buffer_mut() {
+                    if let Some(target) = buf.find_char_backward(ch) {
+                        let col = if inclusive { target } else { target + 1 };
+                        buf.move_to_col(col);
+                    }
+                }
             },
             Action::YankWord => {
                 let yanked = self.current_buffer().map(|buf| buf.yank_word());
@@ -2531,6 +2629,7 @@ impl Editor {
         match key.code {
             KeyCode::Esc | KeyCode::Tab => {
                 // Blur explorer, return to editor (keep panel visible)
+                self.show_file_info = false;
                 self.file_explorer.blur();
                 self.mode = Mode::Normal;
             },
@@ -2641,6 +2740,12 @@ impl Editor {
                 self.new_folder_buffer.clear();
                 self.file_explorer.blur();
                 self.mode = Mode::NewFolder;
+            },
+            // i — toggle file-info popup for the selected entry.
+            // Navigation (j/k) automatically refreshes the popup by re-computing
+            // FileInfoData from the new cursor position on the next frame.
+            KeyCode::Char('i') => {
+                self.show_file_info = !self.show_file_info;
             },
             _ => {},
         }
@@ -3378,7 +3483,8 @@ impl Editor {
             },
 
             KeyCode::Enter => {
-                // Read the selected file and push it into file_blocks.
+                // Toggle: if already attached remove it, otherwise add it.
+                // Picker stays open so the user can attach/detach multiple files.
                 let path_opt = self
                     .agent_panel
                     .at_picker
@@ -3388,21 +3494,41 @@ impl Editor {
 
                 if let Some(path) = path_opt {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    match Self::read_file_for_context(&path, &cwd) {
-                        Ok((display_name, content, line_count)) => {
-                            let msg = format!(
-                                "Attached: {display_name} ({line_count} line{})",
-                                if line_count == 1 { "" } else { "s" }
-                            );
-                            self.agent_panel.file_blocks.push((display_name, content, line_count));
-                            self.set_status(msg);
-                        },
-                        Err(e) => {
-                            self.set_status(format!("Cannot read file: {e}"));
-                        },
+                    let display_name = path
+                        .strip_prefix(&cwd)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned();
+
+                    if let Some(pos) = self
+                        .agent_panel
+                        .file_blocks
+                        .iter()
+                        .position(|(name, _, _)| name == &display_name)
+                    {
+                        // Already attached — remove it.
+                        self.agent_panel.file_blocks.remove(pos);
+                        self.set_status(format!("Removed: {display_name}"));
+                    } else {
+                        // Not yet attached — read and add it.
+                        match Self::read_file_for_context(&path, &cwd) {
+                            Ok((display_name, content, line_count)) => {
+                                let msg = format!(
+                                    "Attached: {display_name} ({line_count} line{})",
+                                    if line_count == 1 { "" } else { "s" }
+                                );
+                                self.agent_panel
+                                    .file_blocks
+                                    .push((display_name, content, line_count));
+                                self.set_status(msg);
+                            },
+                            Err(e) => {
+                                self.set_status(format!("Cannot read file: {e}"));
+                            },
+                        }
                     }
+                    // Picker stays open; Esc closes it.
                 }
-                self.agent_panel.at_picker = None;
             },
 
             KeyCode::Backspace => {

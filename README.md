@@ -45,6 +45,8 @@ by Emacs / Spacemacs key philosophy and Vim modal editing.
 ### Navigation & editing
 - `h/j/k/l`, arrows, `w/b`, `0/^/$`, `gg/G`
 - `x` delete char, `dd/D/dw` delete line/EOL/word, `cc/cw` change
+- `dt{c}/df{c}` delete till/find char; `yt{c}/yf{c}` yank; `ct{c}/cf{c}` change
+- `f{c}/t{c}` jump to/before char forward; `F{c}/T{c}` jump backward
 - `yy/yw/y$` yank; `p/P` paste; multi-line block yank/paste
 - `u` undo, `Ctrl+R` redo (snapshot-based history)
 - Numeric count prefix: `3dd`, `5j`, etc.
@@ -163,8 +165,13 @@ cargo build --release
 | `gg/G` | File top / bottom |
 | `x` | Delete char at cursor |
 | `dd/D/dw` | Delete line / to EOL / word (into clipboard) |
+| `dt{c}` / `df{c}` | Delete till (exclusive) / find (inclusive) next occurrence of `{c}` |
 | `yy/yw/y$` | Yank line / word / to EOL |
+| `yt{c}` / `yf{c}` | Yank till / find next occurrence of `{c}` |
 | `cc/cw` | Change line / word |
+| `ct{c}` / `cf{c}` | Change till / find next occurrence of `{c}` (delete + Insert) |
+| `f{c}` / `t{c}` | Move cursor to / before next occurrence of `{c}` on line |
+| `F{c}` / `T{c}` | Move cursor to / after previous occurrence of `{c}` on line |
 | `p/P` | Paste after / before cursor |
 | `u/Ctrl+R` | Undo / redo |
 | `v/V` | Visual / Visual-line selection |
@@ -302,7 +309,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0058)
+│   └── adr/                 # Architecture Decision Records (0001 – 0060)
 └── Cargo.toml
 ```
 
@@ -411,6 +418,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0049](docs/adr/0049-diagnostics-overlay.md) | Diagnostics Overlay (`SPC d`) |
 | [0050](docs/adr/0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution |
 | [0051](docs/adr/0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation |
+| [0060](docs/adr/0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) |
 
 ---
 

@@ -58,6 +58,11 @@ pub enum Action {
     DeleteLine,      // dd — delete current line into clipboard
     DeleteToLineEnd, // D  — delete from cursor to EOL
     DeleteWord,      // dw — delete from cursor to end of word
+    DeleteToChar { ch: char, inclusive: bool }, // dt{c}/df{c}
+    YankToChar { ch: char, inclusive: bool },   // yt{c}/yf{c}
+    ChangeToChar { ch: char, inclusive: bool }, // ct{c}/cf{c}
+    FindCharForward { ch: char, inclusive: bool },  // f{c}/t{c}
+    FindCharBackward { ch: char, inclusive: bool }, // F{c}/T{c}
     YankLine,        // yy — yank whole line
     YankWord,        // yw — yank to end of word
     YankToLineEnd,   // y$ — yank to end of line
@@ -152,6 +157,8 @@ pub struct KeyHandler {
     show_which_key: bool,
     /// Pending prefix key for two-key Normal-mode commands (d, g, y, c …)
     pending_key: Option<char>,
+    /// Second pending key for three-key sequences (e.g. `t` in `dt"`)
+    pending_second_key: Option<char>,
     /// Accumulated numeric count prefix (e.g. `3` before `dd` → delete 3 lines).
     pending_count: Option<usize>,
 }
@@ -165,6 +172,7 @@ impl KeyHandler {
             leader_tree,
             show_which_key: false,
             pending_key: None,
+            pending_second_key: None,
             pending_count: None,
         }
     }
@@ -284,6 +292,9 @@ impl KeyHandler {
     pub fn sequence(&self) -> String {
         let count_prefix = self.pending_count.map(|n| n.to_string()).unwrap_or_default();
         if let Some(pk) = self.pending_key {
+            if let Some(sk) = self.pending_second_key {
+                return format!("{}{}{}", count_prefix, pk, sk);
+            }
             return format!("{}{}", count_prefix, pk);
         }
         if self.sequence.is_empty() {
@@ -370,9 +381,33 @@ impl KeyHandler {
             }
         }
 
-        // ── Resolve pending double-key prefixes (dd, gg, yy) ─────────────────
+        // ── Resolve three-key sequences (dt/df + char, yt/yf, ct/cf) ─────────
+        if self.pending_second_key.is_some() {
+            let pk = self.pending_key.take().unwrap_or(' ');
+            let sk = self.pending_second_key.take().unwrap_or(' ');
+            if let KeyCode::Char(ch) = key.code {
+                return match (pk, sk) {
+                    ('d', 't') => Action::DeleteToChar { ch, inclusive: false },
+                    ('d', 'f') => Action::DeleteToChar { ch, inclusive: true },
+                    ('y', 't') => Action::YankToChar { ch, inclusive: false },
+                    ('y', 'f') => Action::YankToChar { ch, inclusive: true },
+                    ('c', 't') => Action::ChangeToChar { ch, inclusive: false },
+                    ('c', 'f') => Action::ChangeToChar { ch, inclusive: true },
+                    _ => Action::Noop,
+                };
+            }
+            return Action::Noop; // non-char key cancels
+        }
+
+        // ── Resolve pending double-key prefixes (dd, gg, yy, ft, …) ──────────
         if let Some(pk) = self.pending_key.take() {
             if let KeyCode::Char(ch) = key.code {
+                // Check if this needs a third key (char argument)
+                if matches!((pk, ch), ('d' | 'y' | 'c', 'f' | 't')) {
+                    self.pending_key = Some(pk);
+                    self.pending_second_key = Some(ch);
+                    return Action::Noop;
+                }
                 return match (pk, ch) {
                     // d — delete into clipboard
                     ('d', 'd') => Action::DeleteLine,
@@ -388,7 +423,12 @@ impl KeyHandler {
                     ('c', 'c') => Action::ChangeLine,
                     ('c', 'w') => Action::ChangeWord,
                     ('c', '$') => Action::DeleteToLineEnd, // same as D, then insert
-                    _ => Action::Noop,                     // unknown combo — discard
+                    // f/t/F/T — find char (standalone)
+                    ('f', _) => Action::FindCharForward { ch, inclusive: true },
+                    ('t', _) => Action::FindCharForward { ch, inclusive: false },
+                    ('F', _) => Action::FindCharBackward { ch, inclusive: true },
+                    ('T', _) => Action::FindCharBackward { ch, inclusive: false },
+                    _ => Action::Noop, // unknown combo — discard
                 };
             }
             // Non-char key after a prefix — cancel
@@ -451,8 +491,15 @@ impl KeyHandler {
             KeyCode::Char('P') => Action::PasteBefore,
 
             // Double-key prefixes: store first key, resolve on next keypress
-            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)
-            KeyCode::Char('d') | KeyCode::Char('g') | KeyCode::Char('y') | KeyCode::Char('c') => {
+            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)  f/t/F/T(char)
+            KeyCode::Char('d')
+            | KeyCode::Char('g')
+            | KeyCode::Char('y')
+            | KeyCode::Char('c')
+            | KeyCode::Char('f')
+            | KeyCode::Char('t')
+            | KeyCode::Char('F')
+            | KeyCode::Char('T') => {
                 if let KeyCode::Char(ch) = key.code {
                     self.pending_key = Some(ch);
                 }

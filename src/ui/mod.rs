@@ -106,6 +106,22 @@ pub struct DiagnosticsData<'a> {
     pub recent_logs: &'a [(String, String)],
 }
 
+/// Data for the file-info popup shown when `i` is pressed in the explorer.
+pub struct FileInfoData {
+    /// Full absolute path of the selected entry.
+    pub path: std::path::PathBuf,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+    /// File size in bytes (None for directories).
+    pub size_bytes: Option<u64>,
+    /// Last-modified time.
+    pub modified: Option<std::time::SystemTime>,
+    /// Creation time (not available on all platforms/filesystems).
+    pub created: Option<std::time::SystemTime>,
+    /// Unix permission string e.g. "rwxr-xr-x". None on non-Unix platforms.
+    pub permissions: Option<String>,
+}
+
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
 // Buffer list tuple: (buffer names with modified flags, selected index)
@@ -166,6 +182,8 @@ impl UI {
         diag_overlay: Option<&DiagnosticsData<'_>>,
         // Time from process start to the editor being ready; displayed on the welcome screen.
         startup_elapsed: Option<std::time::Duration>,
+        // File-info popup data (explorer `i` key). None = hidden.
+        file_info: Option<&FileInfoData>,
     ) {
         let size = frame.area();
 
@@ -389,6 +407,12 @@ impl UI {
         // Render diagnostics overlay if active
         if let Some(diag) = diag_overlay {
             Self::render_diagnostics_overlay(frame, diag, size);
+        }
+
+        // Render file-info popup if active (explorer `i` key)
+        if let Some(info) = file_info {
+            let explorer_right_edge = if explorer_visible { 25u16 } else { 0 };
+            Self::render_file_info_popup(frame, info, size, explorer_right_edge);
         }
     }
 
@@ -694,7 +718,7 @@ impl UI {
 
         // Ctrl+P file-context picker — rendered just above the input box.
         if let Some(ref picker) = panel.at_picker {
-            Self::render_at_picker(frame, picker, input_area);
+            Self::render_at_picker(frame, picker, &panel.file_blocks, input_area);
         }
 
         // Slash-command autocomplete dropdown — rendered just above the input box.
@@ -772,7 +796,15 @@ impl UI {
     }
 
     /// Render the Ctrl+P file-context picker overlay above the agent input box.
-    fn render_at_picker(frame: &mut Frame, picker: &AtPickerState, input_area: Rect) {
+    ///
+    /// `file_blocks` is the list of currently attached files so the picker can
+    /// show a ✓ indicator and let the user toggle files off as well as on.
+    fn render_at_picker(
+        frame: &mut Frame,
+        picker: &AtPickerState,
+        file_blocks: &[(String, String, usize)],
+        input_area: Rect,
+    ) {
         if input_area.y == 0 {
             return; // No vertical space above the input box.
         }
@@ -794,8 +826,16 @@ impl UI {
 
         frame.render_widget(Clear, popup_area);
 
+        let n_attached = file_blocks.len();
+        let attached_label = if n_attached > 0 {
+            format!(" {n_attached} attached ·")
+        } else {
+            String::new()
+        };
         let block = Block::default()
-            .title(" Attach file  (↑/↓ navigate · Enter attach · Esc cancel) ")
+            .title(format!(
+                " Attach file ·{attached_label} ↑/↓ navigate · Enter=toggle · Esc=done "
+            ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::LightGreen));
         let inner = block.inner(popup_area);
@@ -824,7 +864,11 @@ impl UI {
             return;
         }
 
-        // Results — fuzzy highlighted (same logic as render_file_picker).
+        // Results — fuzzy highlighted with attachment indicator prefix.
+        // Prefix layout (3 chars): [✓/ ][►/ ][ ]
+        //   col 0: ✓ (LightGreen) if attached, space otherwise
+        //   col 1: ► (White) if row is selected, space otherwise
+        //   col 2: space separator
         let mut lines: Vec<Line> = picker
             .results
             .iter()
@@ -833,21 +877,21 @@ impl UI {
             .map(|(i, (path, match_indices))| {
                 let display = path.strip_prefix(&cwd).unwrap_or(path).to_string_lossy().to_string();
                 let is_selected = i == picker.selected;
+                let is_attached = file_blocks.iter().any(|(name, _, _)| name == &display);
                 let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
-                let prefix = if is_selected { "► " } else { "  " };
 
-                let mut spans = vec![Span::styled(
-                    prefix,
-                    Style::default().bg(bg).fg(if is_selected {
-                        Color::White
-                    } else {
-                        Color::DarkGray
-                    }),
-                )];
+                let attach_style = Style::default()
+                    .bg(bg)
+                    .fg(if is_attached { Color::LightGreen } else { Color::Reset });
+                let cursor_style = Style::default().bg(bg).fg(Color::White);
 
-                // Build multi-span line: group consecutive chars that share the same
-                // match/non-match style into a single Span rather than creating one Span
-                // per character.  binary_search() replaces the O(N) Vec::contains() call;
+                let mut spans = vec![
+                    Span::styled(if is_attached { "✓" } else { " " }, attach_style),
+                    Span::styled(if is_selected { "► " } else { "  " }, cursor_style),
+                ];
+
+                // Build multi-span filename: group consecutive chars that share the same
+                // match/non-match style.  binary_search() is O(log N) vs O(N) contains();
                 // match_indices is sorted because fuzzy_score() scans left-to-right.
                 let chars: Vec<char> = display.chars().collect();
                 let mut seg = String::new();
@@ -879,7 +923,7 @@ impl UI {
 
         // Footer hint.
         lines.push(Line::from(Span::styled(
-            "  type to filter",
+            "  type to filter  ·  ✓ = already attached",
             Style::default().fg(Color::DarkGray),
         )));
 
@@ -2364,6 +2408,177 @@ impl UI {
             Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
             popup_area,
         );
+    }
+
+    // ── File-info popup helpers ───────────────────────────────────────────────
+
+    /// Format a byte count as a human-readable string with the raw count in parens.
+    fn format_file_size(bytes: u64) -> String {
+        const KB: u64 = 1_024;
+        const MB: u64 = 1_024 * 1_024;
+        const GB: u64 = 1_024 * 1_024 * 1_024;
+        if bytes >= GB {
+            format!("{:.1} GB  ({bytes} bytes)", bytes as f64 / GB as f64)
+        } else if bytes >= MB {
+            format!("{:.1} MB  ({bytes} bytes)", bytes as f64 / MB as f64)
+        } else if bytes >= KB {
+            format!("{:.1} KB  ({bytes} bytes)", bytes as f64 / KB as f64)
+        } else {
+            format!("{bytes} bytes")
+        }
+    }
+
+    /// Format a `SystemTime` as "YYYY-MM-DD  HH:MM" without external dependencies.
+    /// Uses Howard Hinnant's epoch-to-civil-date algorithm.
+    fn format_system_time(t: std::time::SystemTime) -> String {
+        let secs = match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs(),
+            Err(_) => return "(unknown)".to_string(),
+        };
+        let min = (secs / 60) % 60;
+        let hour = (secs / 3_600) % 24;
+        let days = secs / 86_400;
+        // Gregorian calendar decomposition (Hinnant 2013).
+        let z = days as i64 + 719_468;
+        let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+        let doe = (z - era * 146_097) as u64;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if mon <= 2 { y + 1 } else { y };
+        format!("{year:04}-{mon:02}-{d:02}  {hour:02}:{min:02}")
+    }
+
+    /// Render the file-info popup triggered by `i` in Mode::Explorer.
+    ///
+    /// Floats to the right of the explorer panel so the tree stays readable.
+    /// `explorer_right` is the x-coordinate of the first column past the
+    /// explorer's right border (25 when the explorer is visible, 0 otherwise).
+    fn render_file_info_popup(
+        frame: &mut Frame,
+        info: &FileInfoData,
+        area: Rect,
+        explorer_right: u16,
+    ) {
+        let available_w = area.width.saturating_sub(explorer_right);
+        let popup_width = available_w.clamp(30, 58);
+        let inner_w = popup_width.saturating_sub(4) as usize; // 2 borders + 2 padding
+
+        // ── Content rows ──────────────────────────────────────────────────────
+        let name = info
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| info.path.to_string_lossy().to_string());
+
+        let full_path = info.path.to_string_lossy().to_string();
+        // Truncate path from the left so the filename end is always visible.
+        let path_display = if full_path.len() > inner_w {
+            format!("…{}", &full_path[full_path.len().saturating_sub(inner_w - 1)..])
+        } else {
+            full_path
+        };
+
+        let type_label: &str = if info.is_dir {
+            "directory"
+        } else {
+            info.path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| match e.to_ascii_lowercase().as_str() {
+                    "rs" => "Rust source",
+                    "py" => "Python source",
+                    "js" => "JavaScript",
+                    "ts" => "TypeScript",
+                    "html" => "HTML file",
+                    "css" => "CSS file",
+                    "json" => "JSON file",
+                    "toml" => "TOML config",
+                    "yaml" | "yml" => "YAML file",
+                    "md" => "Markdown",
+                    "txt" => "text file",
+                    "sh" | "bash" | "zsh" => "shell script",
+                    "xml" => "XML file",
+                    "csv" => "CSV file",
+                    _ => "file",
+                })
+                .unwrap_or("file")
+        };
+
+        let dim = Style::default().fg(Color::DarkGray);
+        let val = Style::default().fg(Color::White);
+
+        let mut rows: Vec<Line<'static>> = vec![
+            // Full path (Cyan, left-truncated)
+            Line::from(Span::styled(format!(" {path_display}"), Style::default().fg(Color::Cyan))),
+            Line::from(""),
+            // Type row
+            Line::from(vec![
+                Span::styled(" Type       ".to_string(), dim),
+                Span::styled(type_label.to_string(), val),
+            ]),
+        ];
+
+        // Size (files only)
+        if let Some(bytes) = info.size_bytes {
+            rows.push(Line::from(vec![
+                Span::styled(" Size       ".to_string(), dim),
+                Span::styled(Self::format_file_size(bytes), val),
+            ]));
+        }
+
+        // Timestamps
+        if let Some(t) = info.modified {
+            rows.push(Line::from(vec![
+                Span::styled(" Modified   ".to_string(), dim),
+                Span::styled(Self::format_system_time(t), val),
+            ]));
+        }
+        if let Some(t) = info.created {
+            rows.push(Line::from(vec![
+                Span::styled(" Created    ".to_string(), dim),
+                Span::styled(Self::format_system_time(t), val),
+            ]));
+        }
+
+        // Unix permissions (None on Windows)
+        if let Some(ref perms) = info.permissions {
+            rows.push(Line::from(vec![
+                Span::styled(" Perms      ".to_string(), dim),
+                Span::styled(perms.clone(), val),
+            ]));
+        }
+
+        rows.push(Line::from(""));
+        rows.push(Line::from(Span::styled(
+            "  [i] close  ·  navigate to update",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        )));
+
+        let popup_height = (rows.len() as u16 + 2).min(area.height);
+
+        // ── Positioning ───────────────────────────────────────────────────────
+        // Anchor to the right of the explorer; clamp so it never leaves the screen.
+        let x = explorer_right.min(area.width.saturating_sub(popup_width));
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let name_title =
+            if name.len() > inner_w { format!("{}…", &name[..inner_w.saturating_sub(1)]) } else { name };
+        let block = Block::default()
+            .title(Span::styled(
+                format!(" {name_title} "),
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        frame.render_widget(Paragraph::new(rows).block(block), popup_area);
     }
 }
 

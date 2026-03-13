@@ -1495,20 +1495,38 @@ async fn agentic_loop(
             }
 
             let result_summary = {
-                // Skip header lines like "src/foo.rs (42 lines)" or "path:"
-                // and show the first meaningful content line instead.
+                // Prefer "path (N lines)" summary lines (read_file header) over
+                // raw content lines.  Also skip lines that look like code
+                // signatures (end with ':' or contain '(' without ' lines)').
                 let meaningful = result
                     .lines()
                     .find(|l| {
                         let t = l.trim();
-                        !t.is_empty() && !t.ends_with(':') && !t.contains('(')
+                        (!t.is_empty()
+                            && !t.ends_with(':')
+                            && (!t.contains('(') || t.contains(" lines)")))
                             || t.starts_with("error")
                     })
                     .unwrap_or_else(|| result.lines().next().unwrap_or("ok"));
-                if meaningful.len() > 120 {
-                    format!("{}…", &meaningful[..120])
+                // Strip leading whitespace and any "N | " line-number prefix
+                // that read_file injects into numbered content lines.
+                let s = {
+                    let t = meaningful.trim();
+                    if let Some(pos) = t.find(" | ") {
+                        if t[..pos].chars().all(|c| c.is_ascii_digit()) {
+                            t[pos + 3..].trim()
+                        } else {
+                            t
+                        }
+                    } else {
+                        t
+                    }
+                };
+                // Truncate by char count (not bytes) to avoid multibyte panics.
+                if s.chars().count() > 120 {
+                    format!("{}…", s.chars().take(120).collect::<String>())
                 } else {
-                    meaningful.to_string()
+                    s.to_string()
                 }
             };
             let _ = tx.send(StreamEvent::ToolDone { name: call.name.clone(), result_summary });
@@ -1520,8 +1538,11 @@ async fn agentic_loop(
             }));
         }
 
-        // Visual separator between rounds
-        let _ = tx.send(StreamEvent::Token("\n".to_string()));
+        // Paragraph break between the tool-call lines and the next LLM response.
+        // A single \n is only a soft break in CommonMark — the LLM text would
+        // merge into the ⚙ paragraph and render as dim-gray.  Two newlines
+        // create a proper paragraph boundary so the response renders normally.
+        let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
 
         round += 1;
 

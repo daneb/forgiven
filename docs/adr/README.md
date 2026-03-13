@@ -67,6 +67,7 @@ that motivated it, what was decided, and the consequences.
 | [0057](0057-ask-user-tool.md) | Agent `ask_user` Tool | Accepted |
 | [0058](0058-agent-panel-render-performance.md) | Agent Panel Rendering Performance | Accepted |
 | [0059](0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) | Accepted |
+| [0060](0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) | Accepted |
 
 ## What is an ADR?
 

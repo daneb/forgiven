@@ -427,6 +427,53 @@ impl Buffer {
     }
 
     // -------------------------------------------------------------------------
+    // Character-find motions (f/t/F/T and dt/df/yt/yf/ct/cf)
+    // -------------------------------------------------------------------------
+
+    /// Column of the next occurrence of `ch` after the cursor (exclusive start).
+    /// Used by `f{c}` (inclusive=true) and `t{c}` (inclusive=false).
+    pub fn find_char_forward(&self, ch: char) -> Option<usize> {
+        let chars: Vec<char> = self.lines[self.cursor.row].chars().collect();
+        let start = self.cursor.col + 1;
+        chars[start..].iter().position(|&c| c == ch).map(|i| start + i)
+    }
+
+    /// Column of the previous occurrence of `ch` before the cursor.
+    /// Used by `F{c}` (inclusive=true) and `T{c}` (inclusive=false).
+    pub fn find_char_backward(&self, ch: char) -> Option<usize> {
+        let chars: Vec<char> = self.lines[self.cursor.row].chars().collect();
+        chars[..self.cursor.col].iter().rposition(|&c| c == ch)
+    }
+
+    /// Delete from cursor to `end_col` (exclusive) and return the deleted text.
+    pub fn delete_to_col(&mut self, end_col: usize) -> String {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let end = end_col.min(chars.len());
+        let deleted: String = chars[col..end].iter().collect();
+        let new_line: String = chars[..col].iter().chain(&chars[end..]).collect();
+        self.lines[row] = new_line;
+        self.mark_modified();
+        deleted
+    }
+
+    /// Yank (copy without deletion) from cursor to `end_col` (exclusive).
+    pub fn yank_to_col(&self, end_col: usize) -> String {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let end = end_col.min(chars.len());
+        chars[col..end].iter().collect()
+    }
+
+    /// Move cursor to the given column, clamping to line length.
+    pub fn move_to_col(&mut self, col: usize) {
+        self.cursor.col = col;
+        self.clamp_cursor_col();
+    }
+
+    // -------------------------------------------------------------------------
     // Visual selection extract / delete
     // -------------------------------------------------------------------------
 
