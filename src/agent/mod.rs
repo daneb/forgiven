@@ -20,7 +20,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::mcp::McpManager;
@@ -203,6 +203,9 @@ pub struct AgentPanel {
     /// Optional prompt framework (e.g. spec-kit) that intercepts `/command` input
     /// and injects structured prompt templates before submission.
     pub spec_framework: Option<SpecFramework>,
+    /// Oneshot sender that aborts the running agentic loop when dropped or fired.
+    /// `None` when no stream is active.
+    abort_tx: Option<oneshot::Sender<()>>,
     /// Channel to send the user's answer back to the agentic loop when ask_user is active.
     pub question_tx: Option<mpsc::UnboundedSender<String>>,
     /// Set when the agent has asked a question and is waiting for the user to respond.
@@ -361,6 +364,7 @@ impl AgentPanel {
             pasted_blocks: Vec::new(),
             mcp_manager: None,
             spec_framework: None,
+            abort_tx: None,
             question_tx: None,
             asking_user: None,
             slash_menu: None,
@@ -748,6 +752,9 @@ Available tools:\n\
         let (question_tx, question_rx) = mpsc::unbounded_channel::<String>();
         self.question_tx = Some(question_tx);
 
+        let (abort_tx, abort_rx) = oneshot::channel::<()>();
+        self.abort_tx = Some(abort_tx);
+
         let mcp = self.mcp_manager.as_ref().map(Arc::clone);
         tokio::spawn(agentic_loop(
             api_token,
@@ -759,6 +766,7 @@ Available tools:\n\
             warning_threshold,
             cont_rx,
             question_rx,
+            abort_rx,
             mcp,
         ));
         Ok(())
@@ -948,6 +956,36 @@ Available tools:\n\
         }
     }
 
+    /// Abort the running agentic loop immediately.
+    ///
+    /// Drops the oneshot sender — the agentic task receives the cancellation at
+    /// its next `tokio::select!` checkpoint and exits.  Any partial streaming
+    /// reply is committed to history so it isn't lost.
+    pub fn cancel_stream(&mut self) {
+        if self.stream_rx.is_none() {
+            return; // nothing running
+        }
+        // Fire the abort signal.  Dropping the sender is equivalent to sending ().
+        self.abort_tx.take();
+
+        // Commit whatever has been streamed so far so the user can read it.
+        if let Some(text) = self.streaming_reply.take() {
+            if !text.trim().is_empty() {
+                let mut content = text;
+                content.push_str("\n\n*⏹ Stopped*");
+                self.messages.push(ChatMessage { role: Role::Assistant, content });
+            }
+        }
+        // Reset all stream-related state.
+        self.stream_rx = None;
+        self.continuation_tx = None;
+        self.question_tx = None;
+        self.asking_user = None;
+        self.awaiting_continuation = false;
+        self.current_round = 0;
+        self.status = AgentStatus::Idle;
+    }
+
     /// Cancel the ask_user dialog (picks the last option, typically "No"/"Cancel").
     pub fn cancel_user_question(&mut self) {
         if let Some(ref state) = self.asking_user.take() {
@@ -1123,6 +1161,7 @@ async fn agentic_loop(
     warning_threshold: usize,
     mut cont_rx: mpsc::UnboundedReceiver<bool>,
     mut question_rx: mpsc::UnboundedReceiver<String>,
+    mut abort_rx: oneshot::Receiver<()>,
     mcp_manager: Option<Arc<McpManager>>,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
@@ -1169,21 +1208,26 @@ async fn agentic_loop(
             });
         }
 
-        // ── Call the API ──────────────────────────────────────────────────────
-        let response = match start_chat_stream_with_tools(
-            api_token.clone(),
-            messages.clone(),
-            tool_defs.clone(),
-            &model_id,
-            &tx,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("{e}")));
+        // ── Call the API (cancellable) ────────────────────────────────────────
+        let response = tokio::select! {
+            // User pressed Ctrl+C — abort immediately, no error shown.
+            _ = &mut abort_rx => {
+                let _ = tx.send(StreamEvent::Done);
                 return;
-            },
+            }
+            res = start_chat_stream_with_tools(
+                api_token.clone(),
+                messages.clone(),
+                tool_defs.clone(),
+                &model_id,
+                &tx,
+            ) => match res {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                    return;
+                },
+            }
         };
 
         // ── Parse the SSE stream ──────────────────────────────────────────────
@@ -1446,9 +1490,17 @@ async fn agentic_loop(
                     options: options.clone(),
                 });
 
-                let answer =
-                    tokio::time::timeout(tokio::time::Duration::from_secs(300), question_rx.recv())
-                        .await;
+                let answer = tokio::select! {
+                    // Ctrl+C while the dialog is open — abort the whole loop.
+                    _ = &mut abort_rx => {
+                        let _ = tx.send(StreamEvent::Done);
+                        return;
+                    }
+                    res = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(300),
+                        question_rx.recv(),
+                    ) => res,
+                };
 
                 match answer {
                     Ok(Some(ans)) => ans,

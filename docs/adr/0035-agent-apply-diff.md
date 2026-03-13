@@ -6,9 +6,9 @@
 
 ## Context
 
-Pressing `a` in Agent mode previously applied the first code block from the latest
-Copilot reply by inserting it at the cursor position in whatever buffer happened to
-be active. This was broken in two independent ways:
+Pressing `a` in Agent mode (when the input was empty) previously applied the first
+code block from the latest Copilot reply by inserting it at the cursor position in
+whatever buffer happened to be active. This was broken in two independent ways:
 
 1. **Wrong file** — the block landed in the active buffer regardless of which file the
    agent was discussing. If the agent explained changes to `src/foo.rs` but the user
@@ -47,7 +47,7 @@ recent assistant message.
 
 ### Path resolution order (in `handle_agent_mode`)
 
-When the user presses `a`:
+When the user presses `Ctrl+A`:
 
 1. If a path hint was found, it is joined with `cwd` to form an absolute path.
    The current content is read from:
@@ -144,9 +144,23 @@ it a different concept. A dedicated mode avoids coupling the two flows.
 ## Mode graph addition
 
 ```
-Agent    ── a (empty input, code block present) ──► ApplyDiff
+Agent    ── Ctrl+A (code block present) ──► ApplyDiff
 ApplyDiff ── y / Enter ──► Normal  (change applied)
           ── n / Esc   ──► Agent   (discarded)
           ── j / k     ──► (scroll down / up one line)
           ── Ctrl+D/U  ──► (scroll down / up half-page)
 ```
+
+---
+
+## Amendment — 2026-03-13
+
+The trigger key was changed from `a` (bare key, empty input only) to `Ctrl+A`
+(modifier chord, active at any time).
+
+**Reason:** bare single-letter shortcuts that only fire on an empty input box
+intercept the first character of any new message starting with that letter
+(e.g. "add a test", "are you sure"). Moving to `Ctrl+A` eliminates the
+accidental-trigger class of bugs while keeping a single-chord shortcut.
+`Ctrl+Y` (yank full reply) and `Ctrl+K` (copy code block) were migrated for
+the same reason; see the amendment in ADR 0041.

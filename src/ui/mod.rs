@@ -827,11 +827,8 @@ impl UI {
         frame.render_widget(Clear, popup_area);
 
         let n_attached = file_blocks.len();
-        let attached_label = if n_attached > 0 {
-            format!(" {n_attached} attached ·")
-        } else {
-            String::new()
-        };
+        let attached_label =
+            if n_attached > 0 { format!(" {n_attached} attached ·") } else { String::new() };
         let block = Block::default()
             .title(format!(
                 " Attach file ·{attached_label} ↑/↓ navigate · Enter=toggle · Esc=done "
@@ -880,9 +877,11 @@ impl UI {
                 let is_attached = file_blocks.iter().any(|(name, _, _)| name == &display);
                 let bg = if is_selected { Color::Rgb(40, 60, 90) } else { Color::Reset };
 
-                let attach_style = Style::default()
-                    .bg(bg)
-                    .fg(if is_attached { Color::LightGreen } else { Color::Reset });
+                let attach_style = Style::default().bg(bg).fg(if is_attached {
+                    Color::LightGreen
+                } else {
+                    Color::Reset
+                });
                 let cursor_style = Style::default().bg(bg).fg(Color::White);
 
                 let mut spans = vec![
@@ -2568,8 +2567,11 @@ impl UI {
 
         frame.render_widget(Clear, popup_area);
 
-        let name_title =
-            if name.len() > inner_w { format!("{}…", &name[..inner_w.saturating_sub(1)]) } else { name };
+        let name_title = if name.len() > inner_w {
+            format!("{}…", &name[..inner_w.saturating_sub(1)])
+        } else {
+            name
+        };
         let block = Block::default()
             .title(Span::styled(
                 format!(" {name_title} "),

@@ -58,11 +58,26 @@ pub enum Action {
     DeleteLine,      // dd — delete current line into clipboard
     DeleteToLineEnd, // D  — delete from cursor to EOL
     DeleteWord,      // dw — delete from cursor to end of word
-    DeleteToChar { ch: char, inclusive: bool }, // dt{c}/df{c}
-    YankToChar { ch: char, inclusive: bool },   // yt{c}/yf{c}
-    ChangeToChar { ch: char, inclusive: bool }, // ct{c}/cf{c}
-    FindCharForward { ch: char, inclusive: bool },  // f{c}/t{c}
-    FindCharBackward { ch: char, inclusive: bool }, // F{c}/T{c}
+    DeleteToChar {
+        ch: char,
+        inclusive: bool,
+    }, // dt{c}/df{c}
+    YankToChar {
+        ch: char,
+        inclusive: bool,
+    }, // yt{c}/yf{c}
+    ChangeToChar {
+        ch: char,
+        inclusive: bool,
+    }, // ct{c}/cf{c}
+    FindCharForward {
+        ch: char,
+        inclusive: bool,
+    }, // f{c}/t{c}
+    FindCharBackward {
+        ch: char,
+        inclusive: bool,
+    }, // F{c}/T{c}
     YankLine,        // yy — yank whole line
     YankWord,        // yw — yank to end of word
     YankToLineEnd,   // y$ — yank to end of line

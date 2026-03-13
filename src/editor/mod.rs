@@ -1176,9 +1176,15 @@ impl Editor {
                         use std::os::unix::fs::PermissionsExt;
                         let mode = meta.permissions().mode();
                         let bits: &[(u32, char)] = &[
-                            (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
-                            (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
-                            (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+                            (0o400, 'r'),
+                            (0o200, 'w'),
+                            (0o100, 'x'),
+                            (0o040, 'r'),
+                            (0o020, 'w'),
+                            (0o010, 'x'),
+                            (0o004, 'r'),
+                            (0o002, 'w'),
+                            (0o001, 'x'),
                         ];
                         Some(
                             bits.iter()
@@ -2428,6 +2434,91 @@ impl Editor {
             // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
             // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
             // On first press, fetches the live model list from the Copilot API.
+            // Ctrl+C — abort the running agentic loop (stream + tool calls).
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.agent_panel.stream_rx.is_some() {
+                    self.agent_panel.cancel_stream();
+                    self.set_status("Agent stopped".to_string());
+                }
+            },
+            // Ctrl+K — copy next code block from the last reply (cycles through all blocks).
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(reply) = self.agent_panel.last_assistant_reply() {
+                    let blocks = crate::agent::AgentPanel::extract_code_blocks(&reply);
+                    if blocks.is_empty() {
+                        self.set_status("No code blocks in last reply".to_string());
+                    } else {
+                        let idx = self.agent_panel.code_block_idx % blocks.len();
+                        self.sync_system_clipboard(&blocks[idx]);
+                        self.set_status(format!(
+                            "Code block {}/{} copied  (Ctrl+K for next)",
+                            idx + 1,
+                            blocks.len()
+                        ));
+                        self.agent_panel.code_block_idx =
+                            (self.agent_panel.code_block_idx + 1) % blocks.len();
+                    }
+                } else {
+                    self.set_status("No reply to copy".to_string());
+                }
+            },
+            // Ctrl+Y — yank the full last reply to the system clipboard.
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(text) = self.agent_panel.last_assistant_reply() {
+                    let len = text.lines().count();
+                    self.sync_system_clipboard(&text);
+                    self.set_status(format!("Copied {} lines to clipboard", len));
+                } else {
+                    self.set_status("No reply to copy".to_string());
+                }
+            },
+            // Ctrl+A — open apply-diff overlay for the last code block in the reply.
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate() {
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let (resolved_path, current_content) = if let Some(hint) = path_hint {
+                        let abs = cwd.join(&hint);
+                        let content = self
+                            .buffers
+                            .iter()
+                            .find(|b| {
+                                b.file_path
+                                    .as_ref()
+                                    .map(|fp| {
+                                        fp.canonicalize().unwrap_or_else(|_| fp.clone())
+                                            == abs.canonicalize().unwrap_or_else(|_| abs.clone())
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .map(|b| b.lines().join("\n"))
+                            .or_else(|| {
+                                if abs.exists() {
+                                    std::fs::read_to_string(&abs).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default();
+                        (Some(abs), content)
+                    } else {
+                        let (path, content) = self
+                            .current_buffer()
+                            .map(|b| (b.file_path.clone(), b.lines().join("\n")))
+                            .unwrap_or_default();
+                        (path, content)
+                    };
+                    let old: Vec<String> = current_content.lines().map(str::to_string).collect();
+                    let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
+                    self.apply_diff_lines = lcs_diff(&old, &new);
+                    self.apply_diff_path = resolved_path;
+                    self.apply_diff_content = Some(proposed_code);
+                    self.apply_diff_scroll = 0;
+                    self.mode = Mode::ApplyDiff;
+                } else {
+                    self.set_status("No code block in latest reply to apply".to_string());
+                }
+            },
             // Ctrl+P — open the file-context picker (attach a file to agent message).
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_at_picker();
@@ -2505,95 +2596,11 @@ impl Editor {
                     return Ok(());
                 }
 
-                // 'y' with empty input = yank the last assistant reply to the system clipboard.
-                if ch == 'y' && self.agent_panel.input.is_empty() {
-                    if let Some(text) = self.agent_panel.last_assistant_reply() {
-                        let len = text.lines().count();
-                        self.sync_system_clipboard(&text);
-                        self.set_status(format!("Copied {} lines to clipboard", len));
-                    } else {
-                        self.set_status("No reply to copy".to_string());
-                    }
-                    return Ok(());
-                }
-
-                // 'c' with empty input = cycle through code blocks in the last reply.
-                if ch == 'c' && self.agent_panel.input.is_empty() {
-                    if let Some(reply) = self.agent_panel.last_assistant_reply() {
-                        let blocks = crate::agent::AgentPanel::extract_code_blocks(&reply);
-                        if blocks.is_empty() {
-                            self.set_status("No code blocks in last reply".to_string());
-                        } else {
-                            let idx = self.agent_panel.code_block_idx % blocks.len();
-                            self.sync_system_clipboard(&blocks[idx]);
-                            self.set_status(format!(
-                                "Code block {}/{} copied",
-                                idx + 1,
-                                blocks.len()
-                            ));
-                            self.agent_panel.code_block_idx =
-                                (self.agent_panel.code_block_idx + 1) % blocks.len();
-                        }
-                    } else {
-                        self.set_status("No reply to copy".to_string());
-                    }
-                    return Ok(());
-                }
-
-                // 'a' with empty input = open apply-diff overlay.
-                if ch == 'a' && self.agent_panel.input.is_empty() {
-                    if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate()
-                    {
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                        let (resolved_path, current_content) = if let Some(hint) = path_hint {
-                            let abs = cwd.join(&hint);
-                            let content = self
-                                .buffers
-                                .iter()
-                                .find(|b| {
-                                    b.file_path
-                                        .as_ref()
-                                        .map(|fp| {
-                                            fp.canonicalize().unwrap_or_else(|_| fp.clone())
-                                                == abs
-                                                    .canonicalize()
-                                                    .unwrap_or_else(|_| abs.clone())
-                                        })
-                                        .unwrap_or(false)
-                                })
-                                .map(|b| b.lines().join("\n"))
-                                .or_else(|| {
-                                    if abs.exists() {
-                                        std::fs::read_to_string(&abs).ok()
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or_default();
-                            (Some(abs), content)
-                        } else {
-                            let (path, content) = self
-                                .current_buffer()
-                                .map(|b| (b.file_path.clone(), b.lines().join("\n")))
-                                .unwrap_or_default();
-                            (path, content)
-                        };
-                        let old: Vec<String> =
-                            current_content.lines().map(str::to_string).collect();
-                        let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
-                        self.apply_diff_lines = lcs_diff(&old, &new);
-                        self.apply_diff_path = resolved_path;
-                        self.apply_diff_content = Some(proposed_code);
-                        self.apply_diff_scroll = 0;
-                        self.mode = Mode::ApplyDiff;
-                    } else {
-                        self.set_status("No code block in latest reply to apply".to_string());
-                    }
-                } else {
-                    self.agent_panel.input_char(ch);
-                    self.agent_panel.update_slash_menu();
-                }
+                // All other characters type into the input box.
+                // (Apply-diff, copy code block, and yank-reply moved to Ctrl+A / Ctrl+K / Ctrl+Y
+                // so single letters never intercept the first character of a message.)
+                self.agent_panel.input_char(ch);
+                self.agent_panel.update_slash_menu();
             },
             _ => {},
         }
@@ -3494,11 +3501,8 @@ impl Editor {
 
                 if let Some(path) = path_opt {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let display_name = path
-                        .strip_prefix(&cwd)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .into_owned();
+                    let display_name =
+                        path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
 
                     if let Some(pos) = self
                         .agent_panel
@@ -3517,9 +3521,11 @@ impl Editor {
                                     "Attached: {display_name} ({line_count} line{})",
                                     if line_count == 1 { "" } else { "s" }
                                 );
-                                self.agent_panel
-                                    .file_blocks
-                                    .push((display_name, content, line_count));
+                                self.agent_panel.file_blocks.push((
+                                    display_name,
+                                    content,
+                                    line_count,
+                                ));
                                 self.set_status(msg);
                             },
                             Err(e) => {

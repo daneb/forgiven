@@ -48,7 +48,7 @@ that motivated it, what was decided, and the consequences.
 | [0038](0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter | Accepted |
 | [0039](0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title | Accepted |
 | [0040](0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title | Accepted |
-| [0041](0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) | Accepted |
+| [0041](0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`Ctrl+K`) and Yank Reply (`Ctrl+Y`) | Accepted |
 | [0042](0042-agent-paste-summary.md) | Agent Panel Paste Summary | Accepted |
 | [0043](0043-vertical-split-screen.md) | Vertical Split Screen | Accepted |
 | [0044](0044-explorer-new-folder.md) | Explorer New Folder | Accepted |
@@ -68,6 +68,7 @@ that motivated it, what was decided, and the consequences.
 | [0058](0058-agent-panel-render-performance.md) | Agent Panel Rendering Performance | Accepted |
 | [0059](0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) | Accepted |
 | [0060](0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) | Accepted |
+| [0061](0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration | Accepted |
 
 ## What is an ADR?
 
@@ -163,7 +164,10 @@ DeleteFile ── y/Y       ──► Explorer  (deleted)
 
 Agent    ── Esc/Tab     ──► Normal
          ── Ctrl+T      ──► cycle model (loads /models list on first press)
-         ── a (empty)   ──► ApplyDiff  (when a code block is present)
+         ── Ctrl+C      ──► stop agent  (cancels in-flight LLM request)
+         ── Ctrl+K      ──► copy code block (cycles through blocks; wraps)
+         ── Ctrl+Y      ──► yank full reply to clipboard (raw markdown)
+         ── Ctrl+A      ──► ApplyDiff  (when a code block is present)
 
 ApplyDiff ── y/Enter    ──► Normal     (change applied to file or buffer)
           ── n/Esc      ──► Agent      (discarded)

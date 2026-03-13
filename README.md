@@ -75,7 +75,7 @@ Which-key popup shows available bindings after a 500 ms pause.
 - Ghost-text inline completions (streamed, Tab to accept)
 - **Agent chat panel** (`SPC a a`) — streaming SSE responses, scrollable history with
   full CommonMark rendering
-- **Diff+apply** (`a` in Agent mode) — full-screen LCS diff overlay targeting the correct
+- **Diff+apply** (`Ctrl+A` in Agent mode) — full-screen LCS diff overlay targeting the correct
   file; `y`/`Enter` to apply, `n`/`Esc` to discard
 
 ### Syntax highlighting
@@ -260,9 +260,25 @@ cargo build --release
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
+| `Alt+Enter` | Insert newline in message |
+| `Backspace` | Delete last character |
+| `j` / `k` | Scroll history up / down |
+| `Ctrl+C` | **Abort** running stream (safe at any point) |
+| `Ctrl+K` | Copy next code block from last reply (cycles through all blocks) |
+| `Ctrl+Y` | Yank full last reply to system clipboard |
+| `Ctrl+A` | Open apply-diff overlay for the last code block |
+| `Ctrl+P` | Attach a file to the next message (context picker) |
+| `Ctrl+T` | Cycle model; loads model list from API on first press |
 | `Esc` | Blur panel, return to editor |
-| `Ctrl+C` | Cancel streaming response |
-| `j/k` | Scroll history |
+
+### Apply-diff overlay (`Mode::ApplyDiff`)
+
+| Key | Action |
+|-----|--------|
+| `y` / `Enter` | Apply change to target file / buffer |
+| `n` / `Esc` | Discard, return to agent panel |
+| `j` / `k` | Scroll down / up one line |
+| `Ctrl+D` / `Ctrl+U` | Scroll down / up half-page |
 
 ### Search panel (`Mode::Search`, `SPC s g`)
 
@@ -309,7 +325,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0060)
+│   └── adr/                 # Architecture Decision Records (0001 – 0061)
 └── Cargo.toml
 ```
 
@@ -407,7 +423,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0038](docs/adr/0038-unified-model-selection.md) | Unified Model Selection: Removing the `model_picker_enabled` Filter |
 | [0039](docs/adr/0039-agent-status-indicator.md) | Agent Status Indicator: Live Phase Tracking in the Agent Panel Title |
 | [0040](docs/adr/0040-context-gauge.md) | Context Gauge: Token Usage Display in the Agent Panel Title |
-| [0041](docs/adr/0041-agent-panel-copy-code-block.md) | Agent Panel Copy Code Block (`c` key) |
+| [0041](docs/adr/0041-agent-panel-copy-code-block.md) | Agent Panel Clipboard Shortcuts (`Ctrl+K` / `Ctrl+Y`) |
 | [0042](docs/adr/0042-agent-paste-summary.md) | Agent Panel Paste Summary |
 | [0043](docs/adr/0043-vertical-split-screen.md) | Vertical Split Screen |
 | [0044](docs/adr/0044-explorer-new-folder.md) | Explorer New Folder |
@@ -418,7 +434,16 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0049](docs/adr/0049-diagnostics-overlay.md) | Diagnostics Overlay (`SPC d`) |
 | [0050](docs/adr/0050-mcp-env-var-secrets.md) | MCP Server Environment Variable Secret Resolution |
 | [0051](docs/adr/0051-startup-loading-indicator-and-parallelisation.md) | Startup Loading Indicator and Service Parallelisation |
+| [0052](docs/adr/0052-dotnet-lsp-csharp-ls.md) | .NET LSP — Switch Default to csharp-ls |
+| [0053](docs/adr/0053-mcp-container-isolation.md) | MCP Non-blocking Startup (isolation superseded) |
+| [0054](docs/adr/0054-editor-quality-of-life-improvements.md) | Editor Quality-of-Life Improvements |
+| [0055](docs/adr/0055-release-notes-generation.md) | Release Notes Generation (`SPC g n`) |
+| [0056](docs/adr/0056-spec-framework-integration.md) | Pluggable Prompt-Framework Integration (spec-kit) |
+| [0057](docs/adr/0057-ask-user-tool.md) | Agent `ask_user` Tool |
+| [0058](docs/adr/0058-agent-panel-render-performance.md) | Agent Panel Rendering Performance |
+| [0059](docs/adr/0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) |
 | [0060](docs/adr/0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) |
+| [0061](docs/adr/0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration |
 
 ---
 
