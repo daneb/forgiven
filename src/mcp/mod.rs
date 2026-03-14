@@ -160,7 +160,19 @@ impl McpManager {
         let mut join_set: JoinSet<(usize, Result<(McpServer, Child)>)> = JoinSet::new();
         for (idx, cfg) in configs.iter().enumerate() {
             let cfg = cfg.clone();
-            join_set.spawn(async move { (idx, spawn_and_init(&cfg).await) });
+            join_set.spawn(async move {
+                let result = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(15),
+                    spawn_and_init(&cfg),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "timed out after 15 s — check that the server is reachable"
+                    ))
+                });
+                (idx, result)
+            });
         }
 
         // Collect into a slot-per-server array to restore original ordering.

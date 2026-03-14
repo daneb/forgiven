@@ -94,6 +94,8 @@ pub struct ReleaseNotesView<'a> {
 
 /// Data for the diagnostics overlay (Mode::Diagnostics).
 pub struct DiagnosticsData<'a> {
+    /// Crate version string, e.g. "0.3.1".
+    pub version: &'static str,
     /// MCP: (server_name, tool_count) for each connected server.
     pub mcp_connected: Vec<(&'a str, usize)>,
     /// MCP: (server_name, error) for each failed server.
@@ -129,62 +131,96 @@ type BufferList = (Vec<(String, bool)>, usize);
 // File list tuple: (fuzzy-filtered entries with match indices, selected index, query)
 type FileList = (Vec<(PathBuf, Vec<usize>)>, usize, String);
 
+/// All per-frame data required to render the editor UI.
+///
+/// Adding a new mode means adding a field here (and populating it at the call
+/// site) rather than growing the `UI::render` parameter list. `frame` is kept
+/// as a direct parameter because its mutable borrow lifetime cannot be stored
+/// in a struct.
+pub struct RenderContext<'a> {
+    pub mode: Mode,
+    pub buffer_data: Option<&'a BufferData>,
+    pub status_message: Option<&'a str>,
+    pub command_buffer: Option<&'a str>,
+    pub which_key_options: Option<&'a [(String, String)]>,
+    pub key_sequence: &'a str,
+    pub buffer_list: Option<&'a BufferList>,
+    pub file_list: Option<&'a FileList>,
+    /// LSP diagnostics for the current buffer.
+    pub diagnostics: &'a [Diagnostic],
+    /// Ghost-text inline suggestion: (text, buffer_row, buffer_col).
+    pub ghost_text: Option<(&'a str, usize, usize)>,
+    /// Agent chat panel; `None` = hidden.
+    pub agent_panel: Option<&'a AgentPanel>,
+    /// Pre-computed syntax-highlighted spans for the visible viewport.
+    pub highlighted_lines: Option<&'a [Vec<Span<'static>>]>,
+    /// File explorer panel; `None` = hidden.
+    pub file_explorer: Option<&'a FileExplorer>,
+    /// Pre-rendered markdown lines (Mode::MarkdownPreview only).
+    pub preview_lines: Option<&'a [Line<'static>]>,
+    /// Project-wide search overlay (Mode::Search only).
+    pub search_state: Option<&'a SearchState>,
+    /// Rename popup filename buffer (Mode::RenameFile only).
+    pub rename_buffer: Option<&'a str>,
+    /// Delete confirmation entry name (Mode::DeleteFile only).
+    pub delete_name: Option<&'a str>,
+    /// New folder name buffer (Mode::NewFolder only).
+    pub new_folder_buffer: Option<&'a str>,
+    /// Apply-diff overlay data (Mode::ApplyDiff only).
+    pub apply_diff: Option<&'a ApplyDiffView<'a>>,
+    /// Inactive split pane buffer data; `None` = no split active.
+    pub split_buffer_data: Option<&'a BufferData>,
+    /// Pre-computed highlighted spans for the inactive split pane.
+    pub split_highlighted_lines: Option<&'a [Vec<Span<'static>>]>,
+    /// `true` when the right pane is the focused pane.
+    pub split_right_focused: bool,
+    /// Editable commit message buffer (Mode::CommitMsg only).
+    pub commit_msg: Option<&'a str>,
+    /// Release notes popup data (Mode::ReleaseNotes only).
+    pub release_notes: Option<&'a ReleaseNotesView<'a>>,
+    /// Diagnostics overlay data (Mode::Diagnostics only).
+    pub diag_overlay: Option<&'a DiagnosticsData<'a>>,
+    /// Time from process start to the editor being ready; shown on welcome screen.
+    pub startup_elapsed: Option<std::time::Duration>,
+    /// File-info popup data (explorer `i` key); `None` = hidden.
+    pub file_info: Option<&'a FileInfoData>,
+}
+
 /// UI rendering for the editor
 pub struct UI;
 
 impl UI {
-    /// Render the entire UI
-    #[allow(clippy::too_many_arguments)]
-    pub fn render(
-        frame: &mut Frame,
-        buffer_data: Option<&BufferData>,
-        mode: Mode,
-        status_message: Option<&str>,
-        command_buffer: Option<&str>,
-        which_key_options: Option<&[(String, String)]>,
-        key_sequence: &str,
-        buffer_list: Option<&BufferList>,
-        file_list: Option<&FileList>,
-        diagnostics: &[Diagnostic],
-        // Ghost text suggestion: (text, buffer_row, buffer_col)
-        ghost_text: Option<(&str, usize, usize)>,
-        // Agent panel (None = hidden)
-        agent_panel: Option<&AgentPanel>,
-        // Pre-computed syntax-highlighted spans for the visible viewport.
-        // Each element is the span list for one visible line (index 0 = scroll_row).
-        highlighted_lines: Option<&[Vec<Span<'static>>]>,
-        // File explorer panel (None = hidden)
-        file_explorer: Option<&FileExplorer>,
-        // Pre-rendered markdown lines (Mode::MarkdownPreview only).
-        // When Some, these are displayed in place of normal buffer content.
-        preview_lines: Option<&[Line<'static>]>,
-        // Project-wide search overlay (Mode::Search only).
-        search_state: Option<&SearchState>,
-        // Rename popup filename buffer (Mode::RenameFile only).
-        rename_buffer: Option<&str>,
-        // Delete confirmation name (Mode::DeleteFile only).
-        delete_name: Option<&str>,
-        // New folder name buffer (Mode::NewFolder only).
-        new_folder_buffer: Option<&str>,
-        // Apply-diff overlay data (Mode::ApplyDiff only).
-        apply_diff: Option<&ApplyDiffView<'_>>,
-        // Vertical split: inactive pane data (None = no split).
-        split_buffer_data: Option<&BufferData>,
-        // Pre-computed highlighted spans for the split (inactive) pane.
-        split_highlighted_lines: Option<&[Vec<Span<'static>>]>,
-        // True when the right pane is the focused pane.
-        split_right_focused: bool,
-        // Commit message buffer (Mode::CommitMsg only).
-        commit_msg: Option<&str>,
-        // Release notes popup data (Mode::ReleaseNotes only).
-        release_notes: Option<&ReleaseNotesView<'_>>,
-        // Diagnostics overlay data (Mode::Diagnostics only).
-        diag_overlay: Option<&DiagnosticsData<'_>>,
-        // Time from process start to the editor being ready; displayed on the welcome screen.
-        startup_elapsed: Option<std::time::Duration>,
-        // File-info popup data (explorer `i` key). None = hidden.
-        file_info: Option<&FileInfoData>,
-    ) {
+    /// Render the entire UI for one frame.
+    pub fn render(frame: &mut Frame, ctx: &RenderContext<'_>) {
+        // Unpack context into same-named locals so the body below is unchanged.
+        let mode = ctx.mode;
+        let buffer_data = ctx.buffer_data;
+        let status_message = ctx.status_message;
+        let command_buffer = ctx.command_buffer;
+        let which_key_options = ctx.which_key_options;
+        let key_sequence = ctx.key_sequence;
+        let buffer_list = ctx.buffer_list;
+        let file_list = ctx.file_list;
+        let diagnostics = ctx.diagnostics;
+        let ghost_text = ctx.ghost_text;
+        let agent_panel = ctx.agent_panel;
+        let highlighted_lines = ctx.highlighted_lines;
+        let file_explorer = ctx.file_explorer;
+        let preview_lines = ctx.preview_lines;
+        let search_state = ctx.search_state;
+        let rename_buffer = ctx.rename_buffer;
+        let delete_name = ctx.delete_name;
+        let new_folder_buffer = ctx.new_folder_buffer;
+        let apply_diff = ctx.apply_diff;
+        let split_buffer_data = ctx.split_buffer_data;
+        let split_highlighted_lines = ctx.split_highlighted_lines;
+        let split_right_focused = ctx.split_right_focused;
+        let commit_msg = ctx.commit_msg;
+        let release_notes = ctx.release_notes;
+        let diag_overlay = ctx.diag_overlay;
+        let startup_elapsed = ctx.startup_elapsed;
+        let file_info = ctx.file_info;
+
         let size = frame.area();
 
         if mode == Mode::ApplyDiff {
@@ -2289,6 +2325,19 @@ impl UI {
     /// Shows MCP server status and LSP servers. Any key closes it.
     fn render_diagnostics_overlay(frame: &mut Frame, data: &DiagnosticsData<'_>, area: Rect) {
         let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // ── Version ───────────────────────────────────────────────────────────
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  forgiven ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{}", data.version),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
 
         // ── MCP Servers ───────────────────────────────────────────────────────
         lines.push(Line::from(vec![Span::styled(

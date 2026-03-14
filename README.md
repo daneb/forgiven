@@ -325,7 +325,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0061)
+│   └── adr/                 # Architecture Decision Records (0001 – 0063)
 └── Cargo.toml
 ```
 
@@ -444,6 +444,8 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0059](docs/adr/0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) |
 | [0060](docs/adr/0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) |
 | [0061](docs/adr/0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration |
+| [0062](docs/adr/0062-offline-resilience.md) | Offline Resilience: Request Timeouts, MCP Startup Bound, and Error Visibility |
+| [0063](docs/adr/0063-structural-refactor-buffer-combinator-render-context-editor-substates.md) | Structural Refactor: Buffer Combinator, RenderContext, and Editor Sub-states |
 
 ---
 

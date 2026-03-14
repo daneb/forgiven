@@ -23,7 +23,7 @@ use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
 use crate::search::{run_search, SearchState, SearchStatus};
 use crate::spec_framework;
-use crate::ui::UI;
+use crate::ui::{RenderContext, UI};
 use lsp_types::Diagnostic;
 use ratatui::text::Span;
 
@@ -66,6 +66,55 @@ struct MarkdownCache {
     lsp_version: i32,
     viewport_width: usize,
     lines: Vec<ratatui::text::Line<'static>>,
+}
+
+// ── Mode-specific sub-states ──────────────────────────────────────────────────
+// Each struct owns all fields that are active only during a single Mode variant.
+// Grouping them prevents the top-level Editor struct from growing unboundedly as
+// new modes are added.
+
+/// State for the vertical split pane (Mode::Normal with an active split).
+#[derive(Default)]
+struct SplitState {
+    /// Index of the background pane's buffer; `None` = no split active.
+    other_idx: Option<usize>,
+    /// `true` when the right pane has focus.
+    right_focused: bool,
+    /// Per-viewport highlight cache for the inactive (background) pane.
+    highlight_cache: Option<HighlightCache>,
+}
+
+/// State for the apply-diff overlay (Mode::ApplyDiff).
+#[derive(Default)]
+struct ApplyDiffState {
+    path: Option<std::path::PathBuf>,
+    content: Option<String>,
+    lines: Vec<DiffLine>,
+    scroll: usize,
+}
+
+/// State for the commit message generation popup (Mode::CommitMsg).
+#[derive(Default)]
+struct CommitMsgState {
+    /// Editable commit message buffer.
+    buffer: String,
+    /// In-flight AI generation task.
+    rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    /// `true` = generated from staged diff (`SPC g s`); `false` = last commit (`SPC g l`).
+    from_staged: bool,
+}
+
+/// State for the release notes generation popup (Mode::ReleaseNotes).
+#[derive(Default)]
+struct ReleaseNotesState {
+    /// Commit count input string (count-entry phase).
+    count_input: String,
+    /// In-flight AI generation task.
+    rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    /// Completed release notes text (display phase).
+    buffer: String,
+    /// Scroll offset for the display popup.
+    scroll: u16,
 }
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
@@ -195,36 +244,16 @@ pub struct Editor {
     show_file_info: bool,
 
     // ── Apply-diff overlay (Mode::ApplyDiff) ──────────────────────────────────
-    apply_diff_path: Option<std::path::PathBuf>,
-    apply_diff_content: Option<String>,
-    apply_diff_lines: Vec<DiffLine>,
-    apply_diff_scroll: usize,
+    apply_diff: ApplyDiffState,
 
     // ── Vertical split ────────────────────────────────────────────────────────
-    /// Index of the background pane's buffer; None = no split.
-    pub split_other_idx: Option<usize>,
-    /// True when the right pane has focus (current_buffer_idx == right buffer).
-    pub split_right_focused: bool,
-    /// Per-viewport highlight cache for the split (inactive) pane.
-    split_highlight_cache: Option<HighlightCache>,
+    split: SplitState,
 
-    // ── Commit message generation ─────────────────────────────────────────────
-    /// Editable commit message while Mode::CommitMsg is active.
-    commit_msg_buffer: String,
-    /// In-flight background task that fetches an AI-generated commit message.
-    commit_msg_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
-    /// True when generating from staged diff (`SPC g s`); false = last commit (`SPC g l`).
-    commit_msg_from_staged: bool,
+    // ── Commit message generation (Mode::CommitMsg) ───────────────────────────
+    commit_msg: CommitMsgState,
 
-    // ── Release notes generation ──────────────────────────────────────────────
-    /// Count input string while in the count-entry phase of Mode::ReleaseNotes.
-    release_notes_count_input: String,
-    /// In-flight background task fetching AI-generated release notes.
-    release_notes_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
-    /// Completed release notes text shown in the popup.
-    release_notes_buffer: String,
-    /// Scroll offset for the release notes display popup.
-    release_notes_scroll: u16,
+    // ── Release notes generation (Mode::ReleaseNotes) ─────────────────────────
+    release_notes: ReleaseNotesState,
 
     // ── MCP servers ───────────────────────────────────────────────────────────
     /// Manages connected MCP servers and their tool registries.
@@ -305,20 +334,13 @@ impl Editor {
             new_folder_buffer: String::new(),
             new_folder_parent: None,
             show_file_info: false,
-            apply_diff_path: None,
-            apply_diff_content: None,
-            apply_diff_lines: Vec::new(),
-            apply_diff_scroll: 0,
-            split_other_idx: None,
-            split_right_focused: false,
-            split_highlight_cache: None,
-            commit_msg_buffer: String::new(),
-            commit_msg_rx: None,
-            commit_msg_from_staged: true,
-            release_notes_count_input: String::from("10"),
-            release_notes_rx: None,
-            release_notes_buffer: String::new(),
-            release_notes_scroll: 0,
+            apply_diff: ApplyDiffState::default(),
+            split: SplitState::default(),
+            commit_msg: CommitMsgState { from_staged: true, ..Default::default() },
+            release_notes: ReleaseNotesState {
+                count_input: String::from("10"),
+                ..Default::default()
+            },
             mcp_manager: None,
             mcp_rx: None,
             log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
@@ -533,6 +555,15 @@ impl Editor {
         self.buffers.get_mut(self.current_buffer_idx)
     }
 
+    /// Apply a mutating closure to the current buffer, returning `Some(T)` on
+    /// success or `None` when no buffer is open. Prefer this over the raw
+    /// `if let Some(buf) = self.current_buffer_mut()` pattern so that future
+    /// additions stay uniform and the nesting depth stays flat.
+    #[inline]
+    fn with_buffer<T, F: FnOnce(&mut Buffer) -> T>(&mut self, f: F) -> Option<T> {
+        self.current_buffer_mut().map(f)
+    }
+
     /// Main event loop
     pub async fn run(&mut self) -> Result<()> {
         const COMPLETION_DEBOUNCE_MS: u128 = 300;
@@ -617,6 +648,9 @@ impl Editor {
 
             // ── Agent panel stream polling ─────────────────────────────────────
             let agent_active = self.agent_panel.poll_stream();
+            if let Some(err) = self.agent_panel.last_error.take() {
+                self.set_status(format!("Agent error: {err}"));
+            }
             if agent_active {
                 needs_render = true;
             }
@@ -739,7 +773,7 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Commit-message AI response poll ───────────────────────────────
-            let commit_done = if let Some(rx) = self.commit_msg_rx.as_mut() {
+            let commit_done = if let Some(rx) = self.commit_msg.rx.as_mut() {
                 match rx.try_recv() {
                     Ok(result) => Some(result),
                     Err(oneshot::error::TryRecvError::Empty) => None,
@@ -749,11 +783,11 @@ impl Editor {
                 None
             };
             if let Some(result) = commit_done {
-                self.commit_msg_rx = None;
+                self.commit_msg.rx = None;
                 needs_render = true;
                 match result {
                     Ok(msg) => {
-                        self.commit_msg_buffer = msg;
+                        self.commit_msg.buffer = msg;
                         self.set_status(
                             "Commit message ready — edit then Enter to commit, Esc to discard"
                                 .to_string(),
@@ -768,7 +802,7 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Release-notes AI response poll ────────────────────────────────
-            let release_notes_done = if let Some(rx) = self.release_notes_rx.as_mut() {
+            let release_notes_done = if let Some(rx) = self.release_notes.rx.as_mut() {
                 match rx.try_recv() {
                     Ok(result) => Some(result),
                     Err(oneshot::error::TryRecvError::Empty) => None,
@@ -778,11 +812,11 @@ impl Editor {
                 None
             };
             if let Some(result) = release_notes_done {
-                self.release_notes_rx = None;
+                self.release_notes.rx = None;
                 needs_render = true;
                 match result {
                     Ok(notes) => {
-                        self.release_notes_buffer = strip_markdown_fence(&notes);
+                        self.release_notes.buffer = strip_markdown_fence(&notes);
                         self.set_status(
                             "Release notes ready — y=copy to clipboard, j/k=scroll, Esc=close"
                                 .to_string(),
@@ -816,8 +850,8 @@ impl Editor {
                 || self.pending_completion.is_some()
                 || self.key_handler.which_key_pending()
                 || self.search_rx.is_some()
-                || self.commit_msg_rx.is_some()
-                || self.release_notes_rx.is_some()
+                || self.commit_msg.rx.is_some()
+                || self.release_notes.rx.is_some()
                 || self.mcp_rx.is_some()
             {
                 needs_render = true;
@@ -902,9 +936,7 @@ impl Editor {
         };
         let viewport_width = editor_area_w.saturating_sub(GUTTER);
 
-        if let Some(buf) = self.current_buffer_mut() {
-            buf.scroll_to_cursor(viewport_height, viewport_width);
-        }
+        self.with_buffer(|buf| buf.scroll_to_cursor(viewport_height, viewport_width));
 
         // Get buffer data before drawing to avoid borrow issues.
         // Only clone the lines that are actually visible in the viewport — for a
@@ -1027,7 +1059,7 @@ impl Editor {
         // ── Split pane data ────────────────────────────────────────────────────
         // Same viewport-clipped approach as the primary buffer: only the visible
         // rows are cloned.
-        let split_buffer_data = self.split_other_idx.and_then(|idx| {
+        let split_buffer_data = self.split.other_idx.and_then(|idx| {
             self.buffers.get(idx).map(|buf| {
                 let vis_end = (buf.scroll_row + viewport_height).min(buf.lines().len());
                 (
@@ -1044,7 +1076,7 @@ impl Editor {
 
         // ── Split highlight cache ──────────────────────────────────────────────
         let split_highlighted_lines: Option<Arc<Vec<Vec<ratatui::text::Span<'static>>>>> =
-            if let Some(split_idx) = self.split_other_idx {
+            if let Some(split_idx) = self.split.other_idx {
                 if let Some(split_buf) = self.buffers.get(split_idx) {
                     let split_scroll = split_buf.scroll_row;
                     let split_ver = split_buf.lsp_version;
@@ -1053,14 +1085,14 @@ impl Editor {
                         .as_deref()
                         .map(Highlighter::extension_for)
                         .unwrap_or_default();
-                    let cache_hit = self.split_highlight_cache.as_ref().is_some_and(|c| {
+                    let cache_hit = self.split.highlight_cache.as_ref().is_some_and(|c| {
                         c.buffer_idx == split_idx
                             && c.scroll_row == split_scroll
                             && c.lsp_version == split_ver
                     });
                     if cache_hit {
                         // Cache hit: Arc::clone is a single atomic increment — zero allocation.
-                        self.split_highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
+                        self.split.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
                     } else {
                         let end = (split_scroll + term_height).min(split_buf.lines().len());
                         let spans: Vec<Vec<ratatui::text::Span<'static>>> = split_buf.lines()
@@ -1069,7 +1101,7 @@ impl Editor {
                             .map(|line| self.highlighter.highlight_line(line, &split_ext))
                             .collect();
                         let arc = Arc::new(spans);
-                        self.split_highlight_cache = Some(HighlightCache {
+                        self.split.highlight_cache = Some(HighlightCache {
                             buffer_idx: split_idx,
                             scroll_row: split_scroll,
                             lsp_version: split_ver,
@@ -1084,7 +1116,7 @@ impl Editor {
                 None
             };
 
-        let split_right_focused = self.split_right_focused;
+        let split_right_focused = self.split.right_focused;
 
         let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref =
@@ -1115,7 +1147,8 @@ impl Editor {
 
         let apply_diff_target_owned: Option<String> = if mode == Mode::ApplyDiff {
             Some(
-                self.apply_diff_path
+                self.apply_diff
+                    .path
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "(unsaved buffer)".to_string()),
@@ -1125,18 +1158,18 @@ impl Editor {
         };
         let apply_diff_view = apply_diff_target_owned.as_ref().map(|t| crate::ui::ApplyDiffView {
             target: t.as_str(),
-            lines: &self.apply_diff_lines,
-            scroll: self.apply_diff_scroll,
+            lines: &self.apply_diff.lines,
+            scroll: self.apply_diff.scroll,
         });
         let commit_msg_buf =
-            if mode == Mode::CommitMsg { Some(self.commit_msg_buffer.as_str()) } else { None };
+            if mode == Mode::CommitMsg { Some(self.commit_msg.buffer.as_str()) } else { None };
 
         let release_notes_view = if mode == Mode::ReleaseNotes {
             Some(crate::ui::ReleaseNotesView {
-                count_input: self.release_notes_count_input.as_str(),
-                generating: self.release_notes_rx.is_some(),
-                notes: self.release_notes_buffer.as_str(),
-                scroll: self.release_notes_scroll,
+                count_input: self.release_notes.count_input.as_str(),
+                generating: self.release_notes.rx.is_some(),
+                notes: self.release_notes.buffer.as_str(),
+                scroll: self.release_notes.scroll,
             })
         } else {
             None
@@ -1156,6 +1189,7 @@ impl Editor {
             let lsp_servers =
                 self.config.lsp.servers.iter().map(|s| s.language.as_str()).collect::<Vec<_>>();
             Some(crate::ui::DiagnosticsData {
+                version: env!("CARGO_PKG_VERSION"),
                 mcp_connected,
                 mcp_failed,
                 lsp_servers,
@@ -1209,36 +1243,36 @@ impl Editor {
         };
 
         self.terminal.draw(|frame| {
-            UI::render(
-                frame,
-                buffer_data.as_ref(),
+            let ctx = RenderContext {
                 mode,
-                status,
+                buffer_data: buffer_data.as_ref(),
+                status_message: status,
                 command_buffer,
-                which_key_options.as_deref(),
-                key_sequence.as_str(),
-                buffer_list.as_ref(),
-                file_list.as_ref(),
-                &self.current_diagnostics,
-                ghost,
-                agent_ref,
-                hl_ref,
-                explorer_ref,
-                preview_ref,
-                search_ref,
-                rename_buf,
+                which_key_options: which_key_options.as_deref(),
+                key_sequence: key_sequence.as_str(),
+                buffer_list: buffer_list.as_ref(),
+                file_list: file_list.as_ref(),
+                diagnostics: &self.current_diagnostics,
+                ghost_text: ghost,
+                agent_panel: agent_ref,
+                highlighted_lines: hl_ref,
+                file_explorer: explorer_ref,
+                preview_lines: preview_ref,
+                search_state: search_ref,
+                rename_buffer: rename_buf,
                 delete_name,
-                new_folder_buf,
-                apply_diff_view.as_ref(),
-                split_buffer_data.as_ref(),
-                split_hl_ref,
+                new_folder_buffer: new_folder_buf,
+                apply_diff: apply_diff_view.as_ref(),
+                split_buffer_data: split_buffer_data.as_ref(),
+                split_highlighted_lines: split_hl_ref,
                 split_right_focused,
-                commit_msg_buf,
-                release_notes_view.as_ref(),
-                diag_overlay.as_ref(),
-                self.startup_elapsed,
-                file_info_data.as_ref(),
-            );
+                commit_msg: commit_msg_buf,
+                release_notes: release_notes_view.as_ref(),
+                diag_overlay: diag_overlay.as_ref(),
+                startup_elapsed: self.startup_elapsed,
+                file_info: file_info_data.as_ref(),
+            };
+            UI::render(frame, &ctx);
         })?;
 
         Ok(())
@@ -1406,141 +1440,123 @@ impl Editor {
             | Action::PasteBefore
         );
         if needs_snapshot {
-            if let Some(buf) = self.current_buffer_mut() {
-                buf.save_undo_snapshot();
-            }
+            self.with_buffer(|buf| buf.save_undo_snapshot());
         }
 
         match action {
             Action::Noop => unreachable!(),
             Action::Insert => self.mode = Mode::Insert,
             Action::InsertAppend => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_right();
-                }
+                self.with_buffer(|buf| buf.move_cursor_right());
                 self.mode = Mode::Insert;
             },
             Action::InsertLineStart => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_line_start();
-                }
+                self.with_buffer(|buf| buf.move_cursor_line_start());
                 self.mode = Mode::Insert;
             },
             Action::InsertLineEnd => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_line_end();
-                }
+                self.with_buffer(|buf| buf.move_cursor_line_end());
                 self.mode = Mode::Insert;
             },
             Action::InsertNewlineBelow => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_line_end();
                     buf.insert_newline();
-                }
+                });
                 self.mode = Mode::Insert;
             },
             Action::InsertNewlineAbove => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_line_start();
                     buf.insert_newline();
                     buf.move_cursor_up();
-                }
+                });
                 self.mode = Mode::Insert;
             },
             Action::MoveLeft => {
                 // h — clamped, no line wrap; repeats `count` times
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_left_clamp();
                     }
-                }
+                });
             },
             Action::MoveRight => {
                 // l — clamped, no line wrap; repeats `count` times
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_right_clamp();
                     }
-                }
+                });
             },
             Action::MoveUp => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_up();
                     }
-                }
+                });
             },
             Action::MoveDown => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_down();
                     }
-                }
+                });
             },
             Action::MoveLineStart => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_line_start();
-                }
+                self.with_buffer(|buf| buf.move_cursor_line_start());
             },
             Action::MoveFirstNonBlank => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_first_nonblank();
-                }
+                self.with_buffer(|buf| buf.move_cursor_first_nonblank());
             },
             Action::MoveLineEnd => {
                 // Used by A / InsertLineEnd (cursor goes past last char)
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_line_end();
-                }
+                self.with_buffer(|buf| buf.move_cursor_line_end());
             },
             Action::MoveLineEndNormal => {
                 // Used by $ in Normal mode (cursor lands ON last char)
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_line_end_normal();
-                }
+                self.with_buffer(|buf| buf.move_cursor_line_end_normal());
             },
             Action::GotoFileTop => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     // `5gg` → jump to line 5 (1-based); bare `gg` → first line
                     if count > 1 {
                         buf.goto_line(count);
                     } else {
                         buf.goto_first_line();
                     }
-                }
+                });
             },
             Action::GotoFileBottom => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     // `5G` → jump to line 5 (1-based); bare `G` → last line
                     if count > 1 {
                         buf.goto_line(count);
                     } else {
                         buf.goto_last_line();
                     }
-                }
+                });
             },
             Action::MoveWordForward => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_word_forward();
                     }
-                }
+                });
             },
             Action::MoveWordBackward => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     for _ in 0..count {
                         buf.move_cursor_word_backward();
                     }
-                }
+                });
             },
             Action::Command => {
                 self.mode = Mode::Command;
                 self.command_buffer.clear();
             },
             Action::Visual => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.start_selection();
-                }
+                self.with_buffer(|buf| buf.start_selection());
                 self.mode = Mode::Visual;
             },
             Action::BufferList => {
@@ -1586,19 +1602,19 @@ impl Editor {
                         // If closing the focused pane while a split is active, bring the
                         // other pane to focus first so we never close the split's buffer
                         // out from under the cursor.
-                        if let Some(other) = self.split_other_idx {
+                        if let Some(other) = self.split.other_idx {
                             if closing_idx == other {
                                 // Closing the background pane's buffer — just clear the split.
-                                self.split_other_idx = None;
-                                self.split_right_focused = false;
-                                self.split_highlight_cache = None;
+                                self.split.other_idx = None;
+                                self.split.right_focused = false;
+                                self.split.highlight_cache = None;
                             } else {
                                 // Closing the focused buffer while split is open: swap focus
                                 // so the other pane becomes active, then close.
                                 self.current_buffer_idx = other;
-                                self.split_other_idx = None;
-                                self.split_right_focused = false;
-                                self.split_highlight_cache = None;
+                                self.split.other_idx = None;
+                                self.split.right_focused = false;
+                                self.split.highlight_cache = None;
                             }
                         }
                         let name = self.buffers[closing_idx].name.clone();
@@ -1614,16 +1630,16 @@ impl Editor {
             Action::BufferForceClose => {
                 if !self.buffers.is_empty() {
                     let closing_idx = self.current_buffer_idx;
-                    if let Some(other) = self.split_other_idx {
+                    if let Some(other) = self.split.other_idx {
                         if closing_idx == other {
-                            self.split_other_idx = None;
-                            self.split_right_focused = false;
-                            self.split_highlight_cache = None;
+                            self.split.other_idx = None;
+                            self.split.right_focused = false;
+                            self.split.highlight_cache = None;
                         } else {
                             self.current_buffer_idx = other;
-                            self.split_other_idx = None;
-                            self.split_right_focused = false;
-                            self.split_highlight_cache = None;
+                            self.split.other_idx = None;
+                            self.split.right_focused = false;
+                            self.split.highlight_cache = None;
                         }
                     }
                     let name = self.buffers[closing_idx].name.clone();
@@ -1638,7 +1654,7 @@ impl Editor {
             Action::WindowSplit => {
                 if self.buffers.len() < 2 {
                     self.set_status("Need another buffer open — use SPC f f".into());
-                } else if self.split_other_idx.is_some() {
+                } else if self.split.other_idx.is_some() {
                     self.set_status("Split already open — SPC w c to close".into());
                 } else {
                     let other = if self.current_buffer_idx == 0 {
@@ -1646,20 +1662,20 @@ impl Editor {
                     } else {
                         self.current_buffer_idx - 1
                     };
-                    self.split_other_idx = Some(other);
-                    self.split_right_focused = false;
+                    self.split.other_idx = Some(other);
+                    self.split.right_focused = false;
                 }
             },
             Action::WindowFocusNext => {
-                if let Some(ref mut other) = self.split_other_idx {
+                if let Some(ref mut other) = self.split.other_idx {
                     std::mem::swap(&mut self.current_buffer_idx, other);
-                    self.split_right_focused = !self.split_right_focused;
+                    self.split.right_focused = !self.split.right_focused;
                 }
             },
             Action::WindowClose => {
-                self.split_other_idx = None;
-                self.split_right_focused = false;
-                self.split_highlight_cache = None;
+                self.split.other_idx = None;
+                self.split.right_focused = false;
+                self.split.highlight_cache = None;
             },
             Action::FileFind => {
                 self.scan_files(); // fills file_all
@@ -1825,9 +1841,7 @@ impl Editor {
             },
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.delete_char_at_cursor();
-                }
+                self.with_buffer(|buf| buf.delete_char_at_cursor());
                 self.notify_lsp_change();
             },
             // ── Linewise deletes/yanks (paste creates new rows) ───────────────
@@ -1864,9 +1878,7 @@ impl Editor {
             },
             // ── Visual Line mode ─────────────────────────────────────────────
             Action::VisualLine => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.start_selection_line();
-                }
+                self.with_buffer(|buf| buf.start_selection_line());
                 self.mode = Mode::VisualLine;
             },
             // ── Charwise deletes/yanks (paste inserts inline) ─────────────────
@@ -1923,20 +1935,20 @@ impl Editor {
                 self.mode = Mode::Insert;
             },
             Action::FindCharForward { ch, inclusive } => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     if let Some(target) = buf.find_char_forward(ch) {
                         let col = if inclusive { target } else { target.saturating_sub(1) };
                         buf.move_to_col(col);
                     }
-                }
+                });
             },
             Action::FindCharBackward { ch, inclusive } => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     if let Some(target) = buf.find_char_backward(ch) {
                         let col = if inclusive { target } else { target + 1 };
                         buf.move_to_col(col);
                     }
-                }
+                });
             },
             Action::YankWord => {
                 let yanked = self.current_buffer().map(|buf| buf.yank_word());
@@ -1964,9 +1976,7 @@ impl Editor {
                     self.clipboard = Some((text, ClipboardType::Charwise));
                     self.set_status(format!("{n} chars yanked"));
                 }
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.clear_selection();
-                }
+                self.with_buffer(|buf| buf.clear_selection());
                 self.mode = Mode::Normal;
             },
             Action::DeleteSelection => {
@@ -1990,23 +2000,19 @@ impl Editor {
             // ── Paste — dispatch on clipboard type ────────────────────────────
             Action::PasteAfter => {
                 if let Some((text, clip_type)) = self.clipboard.clone() {
-                    if let Some(buf) = self.current_buffer_mut() {
-                        match clip_type {
-                            ClipboardType::Linewise => buf.paste_linewise_after(&text),
-                            ClipboardType::Charwise => buf.paste_charwise_after(&text),
-                        }
-                    }
+                    self.with_buffer(|buf| match clip_type {
+                        ClipboardType::Linewise => buf.paste_linewise_after(&text),
+                        ClipboardType::Charwise => buf.paste_charwise_after(&text),
+                    });
                     self.notify_lsp_change();
                 }
             },
             Action::PasteBefore => {
                 if let Some((text, clip_type)) = self.clipboard.clone() {
-                    if let Some(buf) = self.current_buffer_mut() {
-                        match clip_type {
-                            ClipboardType::Linewise => buf.paste_linewise_before(&text),
-                            ClipboardType::Charwise => buf.paste_charwise_before(&text),
-                        }
-                    }
+                    self.with_buffer(|buf| match clip_type {
+                        ClipboardType::Linewise => buf.paste_linewise_before(&text),
+                        ClipboardType::Charwise => buf.paste_charwise_before(&text),
+                    });
                     self.notify_lsp_change();
                 }
             },
@@ -2031,14 +2037,10 @@ impl Editor {
                 self.mode = Mode::InFileSearch;
             },
             Action::InFileSearchNext => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.search_next();
-                }
+                self.with_buffer(|buf| buf.search_next());
             },
             Action::InFileSearchPrev => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.search_prev();
-                }
+                self.with_buffer(|buf| buf.search_prev());
             },
         }
         Ok(())
@@ -2049,9 +2051,7 @@ impl Editor {
         match key.code {
             // ── Exit / cancel ─────────────────────────────────────────────────
             KeyCode::Esc => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.clear_selection();
-                }
+                self.with_buffer(|buf| buf.clear_selection());
                 self.mode = Mode::Normal;
             },
 
@@ -2066,9 +2066,7 @@ impl Editor {
             },
             // c — delete selection + enter Insert mode
             KeyCode::Char('c') => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.save_undo_snapshot();
-                }
+                self.with_buffer(|buf| buf.save_undo_snapshot());
                 let deleted = self.current_buffer_mut().and_then(|buf| buf.delete_selection());
                 if let Some(text) = deleted {
                     self.sync_system_clipboard(&text);
@@ -2080,64 +2078,64 @@ impl Editor {
 
             // ── Motion keys (extend the selection) ────────────────────────────
             KeyCode::Char('h') | KeyCode::Left => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_left();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('l') | KeyCode::Right => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_right();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_up();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_down();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('w') => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_word_forward();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('b') => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_word_backward();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('0') | KeyCode::Home => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_line_start();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('^') => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_first_nonblank();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('$') | KeyCode::End => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_line_end_normal();
                     buf.update_selection();
-                }
+                });
             },
             KeyCode::Char('G') => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.goto_last_line();
                     buf.update_selection();
-                }
+                });
             },
             _ => {},
         }
@@ -2152,9 +2150,7 @@ impl Editor {
         match key.code {
             // ── Exit ──────────────────────────────────────────────────────────
             KeyCode::Esc | KeyCode::Char('V') => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.clear_selection();
-                }
+                self.with_buffer(|buf| buf.clear_selection());
                 self.mode = Mode::Normal;
             },
 
@@ -2168,18 +2164,14 @@ impl Editor {
                     self.clipboard = Some((text, ClipboardType::Linewise));
                     self.set_status(format!("{n} line{} yanked", if n == 1 { "" } else { "s" }));
                 }
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.clear_selection();
-                }
+                self.with_buffer(|buf| buf.clear_selection());
                 self.mode = Mode::Normal;
             },
 
             // ── Delete / change selection (linewise) ─────────────────────────
             // `d` / `x` — remove selected lines, store in register, Normal
             KeyCode::Char('d') | KeyCode::Char('x') => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.save_undo_snapshot();
-                }
+                self.with_buffer(|buf| buf.save_undo_snapshot());
                 let deleted =
                     self.current_buffer_mut().and_then(|buf| buf.delete_selection_lines());
                 if let Some(text) = deleted {
@@ -2192,9 +2184,7 @@ impl Editor {
 
             // `c` — remove selected lines + enter Insert
             KeyCode::Char('c') => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.save_undo_snapshot();
-                }
+                self.with_buffer(|buf| buf.save_undo_snapshot());
                 let deleted =
                     self.current_buffer_mut().and_then(|buf| buf.delete_selection_lines());
                 if let Some(text) = deleted {
@@ -2207,31 +2197,31 @@ impl Editor {
 
             // ── Motion keys (extend the line selection) ───────────────────────
             KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_down();
                     buf.update_selection_line();
-                }
+                });
             },
             KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.move_cursor_up();
                     buf.update_selection_line();
-                }
+                });
             },
             KeyCode::Char('G') => {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.goto_last_line();
                     buf.update_selection_line();
-                }
+                });
             },
             KeyCode::Char('g') => {
                 // gg — go to first line (we can't use pending_key here easily,
                 // so a single `g` press jumps to the top — matches common muscle
                 // memory for `Vgg` select-to-top).
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.goto_first_line();
                     buf.update_selection_line();
-                }
+                });
             },
 
             _ => {},
@@ -2413,13 +2403,20 @@ impl Editor {
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process
                 // in the async run() loop.  For now use tokio::task::block_in_place.
-                tokio::task::block_in_place(|| {
+                let submit_err = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        if let Err(e) = fut.await {
-                            tracing::warn!("Agent submit error: {}", e);
+                        match fut.await {
+                            Ok(()) => None,
+                            Err(e) => {
+                                tracing::warn!("Agent submit error: {}", e);
+                                Some(e.to_string())
+                            },
                         }
-                    });
+                    })
                 });
+                if let Some(e) = submit_err {
+                    self.set_status(format!("Agent error: {e}"));
+                }
                 self.agent_panel.update_slash_menu();
             },
             // Backspace — delete last input character.
@@ -2510,10 +2507,10 @@ impl Editor {
                     };
                     let old: Vec<String> = current_content.lines().map(str::to_string).collect();
                     let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
-                    self.apply_diff_lines = lcs_diff(&old, &new);
-                    self.apply_diff_path = resolved_path;
-                    self.apply_diff_content = Some(proposed_code);
-                    self.apply_diff_scroll = 0;
+                    self.apply_diff.lines = lcs_diff(&old, &new);
+                    self.apply_diff.path = resolved_path;
+                    self.apply_diff.content = Some(proposed_code);
+                    self.apply_diff.scroll = 0;
                     self.mode = Mode::ApplyDiff;
                 } else {
                     self.set_status("No code block in latest reply to apply".to_string());
@@ -2623,9 +2620,7 @@ impl Editor {
         } else if self.mode == Mode::Insert {
             // In insert mode, paste the text as-is into the current buffer.
             let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-            if let Some(buf) = self.current_buffer_mut() {
-                buf.insert_text_block(&normalised);
-            }
+            self.with_buffer(|buf| buf.insert_text_block(&normalised));
         }
         Ok(())
     }
@@ -2925,10 +2920,10 @@ impl Editor {
     // ── Apply-diff mode ───────────────────────────────────────────────────────
 
     fn clear_apply_diff(&mut self) {
-        self.apply_diff_path = None;
-        self.apply_diff_content = None;
-        self.apply_diff_lines.clear();
-        self.apply_diff_scroll = 0;
+        self.apply_diff.path = None;
+        self.apply_diff.content = None;
+        self.apply_diff.lines.clear();
+        self.apply_diff.scroll = 0;
     }
 
     fn handle_apply_diff_mode(&mut self, key: KeyEvent) -> Result<()> {
@@ -2941,16 +2936,16 @@ impl Editor {
                 self.set_status("Apply discarded".to_string());
             },
             KeyCode::Char('j') | KeyCode::Down => {
-                self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(1);
+                self.apply_diff.scroll = self.apply_diff.scroll.saturating_add(1);
             },
             KeyCode::Char('k') | KeyCode::Up => {
-                self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(1);
+                self.apply_diff.scroll = self.apply_diff.scroll.saturating_sub(1);
             },
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.apply_diff_scroll = self.apply_diff_scroll.saturating_add(20);
+                self.apply_diff.scroll = self.apply_diff.scroll.saturating_add(20);
             },
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.apply_diff_scroll = self.apply_diff_scroll.saturating_sub(20);
+                self.apply_diff.scroll = self.apply_diff.scroll.saturating_sub(20);
             },
             _ => {},
         }
@@ -2958,7 +2953,7 @@ impl Editor {
     }
 
     fn do_apply_diff(&mut self) -> Result<()> {
-        let content = match self.apply_diff_content.take() {
+        let content = match self.apply_diff.content.take() {
             Some(c) => c,
             None => {
                 self.clear_apply_diff();
@@ -2966,9 +2961,9 @@ impl Editor {
                 return Ok(());
             },
         };
-        let path = self.apply_diff_path.take();
-        self.apply_diff_lines.clear();
-        self.apply_diff_scroll = 0;
+        let path = self.apply_diff.path.take();
+        self.apply_diff.lines.clear();
+        self.apply_diff.scroll = 0;
         match &path {
             Some(p) => {
                 if let Some(parent) = p.parent() {
@@ -2995,9 +2990,7 @@ impl Editor {
             },
             None => {
                 let new_lines: Vec<String> = content.lines().map(str::to_string).collect();
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.replace_all_lines(new_lines);
-                }
+                self.with_buffer(|buf| buf.replace_all_lines(new_lines));
                 self.mode = Mode::Normal;
                 self.set_status("Applied to unsaved buffer".to_string());
             },
@@ -3017,11 +3010,7 @@ impl Editor {
                 let pattern = self.in_file_search_buffer.clone();
                 self.in_file_search_buffer.clear();
                 self.mode = Mode::Normal;
-                let count = if let Some(buf) = self.current_buffer_mut() {
-                    buf.set_search_pattern(pattern)
-                } else {
-                    0
-                };
+                let count = self.with_buffer(|buf| buf.set_search_pattern(pattern)).unwrap_or(0);
                 if count == 0 {
                     self.set_status("Pattern not found".to_string());
                 } else {
@@ -3104,9 +3093,7 @@ impl Editor {
                     self.search_rx = None;
                     self.last_search_instant = None;
                     self.open_file(&path)?;
-                    if let Some(buf) = self.current_buffer_mut() {
-                        buf.goto_line(line + 1); // goto_line expects 1-based
-                    }
+                    self.with_buffer(|buf| buf.goto_line(line + 1)); // goto_line expects 1-based
                 }
             },
 
@@ -3587,7 +3574,7 @@ impl Editor {
                 // No ghost text — insert indent (spaces or tab based on config).
                 let use_spaces = self.config.use_spaces;
                 let tab_width = self.config.tab_width;
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     if use_spaces {
                         for _ in 0..tab_width {
                             buf.insert_char(' ');
@@ -3595,16 +3582,14 @@ impl Editor {
                     } else {
                         buf.insert_char('\t');
                     }
-                }
+                });
                 true
             },
             KeyCode::BackTab => {
                 // Shift+Tab — remove one indent level from the start of the line.
                 let use_spaces = self.config.use_spaces;
                 let tab_width = self.config.tab_width;
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.dedent_line(use_spaces, tab_width);
-                }
+                self.with_buffer(|buf| buf.dedent_line(use_spaces, tab_width));
                 true
             },
             KeyCode::Esc => {
@@ -3616,55 +3601,39 @@ impl Editor {
                 false
             },
             KeyCode::Char(c) => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.insert_char(c);
-                }
+                self.with_buffer(|buf| buf.insert_char(c));
                 true
             },
             KeyCode::Enter => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.insert_newline();
-                }
+                self.with_buffer(|buf| buf.insert_newline());
                 true
             },
             KeyCode::Backspace => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.delete_char_before();
-                }
+                self.with_buffer(|buf| buf.delete_char_before());
                 true
             },
             KeyCode::Delete => {
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.delete_char_at();
-                }
+                self.with_buffer(|buf| buf.delete_char_at());
                 true
             },
             KeyCode::Left => {
                 self.ghost_text = None;
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_left();
-                }
+                self.with_buffer(|buf| buf.move_cursor_left());
                 false
             },
             KeyCode::Right => {
                 self.ghost_text = None;
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_right();
-                }
+                self.with_buffer(|buf| buf.move_cursor_right());
                 false
             },
             KeyCode::Up => {
                 self.ghost_text = None;
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_up();
-                }
+                self.with_buffer(|buf| buf.move_cursor_up());
                 false
             },
             KeyCode::Down => {
                 self.ghost_text = None;
-                if let Some(buf) = self.current_buffer_mut() {
-                    buf.move_cursor_down();
-                }
+                self.with_buffer(|buf| buf.move_cursor_down());
                 false
             },
             _ => false,
@@ -3821,9 +3790,7 @@ impl Editor {
                     let pattern = parts[0].to_string();
                     let replacement = parts[1].to_string();
                     let global = parts.get(2).map(|s| *s == "g").unwrap_or(false);
-                    if let Some(buf) = self.current_buffer_mut() {
-                        buf.set_search_pattern(pattern);
-                    }
+                    self.with_buffer(|buf| buf.set_search_pattern(pattern));
                     if global {
                         let count = self
                             .current_buffer_mut()
@@ -3852,9 +3819,7 @@ impl Editor {
             // :12 — jump to line 12 (1-based), same as vim
             _ if cmd.chars().all(|c| c.is_ascii_digit()) => {
                 if let Ok(n) = cmd.parse::<usize>() {
-                    if let Some(buf) = self.current_buffer_mut() {
-                        buf.goto_line(n);
-                    }
+                    self.with_buffer(|buf| buf.goto_line(n));
                 }
             },
             _ => {
@@ -3964,11 +3929,11 @@ impl Editor {
             });
 
         if let Some((row, col, msg)) = next_diag {
-            if let Some(buf) = self.current_buffer_mut() {
+            self.with_buffer(|buf| {
                 buf.cursor.row = row;
                 buf.cursor.col = col;
                 buf.ensure_cursor_visible();
-            }
+            });
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to first diagnostic
@@ -3977,11 +3942,11 @@ impl Editor {
             });
 
             if let Some((row, col, msg)) = first_diag {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.cursor.row = row;
                     buf.cursor.col = col;
                     buf.ensure_cursor_visible();
-                }
+                });
                 self.set_status(format!("Diagnostic: {}", msg));
             }
         }
@@ -4007,11 +3972,11 @@ impl Editor {
             });
 
         if let Some((row, col, msg)) = prev_diag {
-            if let Some(buf) = self.current_buffer_mut() {
+            self.with_buffer(|buf| {
                 buf.cursor.row = row;
                 buf.cursor.col = col;
                 buf.ensure_cursor_visible();
-            }
+            });
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to last diagnostic
@@ -4020,11 +3985,11 @@ impl Editor {
             });
 
             if let Some((row, col, msg)) = last_diag {
-                if let Some(buf) = self.current_buffer_mut() {
+                self.with_buffer(|buf| {
                     buf.cursor.row = row;
                     buf.cursor.col = col;
                     buf.ensure_cursor_visible();
-                }
+                });
                 self.set_status(format!("Diagnostic: {}", msg));
             }
         }
@@ -4217,9 +4182,9 @@ impl Editor {
             let _ = tx.send(result);
         });
 
-        self.commit_msg_rx = Some(rx);
-        self.commit_msg_from_staged = from_staged;
-        self.commit_msg_buffer = String::new();
+        self.commit_msg.rx = Some(rx);
+        self.commit_msg.from_staged = from_staged;
+        self.commit_msg.buffer = String::new();
         self.mode = Mode::CommitMsg;
         self.set_status("Generating commit message…".to_string());
     }
@@ -4230,21 +4195,21 @@ impl Editor {
             // Esc — discard
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                self.commit_msg_buffer.clear();
-                self.commit_msg_rx = None;
+                self.commit_msg.buffer.clear();
+                self.commit_msg.rx = None;
                 self.set_status("Commit message discarded".to_string());
             },
             // Enter — commit with the current message
             KeyCode::Enter => {
-                let msg = self.commit_msg_buffer.trim().to_string();
+                let msg = self.commit_msg.buffer.trim().to_string();
                 if msg.is_empty() {
                     self.set_status("Commit message is empty".to_string());
                     return Ok(());
                 }
                 let out = std::process::Command::new("git").args(["commit", "-m", &msg]).output();
                 self.mode = Mode::Normal;
-                self.commit_msg_buffer.clear();
-                self.commit_msg_rx = None;
+                self.commit_msg.buffer.clear();
+                self.commit_msg.rx = None;
                 match out {
                     Ok(o) if o.status.success() => {
                         self.set_status("Committed successfully".to_string());
@@ -4258,11 +4223,11 @@ impl Editor {
             },
             // Backspace — delete last character
             KeyCode::Backspace => {
-                self.commit_msg_buffer.pop();
+                self.commit_msg.buffer.pop();
             },
             // Regular characters
             KeyCode::Char(ch) => {
-                self.commit_msg_buffer.push(ch);
+                self.commit_msg.buffer.push(ch);
             },
             _ => {},
         }
@@ -4271,9 +4236,9 @@ impl Editor {
 
     /// Enter `Mode::ReleaseNotes` — count-input phase.
     fn start_release_notes(&mut self) {
-        self.release_notes_buffer.clear();
-        self.release_notes_count_input = String::from("10");
-        self.release_notes_scroll = 0;
+        self.release_notes.buffer.clear();
+        self.release_notes.count_input = String::from("10");
+        self.release_notes.scroll = 0;
         self.mode = Mode::ReleaseNotes;
         self.set_status(
             "Enter number of commits (default 10) then press Enter to generate release notes"
@@ -4284,7 +4249,7 @@ impl Editor {
     /// Run git log, spawn AI task, transition to generating phase.
     fn trigger_release_notes_generation(&mut self) {
         let count: usize =
-            self.release_notes_count_input.trim().parse::<usize>().unwrap_or(10).clamp(1, 200);
+            self.release_notes.count_input.trim().parse::<usize>().unwrap_or(10).clamp(1, 200);
 
         let log_output = std::process::Command::new("git")
             .args(["log", "--format=%H%n%s%n%b%n---", &format!("-{count}")])
@@ -4323,16 +4288,16 @@ impl Editor {
             let _ = tx.send(result);
         });
 
-        self.release_notes_rx = Some(rx);
+        self.release_notes.rx = Some(rx);
         self.set_status(format!("Generating release notes from {count} commits…"));
     }
 
     /// Handle key events while in `Mode::ReleaseNotes`.
     fn handle_release_notes_mode(&mut self, key: KeyEvent) -> Result<()> {
         // Phase 2: generating — only Esc cancels.
-        if self.release_notes_rx.is_some() {
+        if self.release_notes.rx.is_some() {
             if key.code == KeyCode::Esc {
-                self.release_notes_rx = None;
+                self.release_notes.rx = None;
                 self.mode = Mode::Normal;
                 self.set_status("Release notes cancelled".to_string());
             }
@@ -4340,24 +4305,24 @@ impl Editor {
         }
 
         // Phase 3: displaying the result.
-        if !self.release_notes_buffer.is_empty() {
+        if !self.release_notes.buffer.is_empty() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.mode = Mode::Normal;
-                    self.release_notes_buffer.clear();
-                    self.release_notes_scroll = 0;
+                    self.release_notes.buffer.clear();
+                    self.release_notes.scroll = 0;
                     self.set_status("Release notes closed".to_string());
                 },
                 KeyCode::Char('y') => {
-                    let text = self.release_notes_buffer.clone();
+                    let text = self.release_notes.buffer.clone();
                     self.sync_system_clipboard(&text);
                     self.set_status("Release notes copied to clipboard".to_string());
                 },
                 KeyCode::Char('j') | KeyCode::Down => {
-                    self.release_notes_scroll = self.release_notes_scroll.saturating_add(1);
+                    self.release_notes.scroll = self.release_notes.scroll.saturating_add(1);
                 },
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.release_notes_scroll = self.release_notes_scroll.saturating_sub(1);
+                    self.release_notes.scroll = self.release_notes.scroll.saturating_sub(1);
                 },
                 _ => {},
             }
@@ -4368,17 +4333,17 @@ impl Editor {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                self.release_notes_count_input = String::from("10");
+                self.release_notes.count_input = String::from("10");
                 self.set_status("Cancelled".to_string());
             },
             KeyCode::Enter => {
                 self.trigger_release_notes_generation();
             },
             KeyCode::Backspace => {
-                self.release_notes_count_input.pop();
+                self.release_notes.count_input.pop();
             },
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
-                self.release_notes_count_input.push(ch);
+                self.release_notes.count_input.push(ch);
             },
             _ => {},
         }

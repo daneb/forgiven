@@ -69,6 +69,8 @@ that motivated it, what was decided, and the consequences.
 | [0059](0059-agent-file-context-picker.md) | Agent File Context Picker (Ctrl+P) | Accepted |
 | [0060](0060-vim-char-motions.md) | Vim Character Motions (f/t/F/T, dt/df/yt/yf/ct/cf) | Accepted |
 | [0061](0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration | Accepted |
+| [0062](0062-offline-resilience.md) | Offline Resilience: Request Timeouts, MCP Startup Bound, and Error Visibility | Accepted |
+| [0063](0063-structural-refactor-buffer-combinator-render-context-editor-substates.md) | Structural Refactor: Buffer Combinator, RenderContext, and Editor Sub-states | Accepted |
 
 ## What is an ADR?
 

@@ -188,6 +188,9 @@ pub struct AgentPanel {
     pub awaiting_continuation: bool,
     /// Live status of the background Copilot task (shown in the panel title).
     pub status: AgentStatus,
+    /// Set by `poll_stream()` when a `StreamEvent::Error` arrives so the
+    /// editor run-loop can forward it to the status bar.  Cleared on read.
+    pub last_error: Option<String>,
     /// Token counts from the last API response (0 = not yet received).
     pub last_prompt_tokens: u32,
     pub last_completion_tokens: u32,
@@ -358,6 +361,7 @@ impl AgentPanel {
             max_rounds: 20,
             awaiting_continuation: false,
             status: AgentStatus::Idle,
+            last_error: None,
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
             code_block_idx: 0,
@@ -888,6 +892,7 @@ Available tools:\n\
                             role: Role::Assistant,
                             content: format!("[Error: {e}]"),
                         });
+                        self.last_error = Some(e);
                         self.streaming_reply = None;
                         self.stream_rx = None;
                         self.continuation_tx = None;
@@ -1699,7 +1704,10 @@ async fn start_chat_stream_with_tools(
         "max_tokens": 4096
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
     let mut retry_attempts = 0;
     let max_retries = 5;
     let mut delay = tokio::time::Duration::from_secs(1);
@@ -1760,7 +1768,10 @@ async fn start_chat_stream_with_tools(
 /// Fetch chat-capable models from the Copilot `/models` endpoint.
 /// Returns `ModelVersion` pairs (id + display name) sorted with gpt-4o first, then alphabetically by id.
 async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
     let mut retry_attempts = 0;
     let max_retries = 5;
     let mut delay = tokio::time::Duration::from_secs(1);
@@ -1929,7 +1940,10 @@ pub async fn one_shot_complete(
         "max_tokens": max_tokens
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
     let resp = client
         .post("https://api.githubcopilot.com/chat/completions")
         .header("Authorization", format!("Bearer {api_token}"))
@@ -1958,7 +1972,10 @@ pub async fn one_shot_complete(
 }
 
 async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
     let mut retry_attempts = 0;
     let max_retries = 3;
     let mut delay = tokio::time::Duration::from_secs(1);
