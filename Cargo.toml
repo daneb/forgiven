@@ -1,6 +1,6 @@
 [package]
 name = "forgiven"
-version = "0.8.0-alpha.1"
+version = "0.8.5-alpha.1"
 edition = "2021"
 authors = ["Dane Balia"]
 description = "An AI-first, terminal-based code editor with GitHub Copilot agent integration"
@@ -51,7 +51,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], defau
 futures-util = "0.3"
 
 # Syntax highlighting
-syntect = { version = "5", default-features = false, features = ["default-themes", "default-syntaxes", "regex-fancy"] }
+syntect = { version = "5", default-features = false, features = ["default-themes", "default-syntaxes", "regex-fancy", "yaml-load"] }
 
 # System clipboard
 arboard = "3"

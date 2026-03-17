@@ -21,6 +21,7 @@ use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::search::{run_search, SearchState, SearchStatus};
 use crate::spec_framework;
 use crate::ui::{RenderContext, UI};
@@ -232,6 +233,10 @@ pub struct Editor {
     /// Path of the entry pending deletion (Mode::DeleteFile).
     delete_confirm_path: Option<std::path::PathBuf>,
 
+    // ── Binary / unsupported file popup ───────────────────────────────────────
+    /// Path of a binary file that cannot be opened as text (Mode::BinaryFile).
+    pub binary_file_path: Option<std::path::PathBuf>,
+
     // ── Explorer new folder popup ─────────────────────────────────────────────
     /// Folder name being typed while in Mode::NewFolder.
     new_folder_buffer: String,
@@ -263,6 +268,12 @@ pub struct Editor {
     /// Polled each tick; cleared and wired into `agent_panel` on first `Ok`.
     mcp_rx: Option<oneshot::Receiver<McpManager>>,
 
+    // ── Filesystem watcher ────────────────────────────────────────────────────
+    /// Watches paths of all open buffers; detects external changes.
+    file_watcher: Option<RecommendedWatcher>,
+    /// Receives raw notify events; polled each tick.
+    watcher_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+
     // ── In-memory log ring buffer ─────────────────────────────────────────────
     /// Recent WARN/ERROR log entries captured from the tracing subscriber.
     /// Shared with the tracing layer via Arc<Mutex<...>>.
@@ -288,7 +299,7 @@ impl Editor {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
-        Ok(Self {
+        let mut editor = Self {
             buffers: Vec::new(),
             current_buffer_idx: 0,
             mode: Mode::Normal,
@@ -331,6 +342,7 @@ impl Editor {
             rename_buffer: String::new(),
             rename_source: None,
             delete_confirm_path: None,
+            binary_file_path: None,
             new_folder_buffer: String::new(),
             new_folder_parent: None,
             show_file_info: false,
@@ -343,12 +355,28 @@ impl Editor {
             },
             mcp_manager: None,
             mcp_rx: None,
+            file_watcher: None,
+            watcher_rx: None,
             log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
             startup_elapsed: None,
             config,
-        })
+        };
+
+        // Spin up the filesystem watcher (best-effort; degrades gracefully).
+        let (tx, rx) = std::sync::mpsc::channel();
+        match notify::recommended_watcher(tx) {
+            Ok(w) => {
+                editor.file_watcher = Some(w);
+                editor.watcher_rx = Some(rx);
+            },
+            Err(e) => {
+                tracing::warn!("Filesystem watcher unavailable: {e}");
+            },
+        }
+
+        Ok(editor)
     }
 
     /// Render a loading frame while async setup (LSP / MCP) is in progress.
@@ -427,6 +455,20 @@ impl Editor {
     /// Creates an empty buffer for non-existent files (new file workflow).
     /// Returns Ok(()) for unsupported binary files, displaying a status message instead of crashing.
     pub fn open_file(&mut self, path: &std::path::Path) -> Result<()> {
+        // Binary-file guard — probe first 8 KB for null bytes.
+        if path.exists() {
+            use std::io::Read as _;
+            let mut probe = [0u8; 8192];
+            if let Ok(mut f) = std::fs::File::open(path) {
+                let n = f.read(&mut probe).unwrap_or(0);
+                if probe[..n].contains(&0u8) {
+                    self.binary_file_path = Some(path.to_path_buf());
+                    self.mode = Mode::BinaryFile;
+                    return Ok(());
+                }
+            }
+        }
+
         let buffer = if path.exists() {
             match Buffer::from_file(path.to_path_buf()) {
                 Ok(buf) => buf,
@@ -466,6 +508,13 @@ impl Editor {
         if let Ok(uri) = LspManager::path_to_uri(path) {
             if let Some(client) = self.lsp_manager.get_client(&language) {
                 let _ = client.did_open(uri, language.clone(), text);
+            }
+        }
+
+        // Register with the filesystem watcher so external changes are detected.
+        if let Some(ref mut watcher) = self.file_watcher {
+            if let Some(ref buf_path) = self.buffers.last().and_then(|b| b.file_path.clone()) {
+                let _ = watcher.watch(buf_path, RecursiveMode::NonRecursive);
             }
         }
 
@@ -570,6 +619,30 @@ impl Editor {
 
         // Render on the very first frame regardless of activity.
         let mut needs_render = true;
+        // Set to true whenever the terminal cell grid may be stale (resize, SIGCONT, Ctrl+L).
+        // A full terminal clear is issued before the next render to force a repaint.
+        let mut force_clear = false;
+
+        // ── SIGCONT: laptop-lid-open / process-resume repaint ─────────────────
+        // When the OS suspends and resumes a process it sends SIGCONT.  The
+        // terminal has already forgotten our screen contents, so we must clear
+        // and repaint everything.  Tokio's signal module is already available
+        // (tokio full feature); no extra dependency is needed.
+        #[cfg(unix)]
+        let (sigcont_tx, mut sigcont_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        #[cfg(unix)]
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            // SIGCONT = 18 on Linux and macOS.
+            if let Ok(mut sig) = signal(SignalKind::from_raw(18)) {
+                loop {
+                    sig.recv().await;
+                    if sigcont_tx.send(()).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
 
         loop {
             // ── LSP: process incoming notifications / responses ────────────────
@@ -693,6 +766,50 @@ impl Editor {
                 if reloaded {
                     self.set_status(format!("↺ reloaded {rel_path}"));
                     needs_render = true;
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
+            // ── Filesystem watcher: reload buffers changed externally ──────────
+            let fs_changed_paths: Vec<std::path::PathBuf> =
+                if let Some(ref rx) = self.watcher_rx {
+                    let mut paths = Vec::new();
+                    while let Ok(Ok(event)) = rx.try_recv() {
+                        use notify::EventKind;
+                        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                            paths.extend(event.paths);
+                        }
+                    }
+                    paths
+                } else {
+                    Vec::new()
+                };
+
+            for changed_path in fs_changed_paths {
+                let canonical =
+                    changed_path.canonicalize().unwrap_or_else(|_| changed_path.clone());
+                let mut status_msg: Option<String> = None;
+                for buf in &mut self.buffers {
+                    let matches = buf
+                        .file_path
+                        .as_ref()
+                        .map(|fp| fp.canonicalize().unwrap_or_else(|_| fp.clone()) == canonical)
+                        .unwrap_or(false);
+                    if !matches {
+                        continue;
+                    }
+                    if buf.is_modified {
+                        status_msg = Some(format!(
+                            "⚠ external change to '{}' (unsaved — :e! to reload)",
+                            buf.name
+                        ));
+                    } else if buf.reload_from_disk().is_ok() {
+                        status_msg = Some(format!("↺ {} reloaded", buf.name));
+                    }
+                    needs_render = true;
+                }
+                if let Some(msg) = status_msg {
+                    self.set_status(msg);
                 }
             }
             // ──────────────────────────────────────────────────────────────────
@@ -857,8 +974,19 @@ impl Editor {
                 needs_render = true;
             }
 
+            // ── SIGCONT: drain any pending resume notifications ────────────────
+            #[cfg(unix)]
+            while sigcont_rx.try_recv().is_ok() {
+                force_clear = true;
+                needs_render = true;
+            }
+
             // ── Render (only when something changed) ───────────────────────────
             if needs_render {
+                if force_clear {
+                    self.terminal.clear()?;
+                    force_clear = false;
+                }
                 self.render()?;
                 needs_render = false;
             }
@@ -867,7 +995,15 @@ impl Editor {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) => {
-                        self.handle_key(key)?;
+                        // Ctrl+L: force a full redraw (universal terminal convention).
+                        // Intercepted before handle_key so it works in every mode.
+                        if key.code == KeyCode::Char('l')
+                            && key.modifiers == KeyModifiers::CONTROL
+                        {
+                            force_clear = true;
+                        } else {
+                            self.handle_key(key)?;
+                        }
                         needs_render = true;
                     },
                     // Bracketed paste: the terminal wraps pasted text in escape sequences
@@ -875,6 +1011,12 @@ impl Editor {
                     // of KeyCode::Char / KeyCode::Enter events.
                     Event::Paste(text) => {
                         self.handle_paste(text)?;
+                        needs_render = true;
+                    },
+                    // Terminal resize: the cell grid has been invalidated — clear and
+                    // repaint so ratatui lays out to the new dimensions correctly.
+                    Event::Resize(_, _) => {
+                        force_clear = true;
                         needs_render = true;
                     },
                     _ => {},
@@ -965,11 +1107,13 @@ impl Editor {
         // Collect the cache key from an immutable borrow (borrow ends before mut access).
         let cache_key = self.current_buffer().map(|buf| {
             let ext = buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default();
-            (buf.scroll_row, buf.lsp_version, ext)
+            let name =
+                buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default();
+            (buf.scroll_row, buf.lsp_version, ext, name)
         });
 
         let highlighted_lines: Option<Arc<Vec<Vec<Span<'static>>>>> =
-            if let Some((scroll_row, lsp_ver, ext)) = cache_key {
+            if let Some((scroll_row, lsp_ver, ext, name)) = cache_key {
                 let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
                     c.buffer_idx == buf_idx
                         && c.scroll_row == scroll_row
@@ -985,7 +1129,7 @@ impl Editor {
                         let end = (scroll_row + term_height).min(buf.lines().len());
                         buf.lines()[scroll_row..end]
                             .iter()
-                            .map(|line| self.highlighter.highlight_line(line, &ext))
+                            .map(|line| self.highlighter.highlight_line(line, &ext, &name))
                             .collect::<Vec<_>>()
                     } else {
                         Vec::new()
@@ -1085,6 +1229,11 @@ impl Editor {
                         .as_deref()
                         .map(Highlighter::extension_for)
                         .unwrap_or_default();
+                    let split_name = split_buf
+                        .file_path
+                        .as_deref()
+                        .map(Highlighter::filename_for)
+                        .unwrap_or_default();
                     let cache_hit = self.split.highlight_cache.as_ref().is_some_and(|c| {
                         c.buffer_idx == split_idx
                             && c.scroll_row == split_scroll
@@ -1098,7 +1247,7 @@ impl Editor {
                         let spans: Vec<Vec<ratatui::text::Span<'static>>> = split_buf.lines()
                             [split_scroll..end]
                             .iter()
-                            .map(|line| self.highlighter.highlight_line(line, &split_ext))
+                            .map(|line| self.highlighter.highlight_line(line, &split_ext, &split_name))
                             .collect();
                         let arc = Arc::new(spans);
                         self.split.highlight_cache = Some(HighlightCache {
@@ -1269,6 +1418,7 @@ impl Editor {
                 commit_msg: commit_msg_buf,
                 release_notes: release_notes_view.as_ref(),
                 diag_overlay: diag_overlay.as_ref(),
+                binary_file_path: self.binary_file_path.as_deref(),
                 startup_elapsed: self.startup_elapsed,
                 file_info: file_info_data.as_ref(),
             };
@@ -1387,6 +1537,7 @@ impl Editor {
                 // Any key closes the overlay.
                 self.mode = Mode::Normal;
             },
+            Mode::BinaryFile => self.handle_binary_file_mode(key)?,
         }
 
         Ok(())
@@ -1617,11 +1768,19 @@ impl Editor {
                                 self.split.highlight_cache = None;
                             }
                         }
-                        let name = self.buffers[closing_idx].name.clone();
+                        let closing_buf = &self.buffers[closing_idx];
+                        let name = closing_buf.name.clone();
+                        let closed_path = closing_buf.file_path.clone();
                         self.buffers.remove(closing_idx);
                         if !self.buffers.is_empty() {
                             self.current_buffer_idx =
                                 self.current_buffer_idx.min(self.buffers.len() - 1);
+                        }
+                        // Stop watching the closed file.
+                        if let (Some(ref mut watcher), Some(ref p)) =
+                            (&mut self.file_watcher, &closed_path)
+                        {
+                            let _ = watcher.unwatch(p);
                         }
                         self.set_status(format!("Closed buffer: {}", name));
                     }
@@ -1642,11 +1801,18 @@ impl Editor {
                             self.split.highlight_cache = None;
                         }
                     }
-                    let name = self.buffers[closing_idx].name.clone();
+                    let force_closing_buf = &self.buffers[closing_idx];
+                    let name = force_closing_buf.name.clone();
+                    let closed_path = force_closing_buf.file_path.clone();
                     self.buffers.remove(closing_idx);
                     if !self.buffers.is_empty() {
                         self.current_buffer_idx =
                             self.current_buffer_idx.min(self.buffers.len() - 1);
+                    }
+                    if let (Some(ref mut watcher), Some(ref p)) =
+                        (&mut self.file_watcher, &closed_path)
+                    {
+                        let _ = watcher.unwatch(p);
                     }
                     self.set_status(format!("Closed buffer (discarded): {}", name));
                 }
@@ -2833,6 +2999,34 @@ impl Editor {
                 self.delete_confirm_path = None;
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
+    // ── Binary file popup mode key handling ───────────────────────────────────
+
+    fn handle_binary_file_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('o') => {
+                if let Some(ref path) = self.binary_file_path {
+                    #[cfg(target_os = "macos")]
+                    {
+                        std::process::Command::new("open").arg(path).spawn().ok();
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        std::process::Command::new("xdg-open").arg(path).spawn().ok();
+                    }
+                    self.set_status("Opened in default app".to_string());
+                }
+                self.binary_file_path = None;
+                self.mode = Mode::Normal;
+            },
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.binary_file_path = None;
+                self.mode = Mode::Normal;
             },
             _ => {},
         }
@@ -4371,6 +4565,33 @@ impl Editor {
             .and_then(|s| s.to_str())
             .unwrap_or("preview")
             .to_string();
+
+        // ── If the file is already HTML, open it directly ─────────────────────
+        let is_html = self
+            .current_buffer()
+            .and_then(|b| b.file_path.as_ref())
+            .and_then(|p| p.extension())
+            .map(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+            .unwrap_or(false);
+
+        if is_html {
+            let path = std::env::temp_dir().join(format!("forgiven_{file_stem}.html"));
+            if let Err(e) = std::fs::write(&path, &content) {
+                self.set_status(format!("Failed to write temp file: {e}"));
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            let opener = "open";
+            #[cfg(target_os = "linux")]
+            let opener = "xdg-open";
+            #[cfg(target_os = "windows")]
+            let opener = "explorer";
+            match std::process::Command::new(opener).arg(&path).spawn() {
+                Ok(_) => self.set_status(format!("Opened {file_stem}.html in browser")),
+                Err(e) => self.set_status(format!("Failed to open browser: {e}")),
+            }
+            return;
+        }
 
         // ── Render markdown → HTML body ───────────────────────────────────────
         let parser = pulldown_cmark::Parser::new_ext(&content, pulldown_cmark::Options::all());

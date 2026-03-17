@@ -1705,7 +1705,7 @@ async fn start_chat_stream_with_tools(
     });
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
     let mut retry_attempts = 0;

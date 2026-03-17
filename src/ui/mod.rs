@@ -180,6 +180,8 @@ pub struct RenderContext<'a> {
     pub release_notes: Option<&'a ReleaseNotesView<'a>>,
     /// Diagnostics overlay data (Mode::Diagnostics only).
     pub diag_overlay: Option<&'a DiagnosticsData<'a>>,
+    /// Path of the binary file that triggered Mode::BinaryFile; `None` otherwise.
+    pub binary_file_path: Option<&'a std::path::Path>,
     /// Time from process start to the editor being ready; shown on welcome screen.
     pub startup_elapsed: Option<std::time::Duration>,
     /// File-info popup data (explorer `i` key); `None` = hidden.
@@ -218,6 +220,7 @@ impl UI {
         let commit_msg = ctx.commit_msg;
         let release_notes = ctx.release_notes;
         let diag_overlay = ctx.diag_overlay;
+        let binary_file_path = ctx.binary_file_path;
         let startup_elapsed = ctx.startup_elapsed;
         let file_info = ctx.file_info;
 
@@ -425,6 +428,11 @@ impl UI {
             Self::render_delete_popup(frame, name, size);
         }
 
+        // Render binary file popup if active
+        if let Some(path) = binary_file_path {
+            Self::render_binary_file_popup(frame, path, size);
+        }
+
         // Render new folder popup if active
         if let Some(name) = new_folder_buffer {
             Self::render_new_folder_popup(frame, name, size);
@@ -539,8 +547,8 @@ impl UI {
                         continue;
                     }
                     let (label, color) = match msg.role {
-                        Role::User => ("You", Color::Green),
-                        Role::Assistant => ("Copilot", Color::Cyan),
+                        Role::User => ("🧑 You", Color::Green),
+                        Role::Assistant => ("🤖 Copilot", Color::Cyan),
                         Role::System => unreachable!(),
                     };
                     ml.push(Line::from(vec![Span::styled(
@@ -561,7 +569,7 @@ impl UI {
                 if let Some(ref partial) = panel.streaming_reply {
                     let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
                         Span::styled(
-                            "╔ Copilot ",
+                            "╔ 🤖 Copilot ",
                             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
@@ -2000,6 +2008,7 @@ impl UI {
             Mode::CommitMsg => "COMMIT",
             Mode::ReleaseNotes => "RELEASE",
             Mode::Diagnostics => "DIAG",
+            Mode::BinaryFile => "BINARY",
         };
 
         let mode_color = match mode {
@@ -2022,6 +2031,7 @@ impl UI {
             Mode::CommitMsg => Color::LightYellow,
             Mode::ReleaseNotes => Color::LightCyan,
             Mode::Diagnostics => Color::LightCyan,
+            Mode::BinaryFile => Color::Yellow,
         };
 
         let mut spans = vec![
@@ -2112,6 +2122,28 @@ impl UI {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red))
             .title(" Delete ");
+        frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
+    /// Render the centred binary-file popup (Mode::BinaryFile).
+    fn render_binary_file_popup(frame: &mut Frame, path: &std::path::Path, area: Rect) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let popup_width = 64.min(area.width);
+        let popup_height = 3u16;
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let display = format!(" Binary file '{name}'   [o] open   [Esc] dismiss ");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Unsupported file ");
         frame.render_widget(Paragraph::new(display).block(block), popup_area);
     }
 

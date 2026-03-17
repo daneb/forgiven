@@ -71,6 +71,8 @@ that motivated it, what was decided, and the consequences.
 | [0061](0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration | Accepted |
 | [0062](0062-offline-resilience.md) | Offline Resilience: Request Timeouts, MCP Startup Bound, and Error Visibility | Accepted |
 | [0063](0063-structural-refactor-buffer-combinator-render-context-editor-substates.md) | Structural Refactor: Buffer Combinator, RenderContext, and Editor Sub-states | Accepted |
+| [0064](0064-filesystem-watcher-external-reload.md) | Filesystem Watcher: External Change Detection and Auto-Reload | Accepted |
+| [0065](0065-terminal-redraw-on-resume.md) | Terminal Redraw on Resume (Resize, SIGCONT, Ctrl+L) | Accepted |
 
 ## What is an ADR?
 

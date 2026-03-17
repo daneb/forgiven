@@ -24,6 +24,7 @@ pub enum Mode {
     CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
     ReleaseNotes,    // Release notes generation popup (SPC g n)
     Diagnostics,     // Read-only diagnostics overlay (SPC d)
+    BinaryFile,      // Unsupported binary file popup: o=open default app, Esc=dismiss
 }
 
 /// An editor action to be executed
