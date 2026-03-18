@@ -40,8 +40,8 @@ impl Highlighter {
     fn build_syntax_set() -> SyntaxSet {
         // Extra grammars not in syntect's default bundle.
         const EXTRA: &[(&str, &str)] = &[
-            ("TOML",        include_str!("syntaxes/TOML.sublime-syntax")),
-            ("PowerShell",  include_str!("syntaxes/PowerShell.sublime-syntax")),
+            ("TOML", include_str!("syntaxes/TOML.sublime-syntax")),
+            ("PowerShell", include_str!("syntaxes/PowerShell.sublime-syntax")),
         ];
 
         let mut builder: SyntaxSetBuilder = SyntaxSet::load_defaults_newlines().into_builder();
@@ -52,7 +52,7 @@ impl Highlighter {
                 Err(e) => {
                     // Non-fatal — fall back to plain text for this grammar.
                     tracing::warn!("Failed to load bundled syntax '{}': {}", name, e);
-                }
+                },
             }
         }
 
@@ -66,7 +66,12 @@ impl Highlighter {
     /// Falls back to plain text if no matching syntax is found.
     ///
     /// Returns a `Vec<Span<'static>>` ready for ratatui rendering.
-    pub fn highlight_line(&self, line: &str, extension: &str, filename: &str) -> Vec<Span<'static>> {
+    pub fn highlight_line(
+        &self,
+        line: &str,
+        extension: &str,
+        filename: &str,
+    ) -> Vec<Span<'static>> {
         let syntax = self
             .ps
             .find_syntax_by_extension(extension)
@@ -120,13 +125,13 @@ impl Highlighter {
             // Dockerfiles — use Shell Script (closest bundled grammar)
             "dockerfile" | "dockerfile.dev" | "dockerfile.prod" | "dockerfile.test" => {
                 self.ps.find_syntax_by_extension("sh")
-            }
+            },
             // Make / Rake
             "makefile" | "gnumakefile" | "rakefile" => self.ps.find_syntax_by_name("Makefile"),
             // Common shell dot-files without an extension
             ".bashrc" | ".zshrc" | ".bash_profile" | ".profile" | ".bash_aliases" => {
                 self.ps.find_syntax_by_extension("sh")
-            }
+            },
             _ => None,
         }
     }
@@ -168,7 +173,13 @@ mod tests {
     #[test]
     fn extra_syntaxes_resolve() {
         let h = Highlighter::new();
-        for (ext, label) in [("toml","TOML"), ("ps1","PowerShell"), ("sh","Shell"), ("yml","YAML"), ("html","HTML")] {
+        for (ext, label) in [
+            ("toml", "TOML"),
+            ("ps1", "PowerShell"),
+            ("sh", "Shell"),
+            ("yml", "YAML"),
+            ("html", "HTML"),
+        ] {
             assert!(
                 h.ps.find_syntax_by_extension(ext).is_some(),
                 "missing syntax for .{ext} ({label})"

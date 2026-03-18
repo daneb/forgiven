@@ -120,8 +120,8 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub agent: AgentConfig,
-    /// Preferred Copilot model ID (e.g., "gpt-4o", "claude-3.5-sonnet").
-    /// Falls back to "gpt-4o" if not set or if the model is no longer available.
+    /// Preferred Copilot model ID (e.g., "claude-sonnet-4", "gpt-5.1", "gemini-2.5-pro").
+    /// Falls back to "claude-sonnet-4" if not set or if the model is no longer available.
     #[serde(default = "default_copilot_model")]
     pub default_copilot_model: String,
     /// Maximum number of agentic tool-calling rounds before prompting the user.
@@ -140,7 +140,7 @@ fn default_use_spaces() -> bool {
     true
 }
 fn default_copilot_model() -> String {
-    "gpt-4o".to_string()
+    "claude-sonnet-4".to_string()
 }
 fn default_max_agent_rounds() -> usize {
     20

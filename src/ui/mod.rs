@@ -290,11 +290,13 @@ impl UI {
         let editor_area = content_area;
 
         // ── Vertical layout (buffer + status) inside editor_area ─────────────
-        let constraints = if which_key_options.is_some() {
+        let constraints = if let Some(wk) = which_key_options {
+            // 2 (borders) + 1 (header) + number of options
+            let wk_height = (wk.len() as u16) + 3;
             vec![
-                Constraint::Min(1),     // Main buffer area
-                Constraint::Length(10), // Which-key popup
-                Constraint::Length(1),  // Status line
+                Constraint::Min(1),            // Main buffer area
+                Constraint::Length(wk_height), // Which-key popup (dynamic)
+                Constraint::Length(1),         // Status line
             ]
         } else {
             vec![
@@ -490,10 +492,12 @@ impl UI {
             .sum();
         // At least 1 text line; at most 10 text lines to keep history visible.
         let input_text_lines = total_wrapped.clamp(1, 10) as u16;
-        // Each pasted block adds one summary line; each file block adds one badge line.
+        // Each pasted/image/file block adds one summary line.
         let paste_summary_lines = panel.pasted_blocks.len() as u16;
+        let image_summary_lines = panel.image_blocks.len() as u16;
         let file_summary_lines = panel.file_blocks.len() as u16;
-        let input_height = input_text_lines + paste_summary_lines + file_summary_lines + 2; // +2 borders
+        let input_height =
+            input_text_lines + paste_summary_lines + image_summary_lines + file_summary_lines + 2;
 
         // Task strip height: 0 when empty, otherwise tasks + 2 border rows (capped at 8).
         let task_strip_height =
@@ -556,6 +560,17 @@ impl UI {
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     )]));
                     ml.extend(render_message_content(&msg.content, content_width));
+                    // Render image attachment placeholders.
+                    if !msg.images.is_empty() {
+                        let img_style =
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM);
+                        for (w, h) in &msg.images {
+                            ml.push(Line::from(Span::styled(
+                                format!("  Image ({w}x{h}) [attached]"),
+                                img_style,
+                            )));
+                        }
+                    }
                     ml.push(Line::from(""));
                 }
                 cache.msg_lines = ml;
@@ -714,11 +729,12 @@ impl UI {
         // ── Input box ─────────────────────────────────────────────────────────
         // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+P=attach file, Ctrl+T=model)"
+            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+V=paste image, Ctrl+P=attach file, Ctrl+T=model)"
                 .to_string()
         } else if panel.has_code_to_apply()
             && panel.input.is_empty()
             && panel.pasted_blocks.is_empty()
+            && panel.image_blocks.is_empty()
             && panel.file_blocks.is_empty()
         {
             " Message Copilot… | [a] diff+apply  Ctrl+P=attach  Ctrl+T=model ".to_string()
@@ -729,8 +745,8 @@ impl UI {
         let input_block =
             Block::default().title(hint).borders(Borders::ALL).border_style(border_style);
 
-        // Build input content: file block badges first (green), then pasted block
-        // badges (cyan), then the typed text.
+        // Build input content: file block badges (green), image badges (magenta),
+        // pasted block badges (cyan), then the typed text.
         let file_style = Style::default().fg(Color::LightGreen).add_modifier(Modifier::DIM);
         let mut input_lines: Vec<Line> = panel
             .file_blocks
@@ -745,6 +761,11 @@ impl UI {
                 Line::from(Span::styled(label, file_style))
             })
             .collect();
+        let image_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM);
+        input_lines.extend(panel.image_blocks.iter().map(|img| {
+            let label = format!("  Image ({}x{})", img.width, img.height);
+            Line::from(Span::styled(label, image_style))
+        }));
         let paste_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
         input_lines.extend(panel.pasted_blocks.iter().map(|(_, n)| {
             let label = format!("⎘  Pasted {} line{}", n, if *n == 1 { "" } else { "s" });
@@ -754,10 +775,22 @@ impl UI {
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
         }
+        // When the input content exceeds the visible area, scroll so the cursor
+        // (last line) stays visible.  The badges (file/image/paste) count as
+        // lines above the typed text; the box interior is input_height − 2.
+        let badge_lines = (paste_summary_lines + image_summary_lines + file_summary_lines) as usize;
+        let total_content_lines = badge_lines + total_wrapped;
+        let visible_lines = input_height.saturating_sub(2) as usize; // interior rows
+        let input_scroll = if total_content_lines > visible_lines {
+            (total_content_lines - visible_lines) as u16
+        } else {
+            0
+        };
         let input_para = Paragraph::new(input_lines)
             .block(input_block)
             .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((input_scroll, 0));
         frame.render_widget(input_para, input_area);
 
         // Ctrl+P file-context picker — rendered just above the input box.
@@ -1016,19 +1049,58 @@ impl UI {
 
     /// Render the ask_user dialog anchored to the bottom of the agent panel.
     /// Constrained to the panel area so it never overlaps the file explorer.
-    /// Width is kept moderate so the dialog is taller rather than wider.
+    /// Supports newlines in the question text and scrolls if the content is
+    /// taller than the available area.
     fn render_ask_user_dialog(frame: &mut Frame, state: &AskUserState, area: Rect) {
-        let n_opts = state.options.len() as u16;
-        // Use 92% of the panel width — moderate enough to be taller than wide.
+        // Use 92% of the panel width.
         let dialog_width = ((area.width * 92) / 100).max(20);
-        // Inner width (subtract 2 for borders) used for word-wrap line count.
         let inner_w = dialog_width.saturating_sub(2) as usize;
-        // Estimate wrapped line count, adding 50% headroom for word-break overheads.
-        let q_chars = state.question.chars().count();
-        let q_lines_est = if inner_w == 0 { 1 } else { q_chars.div_ceil(inner_w).max(1) };
-        let q_lines = ((q_lines_est * 3) / 2).max(1) as u16;
-        // 2 borders + q_lines + 1 blank + options + 1 blank + 1 hint.
-        let dialog_height = (2 + q_lines + 1 + n_opts + 1 + 1).min(area.height.saturating_sub(2));
+
+        // ── Build question lines respecting newlines + word wrap ────────────
+        let q_style = Style::default().fg(Color::White);
+        let mut q_display_rows: u16 = 0;
+        let q_lines: Vec<Line> = state
+            .question
+            .lines()
+            .flat_map(|raw_line| {
+                let trimmed = raw_line.trim();
+                if trimmed.is_empty() {
+                    q_display_rows += 1;
+                    return vec![Line::from("")];
+                }
+                // Estimate how many display rows this logical line occupies
+                // after word-wrap (character count / inner width, rounded up).
+                let wrapped = if inner_w == 0 {
+                    1u16
+                } else {
+                    (trimmed.chars().count() as u16).div_ceil(inner_w as u16).max(1)
+                };
+                q_display_rows += wrapped;
+                vec![Line::from(Span::styled(trimmed.to_string(), q_style))]
+            })
+            .collect();
+
+        // ── Build option + hint lines ──────────────────────────────────────
+        let mut opt_lines: Vec<Line> = vec![Line::from("")]; // blank separator
+        for (i, option) in state.options.iter().enumerate() {
+            let (prefix, style) = if i == state.selected {
+                ("▶ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default().fg(Color::White))
+            };
+            opt_lines.push(Line::from(Span::styled(format!("{prefix}{option}"), style)));
+        }
+        opt_lines.push(Line::from(""));
+        opt_lines.push(Line::from(Span::styled(
+            "↑/↓ or j/k = move   Enter = confirm   Esc = cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let opts_rows = opt_lines.len() as u16;
+        // Total content height: question display rows + options/hint.
+        let content_height = q_display_rows + opts_rows;
+        // 2 for borders, clamped to available panel area.
+        let dialog_height = (content_height + 2).min(area.height.saturating_sub(2));
 
         let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
         // Pin to the bottom of the panel so output above stays visible.
@@ -1045,38 +1117,16 @@ impl UI {
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
 
-        // Render the question text word-wrapped in its own paragraph.
-        let q_para = Paragraph::new(Span::styled(
-            state.question.clone(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ))
-        .wrap(Wrap { trim: false });
+        // ── Combine question + options into a single scrollable paragraph ──
+        let mut all_lines = q_lines;
+        all_lines.extend(opt_lines);
 
-        let q_area = Rect::new(inner.x, inner.y, inner.width, q_lines.min(inner.height));
-        frame.render_widget(q_para, q_area);
+        // Scroll: if content overflows, scroll so the options section is
+        // always visible at the bottom (question text scrolls off the top).
+        let scroll_row = content_height.saturating_sub(inner.height);
 
-        // Render options + hint below the question.
-        let opts_y = inner.y + q_lines + 1; // +1 for blank line
-        if opts_y < inner.y + inner.height {
-            let mut opt_lines: Vec<Line> = Vec::new();
-            for (i, option) in state.options.iter().enumerate() {
-                let (prefix, style) = if i == state.selected {
-                    ("▶ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-                } else {
-                    ("  ", Style::default().fg(Color::White))
-                };
-                opt_lines.push(Line::from(Span::styled(format!("{prefix}{option}"), style)));
-            }
-            opt_lines.push(Line::from(""));
-            opt_lines.push(Line::from(Span::styled(
-                "↑/↓ or j/k = move   Enter = confirm   Esc = cancel",
-                Style::default().fg(Color::DarkGray),
-            )));
-
-            let remaining = inner.height.saturating_sub(q_lines + 1);
-            let opts_area = Rect::new(inner.x, opts_y, inner.width, remaining);
-            frame.render_widget(Paragraph::new(opt_lines), opts_area);
-        }
+        let para = Paragraph::new(all_lines).wrap(Wrap { trim: false }).scroll((scroll_row, 0));
+        frame.render_widget(para, inner);
     }
 
     /// Render the file explorer tree on the left side.

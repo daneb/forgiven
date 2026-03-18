@@ -56,6 +56,10 @@ syntect = { version = "5", default-features = false, features = ["default-themes
 # System clipboard
 arboard = "3"
 
+# Image encoding (clipboard → PNG → base64 for agent vision)
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+
 # Markdown rendering (agent panel + editor preview)
 pulldown-cmark = "0.12"
 

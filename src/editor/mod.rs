@@ -21,11 +21,11 @@ use crate::highlight::Highlighter;
 use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::search::{run_search, SearchState, SearchStatus};
 use crate::spec_framework;
 use crate::ui::{RenderContext, UI};
 use lsp_types::Diagnostic;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::text::Span;
 
 /// Whether the clipboard was populated by a line-wise or char-wise operation.
@@ -771,19 +771,18 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Filesystem watcher: reload buffers changed externally ──────────
-            let fs_changed_paths: Vec<std::path::PathBuf> =
-                if let Some(ref rx) = self.watcher_rx {
-                    let mut paths = Vec::new();
-                    while let Ok(Ok(event)) = rx.try_recv() {
-                        use notify::EventKind;
-                        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                            paths.extend(event.paths);
-                        }
+            let fs_changed_paths: Vec<std::path::PathBuf> = if let Some(ref rx) = self.watcher_rx {
+                let mut paths = Vec::new();
+                while let Ok(Ok(event)) = rx.try_recv() {
+                    use notify::EventKind;
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        paths.extend(event.paths);
                     }
-                    paths
-                } else {
-                    Vec::new()
-                };
+                }
+                paths
+            } else {
+                Vec::new()
+            };
 
             for changed_path in fs_changed_paths {
                 let canonical =
@@ -997,8 +996,7 @@ impl Editor {
                     Event::Key(key) => {
                         // Ctrl+L: force a full redraw (universal terminal convention).
                         // Intercepted before handle_key so it works in every mode.
-                        if key.code == KeyCode::Char('l')
-                            && key.modifiers == KeyModifiers::CONTROL
+                        if key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL
                         {
                             force_clear = true;
                         } else {
@@ -1055,7 +1053,7 @@ impl Editor {
         // ── Scroll to keep cursor in view ─────────────────────────────────────
         // Must happen before the buffer snapshot so scroll_row/col are current.
         //
-        // viewport_height: subtract status line (1) and which-key popup (10) when shown.
+        // viewport_height: subtract status line (1) and which-key popup (dynamic) when shown.
         //
         // viewport_width: we must match the three-panel layout produced by UI::render()
         // so that horizontal scrolling kicks in at the right column.  The layout is:
@@ -1065,8 +1063,10 @@ impl Editor {
         //   neither        → [Min(1)]
         // Then subtract 2 for the diagnostic gutter that is always prepended.
         let size = self.terminal.size().unwrap_or_default();
+        // which-key popup: 2 (borders) + 1 (header) + number of options
+        let wk_height = which_key_options.as_ref().map_or(0, |opts| opts.len() + 3);
         let viewport_height =
-            (size.height as usize).saturating_sub(if show_which_key { 11 } else { 1 });
+            (size.height as usize).saturating_sub(if show_which_key { wk_height + 1 } else { 1 });
 
         const GUTTER: usize = 2;
         let total_w = size.width as usize;
@@ -1107,8 +1107,7 @@ impl Editor {
         // Collect the cache key from an immutable borrow (borrow ends before mut access).
         let cache_key = self.current_buffer().map(|buf| {
             let ext = buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default();
-            let name =
-                buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default();
+            let name = buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default();
             (buf.scroll_row, buf.lsp_version, ext, name)
         });
 
@@ -1247,7 +1246,9 @@ impl Editor {
                         let spans: Vec<Vec<ratatui::text::Span<'static>>> = split_buf.lines()
                             [split_scroll..end]
                             .iter()
-                            .map(|line| self.highlighter.highlight_line(line, &split_ext, &split_name))
+                            .map(|line| {
+                                self.highlighter.highlight_line(line, &split_ext, &split_name)
+                            })
                             .collect();
                         let arc = Arc::new(spans);
                         self.split.highlight_cache = Some(HighlightCache {
@@ -2685,6 +2686,34 @@ impl Editor {
             // Ctrl+P — open the file-context picker (attach a file to agent message).
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_at_picker();
+            },
+            // Ctrl+V — paste from clipboard (image-first, then text fallback).
+            // On macOS Cmd+V triggers bracketed paste (text only via Event::Paste);
+            // Ctrl+V is passed to the app and allows us to read images via arboard.
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                use crate::agent::AgentPanel;
+                match AgentPanel::try_paste_image() {
+                    Ok(Some(img)) => {
+                        let w = img.width;
+                        let h = img.height;
+                        self.agent_panel.image_blocks.push(img);
+                        self.set_status(format!("Image pasted ({w}x{h})"));
+                    },
+                    Ok(None) => {
+                        // No image — try text from clipboard.
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                            Ok(text) if !text.is_empty() => {
+                                self.handle_paste(text)?;
+                            },
+                            _ => {
+                                self.set_status("Clipboard empty".to_string());
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        self.set_status(format!("Image paste failed: {e}"));
+                    },
+                }
             },
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Eagerly load models if not yet fetched (brief one-time network call).

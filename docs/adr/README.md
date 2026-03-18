@@ -73,6 +73,10 @@ that motivated it, what was decided, and the consequences.
 | [0063](0063-structural-refactor-buffer-combinator-render-context-editor-substates.md) | Structural Refactor: Buffer Combinator, RenderContext, and Editor Sub-states | Accepted |
 | [0064](0064-filesystem-watcher-external-reload.md) | Filesystem Watcher: External Change Detection and Auto-Reload | Accepted |
 | [0065](0065-terminal-redraw-on-resume.md) | Terminal Redraw on Resume (Resize, SIGCONT, Ctrl+L) | Accepted |
+| [0066](0066-agent-image-clipboard-paste.md) | Agent Image Clipboard Paste | Accepted |
+| [0067](0067-agent-input-scroll-follow-cursor.md) | Agent Input Box Scroll-to-Cursor | Accepted |
+| [0068](0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting | Accepted |
+| [0069](0069-model-loading-modernisation.md) | Model Loading Modernisation | Accepted |
 
 ## What is an ADR?
 

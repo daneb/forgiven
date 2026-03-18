@@ -141,6 +141,72 @@ cargo build --release
 ./target/release/forgiven
 ```
 
+---
+
+## Configuration
+
+forgiven loads its configuration from `~/.config/forgiven/config.toml` (or
+`$XDG_CONFIG_HOME/forgiven/config.toml` if `XDG_CONFIG_HOME` is set). If the
+file does not exist, sensible defaults are used. The config is TOML and
+supports the following sections:
+
+```toml
+# ── Editor ────────────────────────────────────────────────────────────────
+tab_width           = 4          # spaces per tab (default: 4)
+use_spaces          = true       # expand tabs to spaces (default: true)
+default_copilot_model = "gpt-4o" # preferred Copilot model ID
+max_agent_rounds    = 20         # agentic tool rounds before pause (default: 20)
+agent_warning_threshold = 3      # warn N rounds before the limit (default: 3)
+
+# ── Agent / prompt framework ─────────────────────────────────────────────
+[agent]
+# "none"       — disabled (default)
+# "spec-kit"   — built-in Spec-Driven Development workflow
+# "/path/dir"  — custom framework: directory of .md template files
+spec_framework = "none"
+
+# ── LSP servers ──────────────────────────────────────────────────────────
+# Each [[lsp.servers]] entry registers a language server.
+# forgiven ships built-in defaults for rust-analyzer and copilot-language-server;
+# add your own or override them here.
+[[lsp.servers]]
+language = "rust"
+command  = "rust-analyzer"
+args     = []
+
+[[lsp.servers]]
+language = "python"
+command  = "pylsp"
+args     = []
+
+# Optional: env vars (values starting with $ are resolved from the host env)
+# [lsp.servers.env]
+# RUSTUP_TOOLCHAIN = "stable"
+
+# Optional: custom initialization_options forwarded to the LSP server
+# [lsp.servers.initialization_options]
+# some_key = "some_value"
+
+# ── MCP servers ──────────────────────────────────────────────────────────
+# Each [[mcp.servers]] entry registers a Model Context Protocol server.
+# Servers connect over stdio and provide additional tools to the agent.
+[[mcp.servers]]
+name    = "filesystem"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp.servers]]
+name    = "github"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-github"]
+# Env vars starting with $ are resolved from the host environment at startup.
+[mcp.servers.env]
+GITHUB_TOKEN = "$GITHUB_PERSONAL_ACCESS_TOKEN"
+```
+
+Use `SPC d` (Diagnostics overlay) to inspect running LSP and MCP servers,
+view connection errors, and check recent log entries.
+
 ### Optional runtime dependencies
 
 | Tool | Install | Required for |
@@ -325,7 +391,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0063)
+│   └── adr/                 # Architecture Decision Records (0001 – 0069)
 └── Cargo.toml
 ```
 
@@ -446,6 +512,12 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0061](docs/adr/0061-agent-stream-abort-and-ctrl-chord-migration.md) | Agent Stream Abort (`Ctrl+C`) and Ctrl-Chord Keybinding Migration |
 | [0062](docs/adr/0062-offline-resilience.md) | Offline Resilience: Request Timeouts, MCP Startup Bound, and Error Visibility |
 | [0063](docs/adr/0063-structural-refactor-buffer-combinator-render-context-editor-substates.md) | Structural Refactor: Buffer Combinator, RenderContext, and Editor Sub-states |
+| [0064](docs/adr/0064-filesystem-watcher-external-reload.md) | Filesystem Watcher: External Change Detection and Auto-Reload |
+| [0065](docs/adr/0065-terminal-redraw-on-resume.md) | Terminal Redraw on Resume (Resize, SIGCONT, Ctrl+L) |
+| [0066](docs/adr/0066-agent-image-clipboard-paste.md) | Agent Image Clipboard Paste |
+| [0067](docs/adr/0067-agent-input-scroll-follow-cursor.md) | Agent Input Box Scroll-to-Cursor |
+| [0068](docs/adr/0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting |
+| [0069](docs/adr/0069-model-loading-modernisation.md) | Model Loading Modernisation |
 
 ---
 

@@ -34,6 +34,21 @@ use crate::spec_framework::SpecFramework;
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Image attachment placeholders: `(width, height)`.
+    /// The base64 data is NOT stored in history to avoid unbounded memory growth.
+    pub images: Vec<(u32, u32)>,
+}
+
+/// An image captured from the system clipboard via Ctrl+V.
+/// Stored as a pre-encoded PNG base64 data URI ready for the API.
+#[derive(Debug, Clone)]
+pub struct ClipboardImage {
+    /// Width of the original image in pixels.
+    pub width: u32,
+    /// Height of the original image in pixels.
+    pub height: u32,
+    /// Complete data URI: `"data:image/png;base64,<encoded>"`.
+    pub data_uri: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +230,10 @@ pub struct AgentPanel {
     pub asking_user: Option<AskUserState>,
     /// Slash-command autocomplete dropdown state. Some while the user is typing a `/` command.
     pub slash_menu: Option<SlashMenuState>,
+    /// Images captured from the system clipboard via Ctrl+V.
+    /// Each entry is a pre-encoded PNG ready for submission.
+    /// Cleared by `submit()` via `std::mem::take`.
+    pub image_blocks: Vec<ClipboardImage>,
     /// Files attached via Ctrl+P picker: (display_name, content, line_count).
     /// display_name is the cwd-relative path shown as a badge.
     /// content is the (possibly truncated) file text injected at submit time.
@@ -225,13 +244,16 @@ pub struct AgentPanel {
 }
 
 /// A model returned by the Copilot `/models` endpoint.
-/// `id` is the API alias (e.g. "gpt-4o"); `version` is the pinned build sent in requests
-/// (e.g. "gpt-4o-2024-11-20"); `name` is the human-readable display label.
+/// `id` is the model identifier sent in API requests (e.g. "claude-sonnet-4", "gpt-5.1");
+/// `version` is informational metadata (e.g. "gpt-4o-2024-11-20");
+/// `name` is the human-readable display label shown in the UI.
 #[derive(Debug, Clone)]
 pub struct ModelVersion {
     pub id: String,
     pub version: String,
     pub name: String,
+    /// Context window size in tokens, parsed from `capabilities.limits.max_context_window_tokens`.
+    pub context_window: u32,
 }
 
 /// What the Copilot background task is actively doing right now.
@@ -366,6 +388,7 @@ impl AgentPanel {
             last_completion_tokens: 0,
             code_block_idx: 0,
             pasted_blocks: Vec::new(),
+            image_blocks: Vec::new(),
             mcp_manager: None,
             spec_framework: None,
             abort_tx: None,
@@ -377,13 +400,12 @@ impl AgentPanel {
         }
     }
 
-    /// The pinned model version to send in API requests.
-    /// Using `version` (e.g. "gpt-4o-2024-11-20") rather than the alias `id` ("gpt-4o")
-    /// ensures the Copilot API routes to the exact build, not an internal default.
-    /// Falls back to "gpt-4o" before the models list has been fetched.
+    /// The model `id` to send in API requests (e.g. "claude-sonnet-4", "gpt-5.1").
+    /// The Copilot API matches on this `id` field for routing.
+    /// Falls back to "claude-sonnet-4" before the models list has been fetched.
     pub fn selected_model_id(&self) -> &str {
         if self.available_models.is_empty() {
-            return "gpt-4o";
+            return "claude-sonnet-4";
         }
         &self.available_models[self.selected_model.min(self.available_models.len() - 1)].id
     }
@@ -391,25 +413,19 @@ impl AgentPanel {
     /// The human-readable display name for the selected model (shown in the UI).
     pub fn selected_model_display(&self) -> &str {
         if self.available_models.is_empty() {
-            return "gpt-4o";
+            return "Claude Sonnet 4";
         }
         &self.available_models[self.selected_model.min(self.available_models.len() - 1)].name
     }
 
-    /// Returns the known context-window size (in tokens) for the selected model.
+    /// Returns the context-window size (in tokens) for the selected model.
+    /// Uses the value reported by the Copilot `/models` API; falls back to 128k.
     pub fn context_window_size(&self) -> u32 {
-        let id = self.selected_model_id();
-        if id.starts_with("gpt-4o")
-            || id.starts_with("gpt-4")
-            || id.starts_with("o1")
-            || id.starts_with("o3")
-        {
-            128_000
-        } else if id.starts_with("claude") {
-            200_000
-        } else {
-            128_000
+        if self.available_models.is_empty() {
+            return 128_000;
         }
+        self.available_models[self.selected_model.min(self.available_models.len() - 1)]
+            .context_window
     }
 
     /// Advance to the next model in the list (wraps around).
@@ -476,7 +492,7 @@ impl AgentPanel {
             );
         }
         let default_idx =
-            found.or_else(|| models.iter().position(|m| m.id == "gpt-4o")).unwrap_or(0);
+            found.or_else(|| models.iter().position(|m| m.id == "claude-sonnet-4")).unwrap_or(0);
         self.available_models = models;
         self.selected_model = default_idx;
     }
@@ -500,6 +516,50 @@ impl AgentPanel {
     }
     pub fn input_newline(&mut self) {
         self.input.push('\n');
+    }
+
+    /// Attempt to read an image from the system clipboard.
+    /// Returns `Ok(Some(img))` if an image was captured, `Ok(None)` if no image
+    /// was available, and `Err` only on encoding failure.
+    pub fn try_paste_image() -> Result<Option<ClipboardImage>> {
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(cb) => cb,
+            Err(_) => return Ok(None),
+        };
+        let img_data = match clipboard.get_image() {
+            Ok(data) => data,
+            Err(_) => return Ok(None),
+        };
+
+        let width = img_data.width as u32;
+        let height = img_data.height as u32;
+
+        // Convert RGBA bytes to PNG.
+        let rgba = image::RgbaImage::from_raw(width, height, img_data.bytes.into_owned())
+            .context("clipboard image has invalid dimensions")?;
+
+        let mut png_bytes: Vec<u8> = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+        use image::ImageEncoder;
+        encoder
+            .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+            .context("PNG encoding failed")?;
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let data_uri = format!("data:image/png;base64,{b64}");
+
+        // Reject images that would produce an excessively large payload.
+        const MAX_DATA_URI_BYTES: usize = 20 * 1024 * 1024;
+        if data_uri.len() > MAX_DATA_URI_BYTES {
+            anyhow::bail!(
+                "Image too large ({:.1} MB, max {:.1} MB)",
+                data_uri.len() as f64 / 1_048_576.0,
+                MAX_DATA_URI_BYTES as f64 / 1_048_576.0,
+            );
+        }
+
+        Ok(Some(ClipboardImage { width, height, data_uri }))
     }
 
     /// Recompute the slash-command dropdown based on the current input.
@@ -576,6 +636,7 @@ impl AgentPanel {
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
+            images: vec![],
         });
     }
 
@@ -591,6 +652,7 @@ impl AgentPanel {
         if self.input.trim().is_empty()
             && self.pasted_blocks.is_empty()
             && self.file_blocks.is_empty()
+            && self.image_blocks.is_empty()
         {
             return Ok(());
         }
@@ -598,6 +660,7 @@ impl AgentPanel {
         let typed_text = std::mem::take(&mut self.input);
         let pasted = std::mem::take(&mut self.pasted_blocks);
         let files = std::mem::take(&mut self.file_blocks);
+        let images = std::mem::take(&mut self.image_blocks);
 
         // Assemble user text: file blocks first (structured context), then pasted
         // blocks (ad-hoc snippets), then typed input.  Each section separated by \n\n.
@@ -720,8 +783,35 @@ Available tools:\n\
                 "content": msg.content
             }));
         }
-        send_messages.push(serde_json::json!({ "role": "user", "content": user_text.clone() }));
-        self.messages.push(ChatMessage { role: Role::User, content: user_text });
+        // When images are attached, use the OpenAI content-array format so the
+        // model receives both text and vision inputs.  Otherwise use a plain string.
+        let image_dims: Vec<(u32, u32)> =
+            images.iter().map(|img| (img.width, img.height)).collect();
+
+        let user_msg = if images.is_empty() {
+            serde_json::json!({ "role": "user", "content": user_text.clone() })
+        } else {
+            let mut content_parts: Vec<serde_json::Value> = Vec::new();
+            if !user_text.trim().is_empty() {
+                content_parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": user_text.clone()
+                }));
+            }
+            for img in &images {
+                content_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": img.data_uri, "detail": "auto" }
+                }));
+            }
+            serde_json::json!({ "role": "user", "content": content_parts })
+        };
+        send_messages.push(user_msg);
+        self.messages.push(ChatMessage {
+            role: Role::User,
+            content: user_text,
+            images: image_dims,
+        });
 
         self.scroll = 0;
         self.streaming_reply = Some(String::new());
@@ -871,8 +961,11 @@ Available tools:\n\
                     Ok(StreamEvent::Done) => {
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
-                                self.messages
-                                    .push(ChatMessage { role: Role::Assistant, content: text });
+                                self.messages.push(ChatMessage {
+                                    role: Role::Assistant,
+                                    content: text,
+                                    images: vec![],
+                                });
                             }
                         }
                         self.code_block_idx = 0;
@@ -891,6 +984,7 @@ Available tools:\n\
                         self.messages.push(ChatMessage {
                             role: Role::Assistant,
                             content: format!("[Error: {e}]"),
+                            images: vec![],
                         });
                         self.last_error = Some(e);
                         self.streaming_reply = None;
@@ -978,7 +1072,7 @@ Available tools:\n\
             if !text.trim().is_empty() {
                 let mut content = text;
                 content.push_str("\n\n*⏹ Stopped*");
-                self.messages.push(ChatMessage { role: Role::Assistant, content });
+                self.messages.push(ChatMessage { role: Role::Assistant, content, images: vec![] });
             }
         }
         // Reset all stream-related state.
@@ -1765,8 +1859,8 @@ async fn start_chat_stream_with_tools(
 // Model discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch chat-capable models from the Copilot `/models` endpoint.
-/// Returns `ModelVersion` pairs (id + display name) sorted with gpt-4o first, then alphabetically by id.
+/// Fetch chat/agent-capable models from the Copilot `/models` endpoint.
+/// Returns `ModelVersion` entries sorted alphabetically by id.
 async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -1811,26 +1905,27 @@ async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
                         arr.iter()
                             .filter_map(|v| {
                                 let id = v.get("id")?.as_str()?.to_string();
-                                // Filter models that don't support /chat/completions.
-                                // Embedding, TTS, image, and codex/code-completion models all fail with
+                                // Filter models that clearly don't support /chat/completions.
+                                // Embedding, TTS, and image-generation models fail with
                                 // unsupported_api_for_model when sent to the chat endpoint.
+                                // Note: "codex" is NOT filtered — newer GPT-5.x-Codex models
+                                // are chat/agent-capable and should be included.
                                 if id.contains("embed")
                                     || id.contains("whisper")
                                     || id.contains("tts")
                                     || id.contains("dall")
-                                    || id.contains("codex")
                                 {
                                     return None;
                                 }
-                                // Also filter by capabilities.type if present: only keep "chat" models.
+                                // Filter by capabilities.type if present: keep "chat" and "agent" models.
                                 if let Some(cap_type) =
                                     v.pointer("/capabilities/type").and_then(|x| x.as_str())
                                 {
-                                    if cap_type != "chat" {
+                                    if cap_type != "chat" && cap_type != "agent" {
                                         return None;
                                     }
                                 }
-                                // `version` is the pinned build string; fall back to id if absent.
+                                // `version` is informational metadata; fall back to id if absent.
                                 let version = v
                                     .get("version")
                                     .and_then(|x| x.as_str())
@@ -1844,17 +1939,19 @@ async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
                                     .filter(|s| !s.is_empty())
                                     .unwrap_or(&id)
                                     .to_string();
-                                Some(ModelVersion { id, version, name })
+                                // Context window from API; fall back to 128k if not provided.
+                                let context_window = v
+                                    .pointer("/capabilities/limits/max_context_window_tokens")
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(128_000)
+                                    as u32;
+                                Some(ModelVersion { id, version, name, context_window })
                             })
                             .collect()
                     })
                     .unwrap_or_default();
 
-                models.sort_by(|a, b| {
-                    let a_pref = if a.id == "gpt-4o" { 0 } else { 1 };
-                    let b_pref = if b.id == "gpt-4o" { 0 } else { 1 };
-                    a_pref.cmp(&b_pref).then(a.id.cmp(&b.id))
-                });
+                models.sort_by(|a, b| a.id.cmp(&b.id));
                 // The API sometimes returns duplicate IDs; deduplicate after sorting.
                 models.dedup_by(|a, b| a.id == b.id);
 

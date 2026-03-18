@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Editor modes
@@ -148,16 +148,16 @@ pub enum Action {
 pub struct KeyNode {
     pub description: String,
     pub action: Option<Action>,
-    pub children: HashMap<char, KeyNode>,
+    pub children: BTreeMap<char, KeyNode>,
 }
 
 impl KeyNode {
     fn new(desc: impl Into<String>) -> Self {
-        Self { description: desc.into(), action: None, children: HashMap::new() }
+        Self { description: desc.into(), action: None, children: BTreeMap::new() }
     }
 
     fn leaf(desc: impl Into<String>, action: Action) -> Self {
-        Self { description: desc.into(), action: Some(action), children: HashMap::new() }
+        Self { description: desc.into(), action: Some(action), children: BTreeMap::new() }
     }
 }
 
@@ -168,7 +168,7 @@ pub struct KeyHandler {
     /// When the sequence started (for which-key timeout)
     sequence_start: Option<Instant>,
     /// Leader key bindings tree
-    leader_tree: HashMap<char, KeyNode>,
+    leader_tree: BTreeMap<char, KeyNode>,
     /// Which-key popup should be shown
     show_which_key: bool,
     /// Pending prefix key for two-key Normal-mode commands (d, g, y, c …)
@@ -200,8 +200,8 @@ impl KeyHandler {
     }
 
     /// Build the Spacemacs-inspired leader key tree
-    fn build_leader_tree() -> HashMap<char, KeyNode> {
-        let mut tree = HashMap::new();
+    fn build_leader_tree() -> BTreeMap<char, KeyNode> {
+        let mut tree = BTreeMap::new();
 
         // SPC b - Buffer commands
         let mut buffer_node = KeyNode::new("buffer");
