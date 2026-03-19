@@ -26,6 +26,11 @@ pub fn render(content: &str, width: usize) -> Vec<Line<'static>> {
     Renderer::new(width).process(content)
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Left margin for body text and headings.
+const MARGIN: &str = "    ";
+
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
 struct Renderer {
@@ -113,15 +118,54 @@ impl Renderer {
     // ── Heading flush ─────────────────────────────────────────────────────────
 
     fn flush_heading(&mut self) {
-        let (color, sigil) = match self.heading {
-            Some(HeadingLevel::H1) => (Color::Yellow, "▌"),
-            Some(HeadingLevel::H2) => (Color::Cyan, "▍"),
-            Some(HeadingLevel::H3) => (Color::Green, "▎"),
-            _ => (Color::White, "▏"),
-        };
-        let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+        // Blank line before heading — but not at the very start of the document.
+        if !self.output.is_empty() {
+            self.output.push(Line::from(""));
+        }
+
         let text: String = self.pending.iter().map(|s| s.content.as_ref()).collect();
-        self.output.push(Line::from(vec![Span::styled(format!("  {sigil} {text}"), style)]));
+        let level = self.heading.unwrap_or(HeadingLevel::H3);
+        let rule_width = self.width.saturating_sub(MARGIN.len()).max(4);
+
+        match level {
+            HeadingLevel::H1 => {
+                let style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{text}"),
+                    style,
+                )));
+                // Full-width underline with ═
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{}", "═".repeat(rule_width)),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                )));
+            },
+            HeadingLevel::H2 => {
+                let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{text}"),
+                    style,
+                )));
+                // Full-width underline with ─
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{}", "─".repeat(rule_width)),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                )));
+            },
+            HeadingLevel::H3 => {
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{text}"),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+            },
+            _ => {
+                self.output.push(Line::from(Span::styled(
+                    format!("{MARGIN}{text}"),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                )));
+            },
+        }
+
         self.output.push(Line::from(""));
         self.pending.clear();
         self.heading = None;
@@ -140,10 +184,10 @@ impl Renderer {
             let cont = self.item_continuation_indent();
             (cont.clone(), cont)
         } else if self.blockquote_depth > 0 {
-            let pfx = format!("{}  ", "  │".repeat(self.blockquote_depth));
+            let pfx = format!("{MARGIN}{}", "│  ".repeat(self.blockquote_depth));
             (pfx.clone(), pfx)
         } else {
-            ("  ".to_string(), "  ".to_string())
+            (MARGIN.to_string(), MARGIN.to_string())
         }
     }
 
@@ -157,7 +201,7 @@ impl Renderer {
             // Tool lines: render dim, no re-wrapping.
             let text: String = self.pending.iter().map(|s| s.content.as_ref()).collect();
             self.output.push(Line::from(Span::styled(
-                format!("  {}", text.trim()),
+                format!("{MARGIN}{}", text.trim()),
                 Style::default().fg(Color::DarkGray),
             )));
             self.pending.clear();
@@ -180,12 +224,12 @@ impl Renderer {
             let depth = self.list_stack.len().saturating_sub(1);
             let indent = "    ".repeat(depth);
             if *is_ordered {
-                format!("  {}{}. ", indent, counter)
+                format!("{MARGIN}{indent}{}. ", counter)
             } else {
-                format!("  {}• ", indent)
+                format!("{MARGIN}{indent}•  ")
             }
         } else {
-            "  ".to_string()
+            MARGIN.to_string()
         }
     }
 
@@ -195,12 +239,12 @@ impl Renderer {
             let indent = "    ".repeat(depth);
             if *is_ordered {
                 let num_width = counter.to_string().len() + 2; // "N. "
-                format!("  {}{}", indent, " ".repeat(num_width))
+                format!("{MARGIN}{indent}{}", " ".repeat(num_width))
             } else {
-                format!("  {}  ", indent) // "• " = 2 chars
+                format!("{MARGIN}{indent}   ") // "•  " = 3 chars
             }
         } else {
-            "  ".to_string()
+            MARGIN.to_string()
         }
     }
 
@@ -235,25 +279,25 @@ impl Renderer {
                         CodeBlockKind::Fenced(lang) => lang.to_string(),
                         CodeBlockKind::Indented => String::new(),
                     };
-                    let (header, color) = if self.code_lang == "mermaid" {
-                        ("  ╭─ mermaid diagram ─".to_string(), Color::Yellow)
-                    } else if self.code_lang.is_empty() {
-                        ("  ╭─────────────────────────".to_string(), Color::DarkGray)
-                    } else {
-                        (format!("  ╭─ {} ", self.code_lang), Color::DarkGray)
-                    };
-                    self.output.push(Line::from(Span::styled(header, Style::default().fg(color))));
+                    // Language label — dim italic, only when present
+                    if self.code_lang == "mermaid" {
+                        self.output.push(Line::from(Span::styled(
+                            format!("{MARGIN}  mermaid"),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                        )));
+                    } else if !self.code_lang.is_empty() {
+                        self.output.push(Line::from(Span::styled(
+                            format!("{MARGIN}  {}", self.code_lang),
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        )));
+                    }
                 },
                 Event::End(TagEnd::CodeBlock) => {
                     let is_mermaid = self.code_lang == "mermaid";
                     self.in_code_block = false;
-                    self.output.push(Line::from(Span::styled(
-                        "  ╰─────────────────────────".to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    )));
                     if is_mermaid {
                         self.output.push(Line::from(Span::styled(
-                            "  diagram · open in a browser to render".to_string(),
+                            format!("{MARGIN}  · open in a browser to render"),
                             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                         )));
                     }
@@ -262,8 +306,6 @@ impl Renderer {
 
                 // ── Lists ─────────────────────────────────────────────────────
                 Event::Start(Tag::List(ordered)) => {
-                    // Initialise one below the start number so the first Item's
-                    // += 1 brings the counter to exactly `start`.
                     let start = ordered.unwrap_or(1);
                     self.list_stack.push((ordered.is_some(), start.saturating_sub(1)));
                 },
@@ -276,13 +318,11 @@ impl Renderer {
                 Event::Start(Tag::Item) => {
                     self.in_item = true;
                     self.item_bullet_emitted = false;
-                    // Bump the counter for this level.
                     if let Some(last) = self.list_stack.last_mut() {
                         last.1 += 1;
                     }
                 },
                 Event::End(TagEnd::Item) => {
-                    // Tight list items (no sub-paragraph) leave text in pending.
                     if !self.pending.is_empty() {
                         self.flush_para(false);
                     }
@@ -315,29 +355,32 @@ impl Renderer {
 
                 // ── Leaf events ───────────────────────────────────────────────
                 Event::Code(code) => {
-                    // Inline code span — cyan, backtick-delimited.
+                    // Inline code — cyan; color alone signals code, no backticks.
                     self.pending.push(Span::styled(
-                        format!("`{}`", code),
+                        code.to_string(),
                         Style::default().fg(Color::Cyan),
                     ));
                 },
                 Event::Text(text) => {
                     if self.in_code_block {
-                        // Each newline-separated line of the code block becomes
-                        // a single output line with a │ gutter marker.
-                        let code_color = if self.code_lang == "mermaid" {
-                            Color::DarkGray
+                        let (gutter_color, text_color) = if self.code_lang == "mermaid" {
+                            (Color::Yellow, Color::DarkGray)
                         } else {
-                            Color::Green
+                            (Color::DarkGray, Color::White)
                         };
                         for line in text.lines() {
-                            self.output.push(Line::from(Span::styled(
-                                format!("  │ {}", line),
-                                Style::default().fg(code_color),
-                            )));
+                            self.output.push(Line::from(vec![
+                                Span::styled(
+                                    format!("{MARGIN}  │ "),
+                                    Style::default().fg(gutter_color),
+                                ),
+                                Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(text_color),
+                                ),
+                            ]));
                         }
                     } else {
-                        // Detect agent tool-call lines.
                         if self.pending.is_empty() && text.trim_start().starts_with('⚙') {
                             self.is_tool_line = true;
                         }
@@ -358,8 +401,9 @@ impl Renderer {
                     }
                 },
                 Event::Rule => {
+                    let rule_width = self.width.saturating_sub(MARGIN.len() * 2).max(4);
                     self.output.push(Line::from(Span::styled(
-                        "  ──────────────────────────────────".to_string(),
+                        format!("{MARGIN}{}", "─".repeat(rule_width)),
                         Style::default().fg(Color::DarkGray),
                     )));
                     self.output.push(Line::from(""));
@@ -382,7 +426,7 @@ impl Renderer {
 
 /// Reflow styled inline spans into word-wrapped ratatui [`Line`]s.
 ///
-/// * `first_prefix` — prepended to the first output line (e.g. `"  • "`).
+/// * `first_prefix` — prepended to the first output line (e.g. `"    • "`).
 /// * `rest_prefix`  — prepended to all continuation lines (must align with
 ///   text that follows `first_prefix`).
 ///

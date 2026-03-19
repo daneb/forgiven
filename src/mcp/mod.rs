@@ -139,9 +139,17 @@ pub struct McpManager {
     /// Maps each tool name to the index of the server that owns it.
     tool_map: HashMap<String, usize>,
     /// Keeps the child processes alive (stdin/stdout were already extracted).
-    _children: Vec<Child>,
+    children: Vec<Child>,
     /// Names of servers that failed to start, with the error reason.
     pub failed_servers: Vec<(String, String)>,
+}
+
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        for child in &mut self.children {
+            let _ = child.start_kill();
+        }
+    }
 }
 
 impl McpManager {
@@ -213,7 +221,7 @@ impl McpManager {
             }
         }
 
-        McpManager { servers, tool_map, _children: children, failed_servers }
+        McpManager { servers, tool_map, children, failed_servers }
     }
 
     /// Returns `true` if `name` is a tool provided by one of our MCP servers.

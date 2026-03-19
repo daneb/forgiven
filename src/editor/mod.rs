@@ -61,9 +61,10 @@ struct HighlightCache {
 }
 
 /// Cached rendered markdown lines for Mode::MarkdownPreview.
-/// Keyed on `(lsp_version, viewport_width)` — regenerated only when the buffer
-/// changes or the terminal is resized.
+/// Keyed on `(buffer_idx, lsp_version, viewport_width)` — regenerated only when
+/// the active buffer changes, the content changes, or the terminal is resized.
 struct MarkdownCache {
+    buffer_idx: usize,
     lsp_version: i32,
     viewport_width: usize,
     lines: Vec<ratatui::text::Line<'static>>,
@@ -273,6 +274,10 @@ pub struct Editor {
     file_watcher: Option<RecommendedWatcher>,
     /// Receives raw notify events; polled each tick.
     watcher_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+    /// Paths written by the editor itself, with the save timestamp.
+    /// Watcher events for these paths are suppressed for 500 ms to avoid
+    /// treating our own saves as external changes.
+    self_saved: std::collections::HashMap<std::path::PathBuf, std::time::Instant>,
 
     // ── In-memory log ring buffer ─────────────────────────────────────────────
     /// Recent WARN/ERROR log entries captured from the tracing subscriber.
@@ -357,6 +362,7 @@ impl Editor {
             mcp_rx: None,
             file_watcher: None,
             watcher_rx: None,
+            self_saved: std::collections::HashMap::new(),
             log_buffer: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -771,12 +777,26 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Filesystem watcher: reload buffers changed externally ──────────
+            // Prune self_saved entries older than 500 ms.
+            let suppress_window = std::time::Duration::from_millis(500);
+            self.self_saved.retain(|_, t| t.elapsed() < suppress_window);
+
             let fs_changed_paths: Vec<std::path::PathBuf> = if let Some(ref rx) = self.watcher_rx {
                 let mut paths = Vec::new();
                 while let Ok(Ok(event)) = rx.try_recv() {
                     use notify::EventKind;
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                        paths.extend(event.paths);
+                        for p in event.paths {
+                            let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                            // Skip events caused by our own saves.
+                            let self_saved = self.self_saved.keys().any(|saved| {
+                                saved.canonicalize().unwrap_or_else(|_| saved.clone())
+                                    == canonical
+                            });
+                            if !self_saved {
+                                paths.push(p);
+                            }
+                        }
                     }
                 }
                 paths
@@ -1172,9 +1192,12 @@ impl Editor {
             == Mode::MarkdownPreview
         {
             let all_lines = {
+                let buf_idx = self.current_buffer_idx;
                 let key = self.current_buffer().map(|buf| buf.lsp_version);
                 let cache_hit = self.markdown_cache.as_ref().is_some_and(|c| {
-                    Some(c.lsp_version) == key && c.viewport_width == viewport_width
+                    c.buffer_idx == buf_idx
+                        && Some(c.lsp_version) == key
+                        && c.viewport_width == viewport_width
                 });
                 if cache_hit {
                     self.markdown_cache.as_ref().unwrap().lines.clone()
@@ -1184,6 +1207,7 @@ impl Editor {
                         self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
                     let rendered = crate::markdown::render(&content, viewport_width);
                     self.markdown_cache = Some(MarkdownCache {
+                        buffer_idx: buf_idx,
                         lsp_version: ver,
                         viewport_width,
                         lines: rendered.clone(),
@@ -1872,6 +1896,9 @@ impl Editor {
                 } else {
                     (None, String::new())
                 };
+                if let Some(ref p) = file_path {
+                    self.self_saved.insert(p.clone(), std::time::Instant::now());
+                }
 
                 self.set_status("File saved".to_string());
 
@@ -3197,6 +3224,7 @@ impl Editor {
                 let to_write =
                     if content.ends_with('\n') { content.clone() } else { format!("{content}\n") };
                 std::fs::write(p, &to_write)?;
+                self.self_saved.insert(p.clone(), std::time::Instant::now());
                 let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
                 for buf in &mut self.buffers {
                     let matches = buf
@@ -3908,12 +3936,18 @@ impl Editor {
             "w" | "write" => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save()?;
+                    if let Some(ref p) = buf.file_path.clone() {
+                        self.self_saved.insert(p.clone(), std::time::Instant::now());
+                    }
                     self.set_status("File saved".to_string());
                 }
             },
             "wq" => {
                 if let Some(buf) = self.current_buffer_mut() {
                     buf.save()?;
+                    if let Some(ref p) = buf.file_path.clone() {
+                        self.self_saved.insert(p.clone(), std::time::Instant::now());
+                    }
                 }
                 self.should_quit = true;
             },
@@ -4057,7 +4091,10 @@ impl Editor {
     fn check_quit(&mut self) -> Result<()> {
         for buf in &self.buffers {
             if buf.is_modified {
-                self.set_status("Buffer has unsaved changes. Use :q! to force quit.".to_string());
+                self.set_status(format!(
+                    "'{}' has unsaved changes. :w to save, :q! to force quit.",
+                    buf.name
+                ));
                 return Ok(());
             }
         }
@@ -4639,15 +4676,72 @@ impl Editor {
 <title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body {{ max-width: 800px; margin: 40px auto; padding: 0 20px;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          line-height: 1.6; color: #222; }}
-  pre  {{ background: #f5f5f5; padding: 1em; border-radius: 4px; overflow-x: auto; }}
-  code {{ font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }}
-  pre code {{ background: none; padding: 0; }}
-  blockquote {{ border-left: 4px solid #ddd; margin: 0; padding-left: 1em; color: #555; }}
-  img  {{ max-width: 100%; }}
-  h1,h2 {{ border-bottom: 1px solid #eee; padding-bottom: 0.3em; }}
+  *, *::before, *::after {{ box-sizing: border-box; }}
+  body {{
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 64px 32px 96px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    color: #1a1a1a;
+    background: #fff;
+    -webkit-font-smoothing: antialiased;
+  }}
+  h1, h2, h3, h4, h5, h6 {{
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 2em 0 0.5em;
+    color: #111;
+  }}
+  h1 {{ font-size: 2em; border-bottom: 2px solid #e8e8e8; padding-bottom: 0.3em; margin-top: 0; }}
+  h2 {{ font-size: 1.4em; border-bottom: 1px solid #e8e8e8; padding-bottom: 0.25em; }}
+  h3 {{ font-size: 1.15em; }}
+  p  {{ margin: 0 0 1.25em; }}
+  a  {{ color: #0969da; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  strong {{ font-weight: 600; }}
+  em {{ font-style: italic; }}
+  hr {{ border: none; border-top: 1px solid #e8e8e8; margin: 2.5em 0; }}
+  ul, ol {{ padding-left: 1.5em; margin: 0 0 1.25em; }}
+  li {{ margin: 0.3em 0; }}
+  li + li {{ margin-top: 0.25em; }}
+  blockquote {{
+    border-left: 3px solid #d0d0d0;
+    margin: 1.5em 0;
+    padding: 0.25em 0 0.25em 1.25em;
+    color: #555;
+  }}
+  blockquote p {{ margin-bottom: 0; }}
+  code {{
+    font-family: "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.875em;
+    background: #f3f3f3;
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+    color: #d63384;
+  }}
+  pre {{
+    background: #f6f6f6;
+    border: 1px solid #e8e8e8;
+    border-radius: 6px;
+    padding: 1em 1.25em;
+    overflow-x: auto;
+    margin: 0 0 1.5em;
+    line-height: 1.5;
+  }}
+  pre code {{
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: 0.85em;
+    color: inherit;
+  }}
+  img {{ max-width: 100%; height: auto; border-radius: 4px; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 0 0 1.5em; }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 0.5em 0.75em; text-align: left; }}
+  th {{ background: #f6f6f6; font-weight: 600; }}
+  tr:nth-child(even) {{ background: #fafafa; }}
 </style>
 </head>
 <body>

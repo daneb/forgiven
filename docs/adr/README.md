@@ -77,6 +77,9 @@ that motivated it, what was decided, and the consequences.
 | [0067](0067-agent-input-scroll-follow-cursor.md) | Agent Input Box Scroll-to-Cursor | Accepted |
 | [0068](0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting | Accepted |
 | [0069](0069-model-loading-modernisation.md) | Model Loading Modernisation | Accepted |
+| [0070](0070-markdown-preview-visual-refresh.md) | Markdown Preview Visual Refresh | Accepted |
+| [0071](0071-file-watcher-self-save-suppression.md) | File Watcher Self-Save Suppression | Accepted |
+| [0072](0072-mcp-child-process-cleanup.md) | MCP Child Process Cleanup on Exit | Accepted |
 
 ## What is an ADR?
 
