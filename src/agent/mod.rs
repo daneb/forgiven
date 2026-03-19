@@ -154,6 +154,8 @@ pub struct SlashMenuState {
     pub items: Vec<String>,
     /// Currently highlighted index.
     pub selected: usize,
+    /// Description of the currently selected command, if available.
+    pub description: Option<String>,
 }
 
 /// Maximum number of lines included from a file attached via the Ctrl+P picker.
@@ -603,9 +605,13 @@ impl AgentPanel {
                 let prev = menu.selected;
                 menu.items = items;
                 menu.selected = prev.min(menu.items.len().saturating_sub(1));
+                let desc = fw.describe(menu.items[menu.selected].as_str()).map(str::to_string);
+                menu.description = desc;
             },
             None => {
-                self.slash_menu = Some(SlashMenuState { items, selected: 0 });
+                let description =
+                    items.first().and_then(|cmd| fw.describe(cmd.as_str())).map(str::to_string);
+                self.slash_menu = Some(SlashMenuState { items, selected: 0, description });
             },
         }
     }
@@ -616,6 +622,10 @@ impl AgentPanel {
             let n = menu.items.len();
             if n > 0 {
                 menu.selected = (menu.selected as i32 + delta).rem_euclid(n as i32) as usize;
+                if let Some(ref fw) = self.spec_framework {
+                    menu.description =
+                        fw.describe(menu.items[menu.selected].as_str()).map(str::to_string);
+                }
             }
         }
     }

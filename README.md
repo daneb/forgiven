@@ -391,7 +391,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0074)
+│   └── adr/                 # Architecture Decision Records (0001 – 0075)
 └── Cargo.toml
 ```
 

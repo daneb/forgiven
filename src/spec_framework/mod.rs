@@ -61,8 +61,25 @@ fn speckit_templates() -> HashMap<String, &'static str> {
 pub struct SpecFramework {
     /// Command name → template text.
     templates: HashMap<String, String>,
+    /// Command name → short description shown in the slash-menu hint line.
+    descriptions: HashMap<String, String>,
     /// Human-readable name shown in the agent panel status line.
     pub name: String,
+}
+
+fn speckit_descriptions() -> HashMap<String, String> {
+    [
+        ("speckit.constitution", "Step 1 · Define project principles & constraints"),
+        ("speckit.specify", "Step 2 · Write a feature specification"),
+        ("speckit.plan", "Step 3 · Create an implementation plan"),
+        ("speckit.tasks", "Step 4 · Break plan into actionable tasks"),
+        ("speckit.implement", "Step 5 · Implement a specific task"),
+        ("speckit.clarify", "Step 6 · Resolve ambiguities in the spec"),
+        ("speckit.analyze", "Analyze existing code or architecture"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
 
 impl SpecFramework {
@@ -70,6 +87,7 @@ impl SpecFramework {
     pub fn spec_kit() -> Self {
         Self {
             templates: speckit_templates().into_iter().map(|(k, v)| (k, v.to_string())).collect(),
+            descriptions: speckit_descriptions(),
             name: "spec-kit".to_string(),
         }
     }
@@ -82,6 +100,7 @@ impl SpecFramework {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("custom").to_string();
 
         let mut templates = HashMap::new();
+        let descriptions = HashMap::new();
         match std::fs::read_dir(path) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -103,7 +122,7 @@ impl SpecFramework {
             Err(e) => warn!("spec_framework: could not read directory {:?}: {e}", path),
         }
 
-        Self { templates, name }
+        Self { templates, descriptions, name }
     }
 
     /// Try to resolve a slash command from the start of `input`.
@@ -122,6 +141,11 @@ impl SpecFramework {
             .unwrap_or((without_slash, ""));
         let template = self.templates.get(cmd)?;
         Some((template.as_str(), rest))
+    }
+
+    /// Short description for a command, shown as a hint in the slash-menu popup.
+    pub fn describe(&self, cmd: &str) -> Option<&str> {
+        self.descriptions.get(cmd).map(String::as_str)
     }
 
     /// All registered command names, sorted (useful for help text or autocomplete).

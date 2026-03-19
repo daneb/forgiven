@@ -823,9 +823,11 @@ impl UI {
         }
 
         let n = menu.items.len() as u16;
-        // Width matches the input box; height = items + 2 borders, capped at 10 items.
+        let has_desc = menu.description.is_some();
+        // Width matches the input box; height = items + 2 borders (+ 2 for hint line) capped.
         let popup_width = input_area.width;
-        let popup_height = (n + 2).min(12);
+        let list_rows = n.min(10);
+        let popup_height = list_rows + 2 + if has_desc { 2 } else { 0 };
 
         // Position directly above the input box.
         let x = input_area.x;
@@ -841,6 +843,21 @@ impl UI {
 
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
+
+        // Split inner area: list rows at the top, optional hint at the bottom.
+        let (list_area, hint_area) = if has_desc && inner.height >= 2 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(inner.height.saturating_sub(2)),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            (chunks[0], Some((chunks[1], chunks[2])))
+        } else {
+            (inner, None)
+        };
 
         let lines: Vec<Line> = menu
             .items
@@ -862,14 +879,35 @@ impl UI {
             .collect();
 
         // Scroll to keep selected item visible.
-        let visible_rows = inner.height as usize;
+        let visible_rows = list_area.height as usize;
         let scroll = if menu.selected >= visible_rows {
             (menu.selected + 1).saturating_sub(visible_rows) as u16
         } else {
             0
         };
 
-        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), list_area);
+
+        // Hint line: separator + description of the selected command.
+        if let (Some(desc), Some((sep_area, desc_area))) = (&menu.description, hint_area) {
+            let sep = "─".repeat(sep_area.width as usize);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(Color::DarkGray)))),
+                sep_area,
+            );
+            let truncated = if desc.len() > desc_area.width.saturating_sub(2) as usize {
+                format!(" {}…", &desc[..desc_area.width.saturating_sub(3) as usize])
+            } else {
+                format!(" {desc}")
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncated,
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                ))),
+                desc_area,
+            );
+        }
     }
 
     /// Render the Ctrl+P file-context picker overlay above the agent input box.
