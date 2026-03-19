@@ -8,33 +8,45 @@ use tracing::warn;
 
 /// A single MCP server entry in the config file.
 ///
-/// Example (`~/.config/forgiven/config.toml`):
+/// Two transport modes are supported:
+///
+/// **stdio** — the editor spawns the process and communicates over stdin/stdout:
 /// ```toml
 /// [[mcp.servers]]
 /// name    = "filesystem"
 /// command = "npx"
 /// args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-///
-/// [[mcp.servers]]
-/// name    = "git"
-/// command = "uvx"
-/// args    = ["mcp-server-git"]
 /// ```
 ///
-/// For isolation, wrap the command in a container via a shell wrapper script
-/// rather than embedding container logic in the editor config.  See ADR 0053.
+/// **HTTP** — connect to an externally-managed server (e.g. a Docker container
+/// the user started themselves).  The editor owns no process lifecycle:
+/// ```toml
+/// [[mcp.servers]]
+/// name = "searxng"
+/// url  = "http://localhost:8080"
+/// ```
+/// Start the container once with:
+/// ```sh
+/// docker run -d --rm -p 8080:8080 isokoliuk/mcp-searxng
+/// ```
+/// The editor will connect on startup and disconnect cleanly on exit without
+/// touching the container.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpServerConfig {
     /// Human-readable name shown in the UI.
     pub name: String,
-    /// Executable to spawn (e.g. "npx", "uvx", "/usr/local/bin/my-mcp-server").
-    /// For containerised servers, set this to "docker" and put the `run` args in
-    /// `args`, or point to a wrapper script that handles the container invocation.
+    /// HTTP URL for an externally-managed MCP server (e.g. "http://localhost:8080").
+    /// When set, `command`/`args`/`env` are ignored — no process is spawned.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Executable to spawn for stdio transport.
+    /// Ignored when `url` is set.
+    #[serde(default)]
     pub command: String,
-    /// Arguments passed to the executable.
+    /// Arguments passed to the executable (stdio transport only).
     #[serde(default)]
     pub args: Vec<String>,
-    /// Optional environment variables to set for the server process.
+    /// Optional environment variables to set for the server process (stdio only).
     /// Values beginning with `$` are resolved from the shell environment at
     /// startup (e.g. `GITHUB_TOKEN = "$GITHUB_TOKEN"`).
     #[serde(default)]

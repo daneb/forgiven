@@ -790,8 +790,7 @@ impl Editor {
                             let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
                             // Skip events caused by our own saves.
                             let self_saved = self.self_saved.keys().any(|saved| {
-                                saved.canonicalize().unwrap_or_else(|_| saved.clone())
-                                    == canonical
+                                saved.canonicalize().unwrap_or_else(|_| saved.clone()) == canonical
                             });
                             if !self_saved {
                                 paths.push(p);
@@ -1891,8 +1890,13 @@ impl Editor {
             Action::FileSave => {
                 // Get file path and text before doing LSP operations
                 let (file_path, text) = if let Some(buf) = self.current_buffer_mut() {
-                    buf.save()?;
-                    (buf.file_path.clone(), buf.lines().join("\n"))
+                    match buf.save() {
+                        Ok(()) => (buf.file_path.clone(), buf.lines().join("\n")),
+                        Err(e) => {
+                            self.set_status(format!("Error: {e}"));
+                            return Ok(());
+                        },
+                    }
                 } else {
                     (None, String::new())
                 };
@@ -3935,18 +3939,29 @@ impl Editor {
             },
             "w" | "write" => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.save()?;
-                    if let Some(ref p) = buf.file_path.clone() {
-                        self.self_saved.insert(p.clone(), std::time::Instant::now());
+                    match buf.save() {
+                        Ok(()) => {
+                            if let Some(ref p) = buf.file_path.clone() {
+                                self.self_saved.insert(p.clone(), std::time::Instant::now());
+                            }
+                            self.set_status("File saved".to_string());
+                        },
+                        Err(e) => self.set_status(format!("Error: {e}")),
                     }
-                    self.set_status("File saved".to_string());
                 }
             },
             "wq" => {
                 if let Some(buf) = self.current_buffer_mut() {
-                    buf.save()?;
-                    if let Some(ref p) = buf.file_path.clone() {
-                        self.self_saved.insert(p.clone(), std::time::Instant::now());
+                    match buf.save() {
+                        Ok(()) => {
+                            if let Some(ref p) = buf.file_path.clone() {
+                                self.self_saved.insert(p.clone(), std::time::Instant::now());
+                            }
+                        },
+                        Err(e) => {
+                            self.set_status(format!("Error: {e}"));
+                            return Ok(());
+                        },
                     }
                 }
                 self.should_quit = true;

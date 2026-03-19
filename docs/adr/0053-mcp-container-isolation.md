@@ -1,7 +1,7 @@
 # ADR 0053 — MCP Non-blocking Startup
 
 **Date:** 2026-03-10
-**Status:** Accepted (isolation approach superseded — see below)
+**Status:** Accepted (isolation superseded; HTTP transport delivered in [ADR 0073](0073-mcp-http-transport-external-servers.md))
 
 ---
 
@@ -72,10 +72,9 @@ No new dependencies.
 | Wrapper scripts in `~/.local/bin/` | Abandoned — too fragile (PATH, Docker socket, npm cache metadata) |
 | Do nothing (current state) | MCP servers run as direct host processes |
 
-The right long-term answer is likely **MCP over HTTP transport** (servers run as
-persistent system services, editor just connects) or **running the whole editor
-inside a container** (one boundary, everything inside is isolated). Both require
-non-trivial work and are left for a future ADR.
+The right long-term answer is **MCP over HTTP transport** (servers run as
+persistent system services, editor just connects). This was delivered in
+**[ADR 0073](0073-mcp-http-transport-external-servers.md)**.
 
 ---
 

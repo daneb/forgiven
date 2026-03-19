@@ -347,6 +347,19 @@ pub enum StreamEvent {
     },
 }
 
+/// Sentinel error returned by `start_chat_stream_with_tools` when the API responds with
+/// 401 Unauthorized so that `agentic_loop` can refresh the token and retry the round.
+#[derive(Debug)]
+struct TokenExpiredError;
+
+impl std::fmt::Display for TokenExpiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Copilot API token expired")
+    }
+}
+
+impl std::error::Error for TokenExpiredError {}
+
 #[derive(Debug, Clone)]
 struct CopilotApiToken {
     token: String,
@@ -1251,7 +1264,7 @@ Available tools:\n\
 
 #[allow(clippy::too_many_arguments)]
 async fn agentic_loop(
-    api_token: String,
+    mut api_token: String,
     mut messages: Vec<serde_json::Value>,
     project_root: PathBuf,
     tx: mpsc::UnboundedSender<StreamEvent>,
@@ -1308,7 +1321,7 @@ async fn agentic_loop(
         }
 
         // ── Call the API (cancellable) ────────────────────────────────────────
-        let response = tokio::select! {
+        let api_result = tokio::select! {
             // User pressed Ctrl+C — abort immediately, no error shown.
             _ = &mut abort_rx => {
                 let _ = tx.send(StreamEvent::Done);
@@ -1320,13 +1333,42 @@ async fn agentic_loop(
                 tool_defs.clone(),
                 &model_id,
                 &tx,
-            ) => match res {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(StreamEvent::Error(format!("{e}")));
-                    return;
-                },
-            }
+            ) => res,
+        };
+
+        // On token expiry: refresh the API token once and retry the call.  A second
+        // 401 after a fresh token means a genuine auth failure — surface it as an error.
+        let api_result = match api_result {
+            Err(ref e) if e.is::<TokenExpiredError>() => {
+                warn!("API token expired mid-session — refreshing and retrying this round");
+                match load_oauth_token() {
+                    Ok(oauth) => match exchange_token(&oauth).await {
+                        Ok(new_tok) => {
+                            info!("Token refreshed successfully");
+                            api_token = new_tok.token;
+                            start_chat_stream_with_tools(
+                                api_token.clone(),
+                                messages.clone(),
+                                tool_defs.clone(),
+                                &model_id,
+                                &tx,
+                            )
+                            .await
+                        },
+                        Err(e) => Err(anyhow::anyhow!("Token refresh failed: {e}")),
+                    },
+                    Err(e) => Err(anyhow::anyhow!("Token refresh failed: {e}")),
+                }
+            },
+            other => other,
+        };
+
+        let response = match api_result {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                return;
+            },
         };
 
         // ── Parse the SSE stream ──────────────────────────────────────────────
@@ -1829,7 +1871,11 @@ async fn start_chat_stream_with_tools(
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                // 4xx errors (except 429 rate-limit) are permanent — don't retry.
+                // 401 means the short-lived API token expired — caller will refresh and retry.
+                if status.as_u16() == 401 {
+                    return Err(anyhow::Error::new(TokenExpiredError));
+                }
+                // Other 4xx errors (except 429 rate-limit) are permanent — don't retry.
                 if status.is_client_error() && status.as_u16() != 429 {
                     return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
                 }

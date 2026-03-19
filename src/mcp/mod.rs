@@ -1,20 +1,20 @@
 //! MCP (Model Context Protocol) client.
 //!
-//! Connects to one or more MCP servers over stdio (newline-delimited JSON-RPC 2.0),
-//! discovers their tools, and routes tool calls from the agentic loop to the
-//! appropriate server.
+//! Supports two transport modes:
 //!
-//! Config (`~/.config/forgiven/config.toml`):
+//! **stdio** — the editor spawns the server process:
 //! ```toml
 //! [[mcp.servers]]
 //! name    = "filesystem"
 //! command = "npx"
 //! args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+//! ```
 //!
+//! **HTTP** — connect to an externally-managed server (no process spawned):
+//! ```toml
 //! [[mcp.servers]]
-//! name    = "git"
-//! command = "uvx"
-//! args    = ["mcp-server-git"]
+//! name = "searxng"
+//! url  = "http://localhost:8080"
 //! ```
 
 use anyhow::{Context, Result};
@@ -43,14 +43,331 @@ pub struct McpTool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal handle (holds the live stdio connection)
+// Transport abstraction
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Stdio handle — wraps a spawned child process's stdin/stdout.
 struct McpServerHandle {
     name: String,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+}
+
+/// HTTP+SSE handle for externally-managed MCP servers.
+///
+/// MCP HTTP+SSE transport flow:
+/// 1. Client opens a persistent `GET /sse` connection.
+/// 2. Server sends an `event: endpoint` with the POST URL in `data:`.
+/// 3. For each JSON-RPC request, client POSTs to that URL.
+/// 4. Server sends responses back on the SSE stream as `event: message` events.
+///
+/// No child process is spawned — the caller owns the server lifecycle.
+struct McpSseHandle {
+    name: String,
+    /// Resolved URL to POST JSON-RPC messages to (extracted from the SSE endpoint event).
+    post_url: String,
+    client: reqwest::Client,
+    next_id: u64,
+    /// Receives raw `data:` payloads from the SSE stream (JSON strings).
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    /// Keeps the SSE reader task alive for the lifetime of this handle.
+    _sse_task: tokio::task::JoinHandle<()>,
+}
+
+impl McpSseHandle {
+    /// Open an SSE connection, wait for the endpoint event,
+    /// and start the background SSE reader task.
+    ///
+    /// Tries `{url}/sse` first; falls back to `{url}` if that returns 404
+    /// (some servers host the SSE stream at the root path).
+    async fn connect(name: &str, base_url: &str) -> Result<Self> {
+        let client = reqwest::Client::new();
+        let base = base_url.trim_end_matches('/');
+
+        // Probe candidate SSE paths in order.
+        let candidates = [format!("{base}/sse"), base.to_string()];
+        let mut response = None;
+        let mut used_url = String::new();
+
+        for url in &candidates {
+            let resp = client
+                .get(url)
+                .header("Accept", "text/event-stream")
+                .send()
+                .await
+                .with_context(|| format!("connecting to SSE endpoint '{url}'"))?;
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                continue; // try next candidate
+            }
+            if !status.is_success() {
+                anyhow::bail!("SSE connection to '{url}' failed: HTTP {status}");
+            }
+            used_url = url.clone();
+            response = Some(resp);
+            break;
+        }
+
+        let response = response.ok_or_else(|| {
+            anyhow::anyhow!("no SSE endpoint found at '{base}/sse' or '{base}' (both returned 404)")
+        })?;
+        let _ = &used_url; // suppress unused warning
+
+        // Channels: endpoint_tx fires once with the POST URL; event_tx forwards all
+        // subsequent message payloads to the caller's event_rx.
+        let (endpoint_tx, endpoint_rx) = tokio::sync::oneshot::channel::<String>();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let name_for_task = name.to_string();
+        let sse_task = tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            let mut stream = response.bytes_stream();
+            let mut buf = String::new();
+            let mut endpoint_tx = Some(endpoint_tx);
+
+            'outer: while let Some(chunk_result) = stream.next().await {
+                let bytes = match chunk_result {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("SSE stream error for '{}': {e}", name_for_task);
+                        break;
+                    },
+                };
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+
+                // SSE events are separated by blank lines (\n\n).
+                while let Some(end_pos) = buf.find("\n\n") {
+                    let event_block = buf[..end_pos].to_string();
+                    buf = buf[end_pos + 2..].to_string();
+
+                    let mut event_type = String::from("message");
+                    let mut data = String::new();
+                    for line in event_block.lines() {
+                        if let Some(t) = line.strip_prefix("event: ") {
+                            event_type = t.to_string();
+                        } else if let Some(d) = line.strip_prefix("data: ") {
+                            data = d.to_string();
+                        }
+                    }
+
+                    if event_type == "endpoint" {
+                        if let Some(tx) = endpoint_tx.take() {
+                            let _ = tx.send(data);
+                        }
+                    } else if !data.is_empty() && event_tx.send(data).is_err() {
+                        break 'outer; // receiver dropped
+                    }
+                }
+            }
+        });
+
+        // Block until we receive the endpoint URL (or the stream closes).
+        let endpoint_path =
+            endpoint_rx.await.context("SSE connection closed before 'endpoint' event")?;
+
+        // The path may be relative (e.g. "/message?sessionId=…") or absolute.
+        let post_url = if endpoint_path.starts_with("http") {
+            endpoint_path
+        } else {
+            format!("{}{}", base_url.trim_end_matches('/'), endpoint_path)
+        };
+
+        Ok(McpSseHandle {
+            name: name.to_string(),
+            post_url,
+            client,
+            next_id: 1,
+            event_rx,
+            _sse_task: sse_task,
+        })
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        // POST the request (the HTTP response body is typically 202 / empty for SSE transport).
+        self.client
+            .post(&self.post_url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("HTTP POST to MCP server '{}'", self.name))?;
+
+        // Read SSE events until we see the response with matching id.
+        loop {
+            let data =
+                self.event_rx.recv().await.ok_or_else(|| {
+                    anyhow::anyhow!("SSE stream closed while waiting for response")
+                })?;
+
+            let val: Value = match serde_json::from_str(&data) {
+                Ok(v) => v,
+                Err(_) => continue, // skip non-JSON events
+            };
+
+            if val.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                if let Some(err) = val.get("error") {
+                    anyhow::bail!("MCP server '{}' returned error: {err}", self.name);
+                }
+                return val
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("MCP response missing 'result' field"));
+            }
+        }
+    }
+
+    async fn notify(&mut self, method: &str) -> Result<()> {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "method": method });
+        let _ = self.client.post(&self.post_url).json(&body).send().await;
+        Ok(())
+    }
+}
+
+/// Streamable HTTP handle (MCP 2024-11-05 "Streamable HTTP" transport).
+///
+/// Each request is a self-contained POST.  The server responds with either:
+/// - `Content-Type: application/json` — parse the body directly, or
+/// - `Content-Type: text/event-stream` — read SSE events until the matching id.
+///
+/// No persistent SSE connection is required.
+struct McpStreamableHandle {
+    name: String,
+    url: String,
+    client: reqwest::Client,
+    next_id: u64,
+}
+
+impl McpStreamableHandle {
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let resp = self
+            .client
+            .post(&self.url)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("HTTP POST to MCP server '{}'", self.name))?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("MCP server '{}' returned HTTP {}", self.name, resp.status());
+        }
+
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        if ct.contains("text/event-stream") {
+            // Response is a per-request SSE stream — read events until matching id.
+            use futures_util::StreamExt as _;
+            let mut stream = resp.bytes_stream();
+            let mut buf = String::new();
+            while let Some(chunk) = stream.next().await {
+                let bytes = chunk.context("reading SSE response")?;
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(end_pos) = buf.find("\n\n") {
+                    let event_block = buf[..end_pos].to_string();
+                    buf = buf[end_pos + 2..].to_string();
+                    let mut data = String::new();
+                    for line in event_block.lines() {
+                        if let Some(d) = line.strip_prefix("data: ") {
+                            data = d.to_string();
+                        }
+                    }
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let val: Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if val.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                        if let Some(err) = val.get("error") {
+                            anyhow::bail!("MCP server '{}' returned error: {err}", self.name);
+                        }
+                        return val
+                            .get("result")
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("MCP response missing 'result' field"));
+                    }
+                }
+            }
+            anyhow::bail!("SSE stream ended without a response for request id {id}");
+        } else {
+            // JSON body response.
+            let val: Value = resp
+                .json()
+                .await
+                .with_context(|| format!("parsing JSON response from '{}'", self.name))?;
+            if let Some(err) = val.get("error") {
+                anyhow::bail!("MCP server '{}' returned error: {err}", self.name);
+            }
+            val.get("result")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("MCP response missing 'result' field"))
+        }
+    }
+
+    async fn notify(&mut self, method: &str) -> Result<()> {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "method": method });
+        let _ = self
+            .client
+            .post(&self.url)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body)
+            .send()
+            .await;
+        Ok(())
+    }
+}
+
+/// Unified handle — stdio, HTTP+SSE, or Streamable HTTP.
+enum McpHandle {
+    Stdio(McpServerHandle),
+    Sse(McpSseHandle),
+    Streamable(McpStreamableHandle),
+}
+
+impl McpHandle {
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        match self {
+            McpHandle::Stdio(h) => h.request(method, params).await,
+            McpHandle::Sse(h) => h.request(method, params).await,
+            McpHandle::Streamable(h) => h.request(method, params).await,
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn notify(&mut self, method: &str) -> Result<()> {
+        match self {
+            McpHandle::Stdio(h) => h.notify(method).await,
+            McpHandle::Sse(h) => h.notify(method).await,
+            McpHandle::Streamable(h) => h.notify(method).await,
+        }
+    }
 }
 
 impl McpServerHandle {
@@ -124,7 +441,7 @@ impl McpServerHandle {
 
 struct McpServer {
     tools: Vec<McpTool>,
-    handle: Arc<Mutex<McpServerHandle>>,
+    handle: Arc<Mutex<McpHandle>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,27 +482,27 @@ impl McpManager {
 
         // Spawn all connections concurrently, tagging each with its original index
         // so we can reassemble in config order (tool_map indices must be stable).
-        let mut join_set: JoinSet<(usize, Result<(McpServer, Child)>)> = JoinSet::new();
+        // Returns (server, optional child) — HTTP servers have no child process.
+        type ConnectResult = (usize, Result<(McpServer, Option<Child>)>);
+        type ConnectSlot = Option<Result<(McpServer, Option<Child>)>>;
+        let mut join_set: JoinSet<ConnectResult> = JoinSet::new();
         for (idx, cfg) in configs.iter().enumerate() {
             let cfg = cfg.clone();
             join_set.spawn(async move {
-                let result = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(15),
-                    spawn_and_init(&cfg),
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    Err(anyhow::anyhow!(
-                        "timed out after 15 s — check that the server is reachable"
-                    ))
-                });
+                let result =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(15), connect(&cfg))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!(
+                                "timed out after 15 s — check that the server is reachable"
+                            ))
+                        });
                 (idx, result)
             });
         }
 
         // Collect into a slot-per-server array to restore original ordering.
-        let mut slots: Vec<Option<Result<(McpServer, Child)>>> =
-            (0..configs.len()).map(|_| None).collect();
+        let mut slots: Vec<ConnectSlot> = (0..configs.len()).map(|_| None).collect();
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok((idx, result)) => slots[idx] = Some(result),
@@ -200,14 +517,16 @@ impl McpManager {
 
         for (slot, cfg) in slots.into_iter().zip(configs.iter()) {
             match slot {
-                Some(Ok((server, child))) => {
+                Some(Ok((server, maybe_child))) => {
                     let idx = servers.len();
                     for tool in &server.tools {
                         tool_map.insert(tool.name.clone(), idx);
                     }
                     info!("MCP server '{}' connected ({} tools)", cfg.name, server.tools.len());
                     servers.push(server);
-                    children.push(child);
+                    if let Some(child) = maybe_child {
+                        children.push(child);
+                    }
                 },
                 Some(Err(e)) => {
                     let reason = format!("{e:#}");
@@ -303,7 +622,83 @@ impl McpManager {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Spawn an MCP server process and perform the initialization handshake.
+/// Connect to an MCP server using whichever transport the config specifies.
+/// Returns `(server, Option<child>)` — HTTP servers have no child process.
+async fn connect(cfg: &McpServerConfig) -> Result<(McpServer, Option<Child>)> {
+    if let Some(url) = &cfg.url {
+        let server = connect_http(cfg, url).await?;
+        Ok((server, None))
+    } else {
+        let (server, child) = spawn_and_init(cfg).await?;
+        Ok((server, Some(child)))
+    }
+}
+
+/// HTTP transport dispatcher: tries HTTP+SSE first, then Streamable HTTP.
+///
+/// HTTP+SSE is the older MCP HTTP transport (persistent GET /sse stream).
+/// Streamable HTTP is the newer transport (self-contained POST per request).
+/// Auto-detection keeps both working without requiring explicit config.
+async fn connect_http(cfg: &McpServerConfig, url: &str) -> Result<McpServer> {
+    // ── 1. Try HTTP+SSE transport (3 s window for endpoint event) ────────────
+    let sse_result = tokio::time::timeout(
+        tokio::time::Duration::from_secs(3),
+        McpSseHandle::connect(&cfg.name, url),
+    )
+    .await;
+
+    match sse_result {
+        Ok(Ok(handle)) => {
+            // SSE transport connected — run the handshake.
+            return run_http_handshake(cfg, McpHandle::Sse(handle)).await;
+        },
+        Ok(Err(e)) => {
+            info!("'{}': HTTP+SSE transport unavailable ({e:#}), trying streamable HTTP", cfg.name);
+        },
+        Err(_) => {
+            info!("'{}': HTTP+SSE timed out, trying streamable HTTP", cfg.name);
+        },
+    }
+
+    // ── 2. Fall back to Streamable HTTP transport ─────────────────────────────
+    let handle = McpStreamableHandle {
+        name: cfg.name.clone(),
+        url: url.to_string(),
+        client: reqwest::Client::new(),
+        next_id: 1,
+    };
+    run_http_handshake(cfg, McpHandle::Streamable(handle)).await
+}
+
+/// Perform the MCP initialize handshake and tool discovery on any HTTP handle.
+async fn run_http_handshake(cfg: &McpServerConfig, mut handle: McpHandle) -> Result<McpServer> {
+    handle
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "forgiven", "version": env!("CARGO_PKG_VERSION") },
+            }),
+        )
+        .await
+        .with_context(|| format!("MCP initialize for '{}'", cfg.name))?;
+
+    handle
+        .notify("notifications/initialized")
+        .await
+        .with_context(|| format!("MCP initialized notification for '{}'", cfg.name))?;
+
+    let tools_result = handle
+        .request("tools/list", serde_json::json!({}))
+        .await
+        .with_context(|| format!("MCP tools/list for '{}'", cfg.name))?;
+
+    let tools = parse_tools(&cfg.name, &tools_result);
+    Ok(McpServer { tools, handle: Arc::new(Mutex::new(handle)) })
+}
+
+/// stdio transport: spawn an MCP server process and perform the initialization handshake.
 async fn spawn_and_init(cfg: &McpServerConfig) -> Result<(McpServer, Child)> {
     let mut cmd = Command::new(&cfg.command);
     cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -364,9 +759,7 @@ async fn spawn_and_init(cfg: &McpServerConfig) -> Result<(McpServer, Child)> {
         .with_context(|| format!("MCP tools/list for '{}'", cfg.name))?;
 
     let tools = parse_tools(&cfg.name, &tools_result);
-
-    let server = McpServer { tools, handle: Arc::new(Mutex::new(handle)) };
-
+    let server = McpServer { tools, handle: Arc::new(Mutex::new(McpHandle::Stdio(handle))) };
     Ok((server, child))
 }
 

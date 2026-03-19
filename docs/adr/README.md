@@ -80,6 +80,8 @@ that motivated it, what was decided, and the consequences.
 | [0070](0070-markdown-preview-visual-refresh.md) | Markdown Preview Visual Refresh | Accepted |
 | [0071](0071-file-watcher-self-save-suppression.md) | File Watcher Self-Save Suppression | Accepted |
 | [0072](0072-mcp-child-process-cleanup.md) | MCP Child Process Cleanup on Exit | Accepted |
+| [0073](0073-mcp-http-transport-external-servers.md) | MCP HTTP Transport: Externally-Managed Servers | Accepted |
+| [0074](0074-agentic-loop-token-refresh.md) | Agentic Loop Mid-Session Token Refresh | Accepted |
 
 ## What is an ADR?
 

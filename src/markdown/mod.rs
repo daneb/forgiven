@@ -130,10 +130,7 @@ impl Renderer {
         match level {
             HeadingLevel::H1 => {
                 let style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-                self.output.push(Line::from(Span::styled(
-                    format!("{MARGIN}{text}"),
-                    style,
-                )));
+                self.output.push(Line::from(Span::styled(format!("{MARGIN}{text}"), style)));
                 // Full-width underline with ═
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{}", "═".repeat(rule_width)),
@@ -142,10 +139,7 @@ impl Renderer {
             },
             HeadingLevel::H2 => {
                 let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-                self.output.push(Line::from(Span::styled(
-                    format!("{MARGIN}{text}"),
-                    style,
-                )));
+                self.output.push(Line::from(Span::styled(format!("{MARGIN}{text}"), style)));
                 // Full-width underline with ─
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{}", "─".repeat(rule_width)),
@@ -356,10 +350,8 @@ impl Renderer {
                 // ── Leaf events ───────────────────────────────────────────────
                 Event::Code(code) => {
                     // Inline code — cyan; color alone signals code, no backticks.
-                    self.pending.push(Span::styled(
-                        code.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ));
+                    self.pending
+                        .push(Span::styled(code.to_string(), Style::default().fg(Color::Cyan)));
                 },
                 Event::Text(text) => {
                     if self.in_code_block {
@@ -374,10 +366,7 @@ impl Renderer {
                                     format!("{MARGIN}  │ "),
                                     Style::default().fg(gutter_color),
                                 ),
-                                Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(text_color),
-                                ),
+                                Span::styled(line.to_string(), Style::default().fg(text_color)),
                             ]));
                         }
                     } else {
