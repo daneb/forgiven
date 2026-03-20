@@ -797,7 +797,29 @@ Available tools:\n\
         let mut send_messages: Vec<serde_json::Value> =
             vec![serde_json::json!({ "role": "system", "content": system })];
 
-        let history_start = self.messages.len().saturating_sub(20);
+        // ── Token-aware history truncation ────────────────────────────────────
+        // Estimate tokens using the chars/4 approximation (1 token ≈ 4 chars).
+        // Budget is 80% of the model's context window minus an estimate for the
+        // system prompt, so we never approach the hard API limit.
+        let context_limit = self.context_window_size();
+        let system_tokens = (system.len() / 4) as u32;
+        let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
+
+        // Walk from newest to oldest to always keep the most recent messages.
+        let mut accumulated: u32 = 0;
+        let mut history_start = self.messages.len(); // default: include nothing
+        for (i, msg) in self.messages.iter().enumerate().rev() {
+            if matches!(msg.role, Role::System) {
+                continue; // display-only dividers carry no token cost
+            }
+            let msg_tokens = (msg.content.len() / 4) as u32 + 4; // +4 for role framing
+            if accumulated + msg_tokens > budget {
+                break;
+            }
+            accumulated += msg_tokens;
+            history_start = i;
+        }
+
         for msg in &self.messages[history_start..] {
             // Skip System-role entries — they are display-only dividers inserted by
             // new_conversation() and must not be forwarded to the API as context.

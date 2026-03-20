@@ -116,6 +116,7 @@ pub enum Action {
     // Agent panel
     AgentToggle,
     AgentFocus,
+    AgentNewConversation, // SPC a n — clear history, start fresh conversation
     // Explorer panel
     ExplorerToggle,
     ExplorerFocus,
@@ -240,6 +241,7 @@ impl KeyHandler {
         let mut agent_node = KeyNode::new("agent");
         agent_node.children.insert('a', KeyNode::leaf("toggle agent panel", Action::AgentToggle));
         agent_node.children.insert('f', KeyNode::leaf("focus agent panel", Action::AgentFocus));
+        agent_node.children.insert('n', KeyNode::leaf("new conversation", Action::AgentNewConversation));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

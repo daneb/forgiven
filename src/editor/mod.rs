@@ -1979,6 +1979,11 @@ impl Editor {
                     });
                 }
             },
+            Action::AgentNewConversation => {
+                let model_name = self.agent_panel.selected_model_display().to_string();
+                self.agent_panel.new_conversation(&model_name);
+                self.set_status(format!("New conversation started · {model_name}"));
+            },
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
                 if self.file_explorer.visible {
