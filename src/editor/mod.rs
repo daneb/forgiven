@@ -2657,6 +2657,12 @@ impl Editor {
                     self.set_status("No reply to copy".to_string());
                 }
             },
+            // Ctrl+M — open the next mermaid diagram from the last reply in the browser.
+            // Auto-fixes unquoted parentheses in node labels (common AI generation bug).
+            // Cycles through multiple diagrams; resets on new reply.
+            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_mermaid_in_browser();
+            },
             // Ctrl+Y — yank the full last reply to the system clipboard.
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(text) = self.agent_panel.last_assistant_reply() {
@@ -4798,6 +4804,146 @@ impl Editor {
             Err(e) => self.set_status(format!("Failed to open browser: {e}")),
         }
     }
+
+    /// Extract the current (or next) mermaid diagram from the last agent reply,
+    /// auto-fix parentheses in node labels, write a self-contained HTML file to
+    /// the system temp directory, and open it in the default browser.
+    fn open_mermaid_in_browser(&mut self) {
+        let reply = match self.agent_panel.last_assistant_reply() {
+            Some(r) => r,
+            None => {
+                self.set_status("No agent reply to render".to_string());
+                return;
+            },
+        };
+
+        let blocks = crate::agent::AgentPanel::extract_mermaid_blocks(&reply);
+        if blocks.is_empty() {
+            self.set_status("No mermaid blocks in last reply".to_string());
+            return;
+        }
+
+        let idx = self.agent_panel.mermaid_block_idx % blocks.len();
+        let source = fix_mermaid_parens(&blocks[idx]);
+        self.agent_panel.mermaid_block_idx =
+            (self.agent_panel.mermaid_block_idx + 1) % blocks.len();
+
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mermaid diagram {num}/{total}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {{
+    margin: 0;
+    padding: 2rem;
+    background: #1e1e2e;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+  }}
+  .mermaid {{ max-width: 100%; }}
+</style>
+</head>
+<body>
+<pre class="mermaid">
+{source}
+</pre>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});
+</script>
+</body>
+</html>"#,
+            num = idx + 1,
+            total = blocks.len(),
+            source = source,
+        );
+
+        let path = std::env::temp_dir().join(format!("forgiven_mermaid_{}.html", idx + 1));
+        if let Err(e) = std::fs::write(&path, &html) {
+            self.set_status(format!("Failed to write mermaid file: {e}"));
+            return;
+        }
+
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(target_os = "linux")]
+        let opener = "xdg-open";
+        #[cfg(target_os = "windows")]
+        let opener = "explorer";
+
+        match std::process::Command::new(opener).arg(&path).spawn() {
+            Ok(_) => self.set_status(format!(
+                "Mermaid diagram {}/{} opened in browser  (Ctrl+M for next)",
+                idx + 1,
+                blocks.len()
+            )),
+            Err(e) => self.set_status(format!("Failed to open browser: {e}")),
+        }
+    }
+}
+
+/// Fix unquoted node labels containing parentheses in Mermaid source.
+///
+/// Mermaid breaks when a square-bracket label contains `(` or `)` without
+/// surrounding quotes.  AI models frequently generate this form, e.g.:
+///   `K[UseHttpMetrics (Prometheus)]`
+///
+/// The fix is to wrap the label in double-quotes:
+///   `K["UseHttpMetrics (Prometheus)"]`
+///
+/// This function scans each line character-by-character and applies the
+/// transformation only to `[…]` groups that (a) contain `(` or `)` and
+/// (b) are not already quoted.
+fn fix_mermaid_parens(source: &str) -> String {
+    let mut result = String::with_capacity(source.len() + 64);
+    for line in source.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '[' {
+                // Find the matching `]`, tracking depth.
+                let start = i;
+                let mut j = i + 1;
+                let mut depth = 1usize;
+                while j < chars.len() && depth > 0 {
+                    match chars[j] {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {},
+                    }
+                    j += 1;
+                }
+                if depth == 0 {
+                    // chars[start+1 .. j-1] is the inner label content.
+                    let inner: String = chars[start + 1..j - 1].iter().collect();
+                    if (inner.contains('(') || inner.contains(')')) && !inner.starts_with('"') {
+                        result.push('[');
+                        result.push('"');
+                        result.push_str(&inner);
+                        result.push('"');
+                        result.push(']');
+                    } else {
+                        result.extend(chars[start..j].iter());
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            result.push(chars[i]);
+            i += 1;
+        }
+        result.push('\n');
+    }
+    // Preserve original trailing-newline behaviour.
+    if !source.ends_with('\n') {
+        result.pop();
+    }
+    result
 }
 
 /// Strip a wrapping code fence that the AI may add despite being told not to.

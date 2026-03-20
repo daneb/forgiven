@@ -70,12 +70,12 @@ pub struct SpecFramework {
 fn speckit_descriptions() -> HashMap<String, String> {
     [
         ("speckit.constitution", "Step 1 · Define project principles & constraints"),
-        ("speckit.specify", "Step 2 · Write a feature specification"),
-        ("speckit.plan", "Step 3 · Create an implementation plan"),
-        ("speckit.tasks", "Step 4 · Break plan into actionable tasks"),
-        ("speckit.implement", "Step 5 · Implement a specific task"),
-        ("speckit.clarify", "Step 6 · Resolve ambiguities in the spec"),
-        ("speckit.analyze", "Analyze existing code or architecture"),
+        ("speckit.specify", "Step 2 · /speckit.specify <feature-name> [context]"),
+        ("speckit.plan", "Step 3 · /speckit.plan <feature-name>"),
+        ("speckit.tasks", "Step 4 · /speckit.tasks <feature-name>"),
+        ("speckit.implement", "Step 5 · /speckit.implement <feature-name>"),
+        ("speckit.clarify", "Step 6 · /speckit.clarify [feature-name]"),
+        ("speckit.analyze", "/speckit.analyze [feature-name]"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -331,6 +331,7 @@ view connection errors, and check recent log entries.
 | `j` / `k` | Scroll history up / down |
 | `Ctrl+C` | **Abort** running stream (safe at any point) |
 | `Ctrl+K` | Copy next code block from last reply (cycles through all blocks) |
+| `Ctrl+M` | Open next mermaid diagram from last reply in browser (cycles; auto-fixes parens) |
 | `Ctrl+Y` | Yank full last reply to system clipboard |
 | `Ctrl+A` | Open apply-diff overlay for the last code block |
 | `Ctrl+P` | Attach a file to the next message (context picker) |
@@ -518,6 +519,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0067](docs/adr/0067-agent-input-scroll-follow-cursor.md) | Agent Input Box Scroll-to-Cursor |
 | [0068](docs/adr/0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting |
 | [0069](docs/adr/0069-model-loading-modernisation.md) | Model Loading Modernisation |
+| [0076](docs/adr/0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) |
 
 ---
 

@@ -3,9 +3,19 @@ You are performing Phase 5 of Spec-Driven Development: IMPLEMENT.
 Your goal is to execute every task in the task list exactly as specified, producing
 working, tested code that satisfies the spec's acceptance criteria.
 
+## Deriving the feature name
+
+The user context below begins with the feature name (the same slug used in the earlier
+phases). All spec files live under `docs/spec/features/<feature-name>/`.
+
+If no feature name is provided, ask the user for one before proceeding.
+
 ## Rules
 
-- Read `docs/spec/TASKS.md` first. Execute tasks in order. Do not skip or reorder.
+- Extract the feature name (first token of user context). Set:
+  - FEATURE = <feature-name>
+  - FEATURE_DIR = `docs/spec/features/<FEATURE>/`
+- Read `FEATURE_DIR/TASKS.md` first. Execute tasks in order. Do not skip or reorder.
 - Before editing any file, call read_file to see its current contents.
 - Use create_task / complete_task to register progress for tasks that span multiple
   file operations (3+ distinct file writes/edits).
@@ -13,7 +23,7 @@ working, tested code that satisfies the spec's acceptance criteria.
   a final summary reply after all tasks are complete.
 - If a task's acceptance condition cannot be met (e.g. missing dependency, ambiguous
   requirement), stop and ask the user rather than guessing.
-- Follow the tech stack and architecture defined in `docs/spec/PLAN.md`. Do not
+- Follow the tech stack and architecture defined in `FEATURE_DIR/PLAN.md`. Do not
   introduce new dependencies without asking.
 - Match the coding conventions already present in the codebase (formatting, naming,
   error handling patterns).
@@ -25,3 +35,4 @@ working, tested code that satisfies the spec's acceptance criteria.
 3. Suggest verification steps the user should run (tests, manual checks).
 
 ## User context
+

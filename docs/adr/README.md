@@ -83,6 +83,7 @@ that motivated it, what was decided, and the consequences.
 | [0073](0073-mcp-http-transport-external-servers.md) | MCP HTTP Transport: Externally-Managed Servers | Accepted |
 | [0074](0074-agentic-loop-token-refresh.md) | Agentic Loop Mid-Session Token Refresh | Accepted |
 | [0075](0075-slash-menu-description-hints.md) | Slash-Menu Description Hints | Accepted |
+| [0076](0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) | Accepted |
 
 ## What is an ADR?
 

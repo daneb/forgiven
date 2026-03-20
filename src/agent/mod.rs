@@ -211,8 +211,10 @@ pub struct AgentPanel {
     /// Token counts from the last API response (0 = not yet received).
     pub last_prompt_tokens: u32,
     pub last_completion_tokens: u32,
-    /// Cycle index for the 'c' copy-code-block command.
+    /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
+    /// Cycle index for the Ctrl+M view-mermaid-diagram command.
+    pub mermaid_block_idx: usize,
     /// Pasted content blocks captured via bracketed paste; shown as summary lines in the input box.
     /// Each entry is `(text, line_count)` — the count is pre-computed at paste time so the
     /// render path never has to scan the text again.
@@ -402,6 +404,7 @@ impl AgentPanel {
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
             code_block_idx: 0,
+            mermaid_block_idx: 0,
             pasted_blocks: Vec::new(),
             image_blocks: Vec::new(),
             mcp_manager: None,
@@ -992,6 +995,7 @@ Available tools:\n\
                             }
                         }
                         self.code_block_idx = 0;
+                        self.mermaid_block_idx = 0;
                         self.scroll = 0;
                         self.stream_rx = None;
                         self.continuation_tx = None;
@@ -1165,6 +1169,37 @@ Available tools:\n\
                     in_block = true;
                 }
             } else if in_block {
+                current.push(line);
+            }
+        }
+        blocks
+    }
+
+    /// Extract only fenced blocks whose language tag is `mermaid`.
+    /// Returns the raw diagram source (without the fence lines).
+    pub fn extract_mermaid_blocks(text: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut in_mermaid = false;
+        let mut current: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                if in_mermaid {
+                    while current.last().map(|l: &&str| l.trim().is_empty()).unwrap_or(false) {
+                        current.pop();
+                    }
+                    if !current.is_empty() {
+                        blocks.push(current.join("\n"));
+                    }
+                    current.clear();
+                    in_mermaid = false;
+                } else {
+                    let lang = trimmed.trim_start_matches('`').trim();
+                    if lang.eq_ignore_ascii_case("mermaid") {
+                        in_mermaid = true;
+                    }
+                }
+            } else if in_mermaid {
                 current.push(line);
             }
         }
