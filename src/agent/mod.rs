@@ -1596,7 +1596,9 @@ async fn agentic_loop(
                                         // Only flag a real switch — not a dated alias of the same
                                         // model (e.g. "gpt-4.1" → "gpt-4.1-2025-04-14").
                                         let is_alias = actual.starts_with(model_id.as_str())
-                                            && actual.get(model_id.len()..).is_some_and(|s| s.starts_with('-'));
+                                            && actual
+                                                .get(model_id.len()..)
+                                                .is_some_and(|s| s.starts_with('-'));
                                         if actual != model_id && !is_alias {
                                             let _ = tx.send(StreamEvent::ModelSwitched {
                                                 from: model_id.to_string(),
@@ -2094,7 +2096,10 @@ async fn start_chat_stream_with_tools(
                         delay = tokio::time::Duration::from_secs(secs);
                     }
                     warn!("Rate limited (429), retrying after {}s: {body}", delay.as_secs());
-                    let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts + 1, max: max_retries });
+                    let _ = tx.send(StreamEvent::Retrying {
+                        attempt: retry_attempts + 1,
+                        max: max_retries,
+                    });
                     tokio::time::sleep(delay).await;
                     retry_attempts += 1;
                     if retry_attempts >= max_retries {

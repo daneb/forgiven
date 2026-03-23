@@ -4761,7 +4761,8 @@ impl Editor {
             return;
         }
 
-        let model_id = self.agent_panel
+        let model_id = self
+            .agent_panel
             .selected_model_id_with_fallback(&self.config.default_copilot_model)
             .to_string();
 
@@ -4868,7 +4869,8 @@ impl Editor {
             return;
         }
 
-        let model_id = self.agent_panel
+        let model_id = self
+            .agent_panel
             .selected_model_id_with_fallback(&self.config.default_copilot_model)
             .to_string();
         let (tx, rx) = oneshot::channel();
