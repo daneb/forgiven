@@ -39,6 +39,30 @@ pub struct ChatMessage {
     pub images: Vec<(u32, u32)>,
 }
 
+/// Score a message's importance for history retention (higher = keep longer).
+///
+/// Scores are additive weights used by the importance-scored truncation in
+/// `send_message()` to prefer dropping large low-value messages before small
+/// high-value ones when the context budget is tight.
+fn message_importance(msg: &ChatMessage) -> u32 {
+    let mut score: u32 = match msg.role {
+        Role::User => 3,      // user instructions define the task
+        Role::Assistant => 2, // model replies carry context
+        Role::System => 0,    // display-only dividers, never sent to API
+    };
+    let c = &msg.content;
+    // Messages containing errors or failures are highly valuable to retain.
+    if c.contains("error") || c.contains("Error") || c.contains("failed") || c.contains("panic") {
+        score += 3;
+    }
+    // Large messages that look like raw file reads (line-numbered output) or batch
+    // results are low-value once the model has already acted on them.
+    if c.len() > 2000 && (c.contains(" | ") || c.starts_with("=== ")) {
+        score = score.saturating_sub(2);
+    }
+    score
+}
+
 /// An image captured from the system clipboard via Ctrl+V.
 /// Stored as a pre-encoded PNG base64 data URI ready for the API.
 #[derive(Debug, Clone)]
@@ -211,6 +235,8 @@ pub struct AgentPanel {
     /// Token counts from the last API response (0 = not yet received).
     pub last_prompt_tokens: u32,
     pub last_completion_tokens: u32,
+    /// Tokens served from the provider's prompt cache in the last response.
+    pub last_cached_tokens: u32,
     /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
     /// Cycle index for the Ctrl+M view-mermaid-diagram command.
@@ -348,6 +374,8 @@ pub enum StreamEvent {
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        /// Tokens served from the provider's prompt cache (0 if caching not active).
+        cached_tokens: u32,
     },
 }
 
@@ -403,6 +431,7 @@ impl AgentPanel {
             last_error: None,
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
+            last_cached_tokens: 0,
             code_block_idx: 0,
             mermaid_block_idx: 0,
             pasted_blocks: Vec::new(),
@@ -756,23 +785,42 @@ COMMUNICATION RULES:\n\
    Do NOT use it to confirm routine read/write operations.\n\
 \n\
 FILE EDITING RULES:\n\
-1. ALWAYS call read_file on a file BEFORE calling edit_file or write_file on it.\n\
-   Never guess or assume what a file contains — you must read it first.\n\
-2. Copy old_str VERBATIM from the read_file output, including all whitespace,\n\
+1. Before editing a file, prefer get_file_outline to understand its structure,\n\
+   then get_symbol_context to get the specific symbol you need. Only fall back\n\
+   to read_file when you need the full contents (e.g. for a new file or a\n\
+   write_file rewrite). This saves tokens.\n\
+2. Copy old_str VERBATIM from the tool output, including all whitespace,\n\
    indentation, and surrounding lines needed to make it unique in the file.\n\
-3. If edit_file returns an error, call read_file again to get the current content\n\
-   and retry with the correct old_str. Do NOT retry with the same old_str.\n\
+3. If edit_file returns an error, call get_symbol_context or read_file again\n\
+   to get the current content and retry with the correct old_str.\n\
+   Do NOT retry with the same old_str.\n\
 4. Prefer edit_file over write_file for any change to an existing file.\n\
 5. Use list_directory only if the project tree above is insufficient.\n\
+6. When you need several files, use read_files([...]) instead of multiple\n\
+   read_file calls. Use search_files(pattern, [...]) instead of read_file + scan.\n\
+\n\
+MEMORY RULES (only when memory tools are available):\n\
+- At the START of a new session, call search_nodes with query 'project context'\n\
+  to retrieve any facts stored from prior sessions before asking the user.\n\
+- During work, call add_observations when you discover non-obvious facts about\n\
+  the codebase (architecture decisions, gotchas, key file locations).\n\
+- At the END of a significant session, call create_entities + add_observations\n\
+  to persist what you learned for future sessions.\n\
 \n\
 Available tools:\n\
-- create_task     Register a planned step (call once per step before file work).\n\
-- complete_task   Mark a step done (call after finishing each step).\n\
-- read_file       Read a file (returns line-numbered content). REQUIRED before edits.\n\
-- write_file      Write a complete file (for new files or full rewrites only).\n\
-- edit_file       Surgical find-and-replace. old_str must match EXACTLY once.\n\
-- list_directory  List a directory's contents.\n\
-- ask_user        Show the user a question dialog and wait for their choice.\n";
+- create_task          Register a planned step (call once per step before file work).\n\
+- complete_task        Mark a step done (call after finishing each step).\n\
+- get_file_outline     List all top-level definitions in a file (signatures only, no bodies).\n\
+                       Use this first to find where a symbol lives — much cheaper than read_file.\n\
+- get_symbol_context   Get the full body of one symbol + signatures of what it calls.\n\
+                       Use after get_file_outline to get focused context before an edit.\n\
+- read_file            Read a file's full line-numbered content. Use when full content is needed.\n\
+- read_files           Read multiple files in one call (preferred over repeated read_file).\n\
+- search_files         Search for a pattern across files/directories (returns file:line: text).\n\
+- write_file           Write a complete file (for new files or full rewrites only).\n\
+- edit_file            Surgical find-and-replace. old_str must match EXACTLY once.\n\
+- list_directory       List a directory's contents.\n\
+- ask_user             Show the user a question dialog and wait for their choice.\n";
 
         let system = if let Some(ref ctx) = context {
             format!(
@@ -797,7 +845,7 @@ Available tools:\n\
         let mut send_messages: Vec<serde_json::Value> =
             vec![serde_json::json!({ "role": "system", "content": system })];
 
-        // ── Token-aware history truncation ────────────────────────────────────
+        // ── Token-aware history truncation with importance scoring ───────────
         // Estimate tokens using the chars/4 approximation (1 token ≈ 4 chars).
         // Budget is 80% of the model's context window minus an estimate for the
         // system prompt, so we never approach the hard API limit.
@@ -805,25 +853,60 @@ Available tools:\n\
         let system_tokens = (system.len() / 4) as u32;
         let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
 
-        // Walk from newest to oldest to always keep the most recent messages.
-        let mut accumulated: u32 = 0;
-        let mut history_start = self.messages.len(); // default: include nothing
-        for (i, msg) in self.messages.iter().enumerate().rev() {
-            if matches!(msg.role, Role::System) {
-                continue; // display-only dividers carry no token cost
+        // ── Phase 1: always keep the most recent MIN_RECENT non-system messages.
+        const MIN_RECENT: usize = 4;
+        let non_system: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !matches!(m.role, Role::System))
+            .map(|(i, _)| i)
+            .collect();
+        let recent_start_idx = non_system.len().saturating_sub(MIN_RECENT);
+        let recent_indices: std::collections::HashSet<usize> =
+            non_system[recent_start_idx..].iter().copied().collect();
+
+        // Token cost of the guaranteed-recent slice.
+        let recent_tokens: u32 = recent_indices
+            .iter()
+            .map(|&i| (self.messages[i].content.len() / 4) as u32 + 4)
+            .sum();
+        let older_budget = budget.saturating_sub(recent_tokens);
+
+        // ── Phase 2: from older messages, greedily include highest-importance
+        //    ones first until the older_budget is exhausted, then reassemble in
+        //    original order so conversation coherence is preserved.
+        let mut candidates: Vec<(usize, u32, u32)> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| !matches!(m.role, Role::System) && !recent_indices.contains(i))
+            .map(|(i, m)| {
+                let tokens = (m.content.len() / 4) as u32 + 4;
+                let score = message_importance(m);
+                (i, tokens, score)
+            })
+            .collect();
+
+        // Sort by score descending so high-value messages are included first.
+        candidates.sort_by(|a, b| b.2.cmp(&a.2).then(b.0.cmp(&a.0)));
+
+        let mut used: u32 = 0;
+        let mut included: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (i, tokens, _) in &candidates {
+            if used + tokens > older_budget {
+                continue; // skip this one — too large — try smaller/higher-scored ones
             }
-            let msg_tokens = (msg.content.len() / 4) as u32 + 4; // +4 for role framing
-            if accumulated + msg_tokens > budget {
-                break;
-            }
-            accumulated += msg_tokens;
-            history_start = i;
+            used += tokens;
+            included.insert(*i);
         }
 
-        for msg in &self.messages[history_start..] {
-            // Skip System-role entries — they are display-only dividers inserted by
-            // new_conversation() and must not be forwarded to the API as context.
+        // Emit messages in original order (older included + recent).
+        for (i, msg) in self.messages.iter().enumerate() {
             if matches!(msg.role, Role::System) {
+                continue;
+            }
+            if !included.contains(&i) && !recent_indices.contains(&i) {
                 continue;
             }
             send_messages.push(serde_json::json!({
@@ -1002,9 +1085,10 @@ Available tools:\n\
                         active = true;
                         self.status = AgentStatus::Retrying { attempt, max };
                     },
-                    Ok(StreamEvent::Usage { prompt_tokens, completion_tokens }) => {
+                    Ok(StreamEvent::Usage { prompt_tokens, completion_tokens, cached_tokens }) => {
                         self.last_prompt_tokens = prompt_tokens;
                         self.last_completion_tokens = completion_tokens;
+                        self.last_cached_tokens = cached_tokens;
                     },
                     Ok(StreamEvent::Done) => {
                         if let Some(text) = self.streaming_reply.take() {
@@ -1541,10 +1625,19 @@ async fn agentic_loop(
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(0)
                                         as u32;
+                                    // OpenAI returns cached token count under
+                                    // usage.prompt_tokens_details.cached_tokens when
+                                    // automatic prompt caching is active.
+                                    let cached = usage
+                                        .pointer("/prompt_tokens_details/cached_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as u32;
                                     if p > 0 || c > 0 {
                                         let _ = tx.send(StreamEvent::Usage {
                                             prompt_tokens: p,
                                             completion_tokens: c,
+                                            cached_tokens: cached,
                                         });
                                     }
                                 }

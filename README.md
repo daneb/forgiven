@@ -202,6 +202,15 @@ args    = ["-y", "@modelcontextprotocol/server-github"]
 # Env vars starting with $ are resolved from the host environment at startup.
 [mcp.servers.env]
 GITHUB_TOKEN = "$GITHUB_PERSONAL_ACCESS_TOKEN"
+
+# ── Optional: persistent agent memory (knowledge graph) ─────────────────
+# The memory server lets the agent store and retrieve facts across sessions.
+# Eliminates the need to replay conversation history for project context.
+# Tools exposed: create_entities, add_observations, search_nodes, read_graph.
+[[mcp.servers]]
+name    = "memory"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-memory"]
 ```
 
 Use `SPC d` (Diagnostics overlay) to inspect running LSP and MCP servers,
@@ -392,7 +401,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0075)
+│   └── adr/                 # Architecture Decision Records (0001 – 0084)
 └── Cargo.toml
 ```
 
@@ -520,6 +529,14 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0068](docs/adr/0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting |
 | [0069](docs/adr/0069-model-loading-modernisation.md) | Model Loading Modernisation |
 | [0076](docs/adr/0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) |
+| [0077](docs/adr/0077-agent-context-window-management.md) | Agent Context Window Management |
+| [0078](docs/adr/0078-prompt-caching.md) | Prompt Caching — Cached Token Tracking |
+| [0079](docs/adr/0079-diff-only-tool-results.md) | Diff-Only Tool Results for File Write/Edit |
+| [0080](docs/adr/0080-tool-call-batching.md) | Tool Call Batching (read_files, search_files) |
+| [0081](docs/adr/0081-importance-scored-history.md) | Importance-Scored History Retention |
+| [0082](docs/adr/0082-symbol-aware-context-tools.md) | Symbol-Aware Context Tools (get_file_outline, get_symbol_context) |
+| [0083](docs/adr/0083-mcp-memory-server.md) | MCP Memory Server for Cross-Session Context |
+| [0084](docs/adr/0084-llmlingua-mcp-sidecar.md) | LLMLingua MCP Sidecar for Tool Result Compression |
 
 ---
 

@@ -650,7 +650,14 @@ impl UI {
             };
             let k_used = panel.last_prompt_tokens as f32 / 1000.0;
             let k_total = window as f32 / 1000.0;
-            Span::styled(format!("  {k_used:.1}k/{k_total:.0}k"), Style::default().fg(color))
+            let base = format!("  {k_used:.1}k/{k_total:.0}k");
+            let label = if panel.last_cached_tokens > 0 {
+                let k_cached = panel.last_cached_tokens as f32 / 1000.0;
+                format!("{base} ({k_cached:.1}k cached)")
+            } else {
+                base
+            };
+            Span::styled(label, Style::default().fg(color))
         } else {
             Span::raw("")
         };
