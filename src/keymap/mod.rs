@@ -25,6 +25,7 @@ pub enum Mode {
     ReleaseNotes,    // Release notes generation popup (SPC g n)
     Diagnostics,     // Read-only diagnostics overlay (SPC d)
     BinaryFile,      // Unsupported binary file popup: o=open default app, Esc=dismiss
+    LocationList,    // LSP location list overlay (goto-definition / references / symbols)
 }
 
 /// An editor action to be executed
@@ -241,7 +242,9 @@ impl KeyHandler {
         let mut agent_node = KeyNode::new("agent");
         agent_node.children.insert('a', KeyNode::leaf("toggle agent panel", Action::AgentToggle));
         agent_node.children.insert('f', KeyNode::leaf("focus agent panel", Action::AgentFocus));
-        agent_node.children.insert('n', KeyNode::leaf("new conversation", Action::AgentNewConversation));
+        agent_node
+            .children
+            .insert('n', KeyNode::leaf("new conversation", Action::AgentNewConversation));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

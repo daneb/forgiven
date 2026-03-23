@@ -13,7 +13,7 @@ use crate::agent::{
     SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
-use crate::editor::DiffLine;
+use crate::editor::{DiffLine, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
@@ -186,6 +186,8 @@ pub struct RenderContext<'a> {
     pub startup_elapsed: Option<std::time::Duration>,
     /// File-info popup data (explorer `i` key); `None` = hidden.
     pub file_info: Option<&'a FileInfoData>,
+    /// LSP location list overlay (Mode::LocationList only).
+    pub location_list: Option<&'a LocationListState>,
 }
 
 /// UI rendering for the editor
@@ -223,6 +225,7 @@ impl UI {
         let binary_file_path = ctx.binary_file_path;
         let startup_elapsed = ctx.startup_elapsed;
         let file_info = ctx.file_info;
+        let location_list = ctx.location_list;
 
         let size = frame.area();
 
@@ -453,6 +456,11 @@ impl UI {
         // Render diagnostics overlay if active
         if let Some(diag) = diag_overlay {
             Self::render_diagnostics_overlay(frame, diag, size);
+        }
+
+        // Render LSP location list overlay if active
+        if let Some(list) = location_list {
+            Self::render_location_list(frame, list, size);
         }
 
         // Render file-info popup if active (explorer `i` key)
@@ -2071,6 +2079,67 @@ impl UI {
         frame.render_widget(results_para, inner[2]);
     }
 
+    /// Render the LSP location-list overlay (Mode::LocationList).
+    fn render_location_list(frame: &mut Frame, state: &LocationListState, area: Rect) {
+        let popup_width = 80.min(area.width);
+        let popup_height =
+            (state.entries.len().min(u16::MAX as usize) as u16 + 4).min(area.height * 4 / 5).max(6);
+        let h_pad = area.width.saturating_sub(popup_width) / 2;
+        let v_pad = area.height.saturating_sub(popup_height) / 2;
+
+        let horiz = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(h_pad),
+                Constraint::Length(popup_width),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(v_pad),
+                Constraint::Length(popup_height),
+                Constraint::Min(0),
+            ])
+            .split(horiz[1]);
+        let popup_area = vert[1];
+
+        frame.render_widget(Clear, popup_area);
+
+        let visible_height = popup_area.height.saturating_sub(3) as usize;
+        let selected = state.selected;
+        let scroll = if selected >= visible_height { selected - visible_height + 1 } else { 0 };
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (idx, entry) in state.entries.iter().enumerate().skip(scroll).take(visible_height) {
+            let is_sel = idx == selected;
+            let bg = if is_sel { Color::Rgb(40, 60, 90) } else { Color::Reset };
+            let prefix = if is_sel { "► " } else { "  " };
+            let label_width = popup_area.width.saturating_sub(4) as usize;
+            let label: String = entry.label.chars().take(label_width).collect();
+            lines.push(Line::from(vec![Span::styled(
+                format!("{prefix}{label}"),
+                Style::default().fg(if is_sel { Color::White } else { Color::Gray }).bg(bg),
+            )]));
+        }
+
+        let block = Block::default()
+            .title(Span::styled(
+                format!(" {} ", state.title),
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(Span::styled(
+                "  j/k  navigate   Enter  jump   Esc  close",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightCyan));
+
+        let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, popup_area);
+    }
+
     /// Render the status line
     #[allow(clippy::too_many_arguments)]
     fn render_status_line(
@@ -2104,6 +2173,7 @@ impl UI {
             Mode::ReleaseNotes => "RELEASE",
             Mode::Diagnostics => "DIAG",
             Mode::BinaryFile => "BINARY",
+            Mode::LocationList => "LSP",
         };
 
         let mode_color = match mode {
@@ -2127,6 +2197,7 @@ impl UI {
             Mode::ReleaseNotes => Color::LightCyan,
             Mode::Diagnostics => Color::LightCyan,
             Mode::BinaryFile => Color::Yellow,
+            Mode::LocationList => Color::LightCyan,
         };
 
         let mut spans = vec![

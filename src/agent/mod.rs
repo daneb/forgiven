@@ -377,6 +377,11 @@ pub enum StreamEvent {
         /// Tokens served from the provider's prompt cache (0 if caching not active).
         cached_tokens: u32,
     },
+    /// The API silently routed the request to a different model (e.g. premium quota exceeded).
+    ModelSwitched {
+        from: String,
+        to: String,
+    },
 }
 
 /// Sentinel error returned by `start_chat_stream_with_tools` when the API responds with
@@ -453,6 +458,15 @@ impl AgentPanel {
     pub fn selected_model_id(&self) -> &str {
         if self.available_models.is_empty() {
             return "claude-sonnet-4";
+        }
+        &self.available_models[self.selected_model.min(self.available_models.len() - 1)].id
+    }
+
+    /// Like `selected_model_id` but uses `fallback` when the models list hasn't loaded yet.
+    /// Use this anywhere the config's preferred model should be honoured before the list arrives.
+    pub fn selected_model_id_with_fallback<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.available_models.is_empty() {
+            return fallback;
         }
         &self.available_models[self.selected_model.min(self.available_models.len() - 1)].id
     }
@@ -867,10 +881,8 @@ Available tools:\n\
             non_system[recent_start_idx..].iter().copied().collect();
 
         // Token cost of the guaranteed-recent slice.
-        let recent_tokens: u32 = recent_indices
-            .iter()
-            .map(|&i| (self.messages[i].content.len() / 4) as u32 + 4)
-            .sum();
+        let recent_tokens: u32 =
+            recent_indices.iter().map(|&i| (self.messages[i].content.len() / 4) as u32 + 4).sum();
         let older_budget = budget.saturating_sub(recent_tokens);
 
         // ── Phase 2: from older messages, greedily include highest-importance
@@ -1089,6 +1101,22 @@ Available tools:\n\
                         self.last_prompt_tokens = prompt_tokens;
                         self.last_completion_tokens = completion_tokens;
                         self.last_cached_tokens = cached_tokens;
+                    },
+                    Ok(StreamEvent::ModelSwitched { from, to }) => {
+                        active = true;
+                        // Update selected_model index to reflect the actual model being used.
+                        if let Some(idx) =
+                            self.available_models.iter().position(|m| m.id == to || m.version == to)
+                        {
+                            self.selected_model = idx;
+                        }
+                        let notice = format!(
+                            "\n\n> ⚠  Copilot switched model: **{from}** → **{to}** (premium quota exceeded)\n\n"
+                        );
+                        match self.streaming_reply.as_mut() {
+                            Some(r) => r.push_str(&notice),
+                            None => self.streaming_reply = Some(notice),
+                        }
                     },
                     Ok(StreamEvent::Done) => {
                         if let Some(text) = self.streaming_reply.take() {
@@ -1560,11 +1588,21 @@ async fn agentic_loop(
 
                         if let Some(json_str) = line.strip_prefix("data: ") {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                // Log the actual model the API used on the first chunk (may differ from what we requested).
+                                // Detect if the API silently routed to a different model (e.g. premium quota exceeded).
                                 if text_buf.is_empty() && partial_tools.is_empty() {
                                     if let Some(actual) = val.get("model").and_then(|v| v.as_str())
                                     {
                                         info!("[stream] API routed request to model={actual:?}  (requested={model_id:?})");
+                                        // Only flag a real switch — not a dated alias of the same
+                                        // model (e.g. "gpt-4.1" → "gpt-4.1-2025-04-14").
+                                        let is_alias = actual.starts_with(model_id.as_str())
+                                            && actual.get(model_id.len()..).is_some_and(|s| s.starts_with('-'));
+                                        if actual != model_id && !is_alias {
+                                            let _ = tx.send(StreamEvent::ModelSwitched {
+                                                from: model_id.to_string(),
+                                                to: actual.to_string(),
+                                            });
+                                        }
                                     }
                                 }
                                 // Text content delta
@@ -2030,13 +2068,45 @@ async fn start_chat_stream_with_tools(
             },
             Ok(response) => {
                 let status = response.status();
+                // Read Retry-After before consuming the body.
+                let retry_after_secs: Option<u64> = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
                 let body = response.text().await.unwrap_or_default();
                 // 401 means the short-lived API token expired — caller will refresh and retry.
                 if status.as_u16() == 401 {
                     return Err(anyhow::Error::new(TokenExpiredError));
                 }
-                // Other 4xx errors (except 429 rate-limit) are permanent — don't retry.
-                if status.is_client_error() && status.as_u16() != 429 {
+                if status.as_u16() == 429 {
+                    // If the server says to wait more than 2 minutes, the quota is likely
+                    // exhausted for the session — fail fast with a helpful message.
+                    if retry_after_secs.unwrap_or(0) > 120 {
+                        return Err(anyhow::anyhow!(
+                            "Copilot rate limit: quota exhausted (Retry-After: {}s). \
+                             Try again later or switch models with Ctrl+T.",
+                            retry_after_secs.unwrap_or(0)
+                        ));
+                    }
+                    // Respect Retry-After if provided; otherwise fall through to exponential backoff.
+                    if let Some(secs) = retry_after_secs {
+                        delay = tokio::time::Duration::from_secs(secs);
+                    }
+                    warn!("Rate limited (429), retrying after {}s: {body}", delay.as_secs());
+                    let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts + 1, max: max_retries });
+                    tokio::time::sleep(delay).await;
+                    retry_attempts += 1;
+                    if retry_attempts >= max_retries {
+                        return Err(anyhow::anyhow!(
+                            "Max retries reached for Copilot Chat API (last error: HTTP 429 Too Many Requests)"
+                        ));
+                    }
+                    delay *= 2;
+                    continue;
+                }
+                // Other 4xx errors are permanent — don't retry.
+                if status.is_client_error() {
                     return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
                 }
                 warn!("Retrying due to API error ({status}): {body}");
@@ -2244,7 +2314,7 @@ pub async fn one_shot_complete(
     });
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_default();
     let resp = client
@@ -2260,7 +2330,7 @@ pub async fn one_shot_complete(
         .json(&body)
         .send()
         .await
-        .context("one_shot_complete: request failed")?;
+        .map_err(|e| anyhow::anyhow!("one_shot_complete: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();

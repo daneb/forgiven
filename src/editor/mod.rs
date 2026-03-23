@@ -70,6 +70,29 @@ struct MarkdownCache {
     lines: Vec<ratatui::text::Line<'static>>,
 }
 
+// ── LSP location list ─────────────────────────────────────────────────────────
+
+/// A single navigable entry produced by goto-definition, find-references, or
+/// document-symbols requests.
+pub struct LocationEntry {
+    /// Human-readable label shown in the list.
+    pub label: String,
+    /// Absolute path of the target file.
+    pub file_path: std::path::PathBuf,
+    /// 0-based target line.
+    pub line: u32,
+    /// 0-based target column.
+    pub col: u32,
+}
+
+/// State for Mode::LocationList — a lightweight overlay listing LSP locations.
+pub struct LocationListState {
+    /// Title shown in the popup border.
+    pub title: String,
+    pub entries: Vec<LocationEntry>,
+    pub selected: usize,
+}
+
 // ── Mode-specific sub-states ──────────────────────────────────────────────────
 // Each struct owns all fields that are active only during a single Mode variant.
 // Grouping them prevents the top-level Editor struct from growing unboundedly as
@@ -269,6 +292,16 @@ pub struct Editor {
     /// Polled each tick; cleared and wired into `agent_panel` on first `Ok`.
     mcp_rx: Option<oneshot::Receiver<McpManager>>,
 
+    // ── LSP navigation ────────────────────────────────────────────────────────
+    /// In-flight goto-definition request; polled non-blocking each frame.
+    pending_goto_definition: Option<oneshot::Receiver<serde_json::Value>>,
+    /// In-flight find-references request; polled non-blocking each frame.
+    pending_references: Option<oneshot::Receiver<serde_json::Value>>,
+    /// In-flight document-symbols request; polled non-blocking each frame.
+    pending_symbols: Option<oneshot::Receiver<serde_json::Value>>,
+    /// State for the location list overlay (Mode::LocationList).
+    pub location_list: Option<LocationListState>,
+
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Watches paths of all open buffers; detects external changes.
     file_watcher: Option<RecommendedWatcher>,
@@ -360,6 +393,10 @@ impl Editor {
             },
             mcp_manager: None,
             mcp_rx: None,
+            pending_goto_definition: None,
+            pending_references: None,
+            pending_symbols: None,
+            location_list: None,
             file_watcher: None,
             watcher_rx: None,
             self_saved: std::collections::HashMap::new(),
@@ -907,6 +944,38 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── LSP goto-definition / references / symbols polls ──────────────
+            macro_rules! poll_lsp_rx {
+                ($field:expr) => {{
+                    if let Some(rx) = $field.as_mut() {
+                        match rx.try_recv() {
+                            Ok(v) => {
+                                $field = None;
+                                needs_render = true;
+                                Some(v)
+                            },
+                            Err(oneshot::error::TryRecvError::Empty) => None,
+                            Err(_) => {
+                                $field = None;
+                                Some(serde_json::Value::Null)
+                            },
+                        }
+                    } else {
+                        None
+                    }
+                }};
+            }
+            if let Some(v) = poll_lsp_rx!(self.pending_goto_definition) {
+                self.handle_goto_definition_response(v);
+            }
+            if let Some(v) = poll_lsp_rx!(self.pending_references) {
+                self.handle_references_response(v);
+            }
+            if let Some(v) = poll_lsp_rx!(self.pending_symbols) {
+                self.handle_symbols_response(v);
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // ── Commit-message AI response poll ───────────────────────────────
             let commit_done = if let Some(rx) = self.commit_msg.rx.as_mut() {
                 match rx.try_recv() {
@@ -1445,6 +1514,11 @@ impl Editor {
                 binary_file_path: self.binary_file_path.as_deref(),
                 startup_elapsed: self.startup_elapsed,
                 file_info: file_info_data.as_ref(),
+                location_list: if mode == Mode::LocationList {
+                    self.location_list.as_ref()
+                } else {
+                    None
+                },
             };
             UI::render(frame, &ctx);
         })?;
@@ -1562,6 +1636,7 @@ impl Editor {
                 self.mode = Mode::Normal;
             },
             Mode::BinaryFile => self.handle_binary_file_mode(key)?,
+            Mode::LocationList => self.handle_location_list_mode(key)?,
         }
 
         Ok(())
@@ -1933,8 +2008,7 @@ impl Editor {
                 // TODO: Implement rename workflow
             },
             Action::LspDocumentSymbols => {
-                self.set_status("Document symbols not yet implemented".to_string());
-                // TODO: Implement symbol picker
+                self.request_document_symbols();
             },
             Action::LspNextDiagnostic => {
                 self.goto_next_diagnostic();
@@ -4172,28 +4246,265 @@ impl Editor {
 
     /// Request go-to-definition at cursor position
     fn request_goto_definition(&mut self) {
-        let (_uri, _position) = match self.get_current_lsp_position() {
+        let (uri, position) = match self.get_current_lsp_position() {
             Some(pos) => pos,
             None => {
                 self.set_status("No file open or LSP not available".to_string());
                 return;
             },
         };
-
-        self.set_status("Go-to-definition requested (not yet fully implemented)".to_string());
+        let language = self
+            .current_buffer()
+            .and_then(|b| b.file_path.as_deref())
+            .map(LspManager::language_from_path)
+            .unwrap_or_default();
+        if let Some(client) = self.lsp_manager.get_client(&language) {
+            match client.goto_definition(uri, position) {
+                Ok(rx) => {
+                    self.pending_goto_definition = Some(rx);
+                    self.set_status("Finding definition…".to_string());
+                },
+                Err(e) => self.set_status(format!("LSP error: {e}")),
+            }
+        } else {
+            self.set_status(format!("No LSP client for '{language}'"));
+        }
     }
 
     /// Request find references at cursor position
     fn request_references(&mut self) {
-        let (_uri, _position) = match self.get_current_lsp_position() {
+        let (uri, position) = match self.get_current_lsp_position() {
             Some(pos) => pos,
             None => {
                 self.set_status("No file open or LSP not available".to_string());
                 return;
             },
         };
+        let language = self
+            .current_buffer()
+            .and_then(|b| b.file_path.as_deref())
+            .map(LspManager::language_from_path)
+            .unwrap_or_default();
+        if let Some(client) = self.lsp_manager.get_client(&language) {
+            match client.references(uri, position) {
+                Ok(rx) => {
+                    self.pending_references = Some(rx);
+                    self.set_status("Finding references…".to_string());
+                },
+                Err(e) => self.set_status(format!("LSP error: {e}")),
+            }
+        } else {
+            self.set_status(format!("No LSP client for '{language}'"));
+        }
+    }
 
-        self.set_status("Find references requested (not yet fully implemented)".to_string());
+    /// Request document symbols for the current file
+    fn request_document_symbols(&mut self) {
+        let uri = match self.get_current_lsp_position() {
+            Some((uri, _)) => uri,
+            None => {
+                self.set_status("No file open or LSP not available".to_string());
+                return;
+            },
+        };
+        let language = self
+            .current_buffer()
+            .and_then(|b| b.file_path.as_deref())
+            .map(LspManager::language_from_path)
+            .unwrap_or_default();
+        if let Some(client) = self.lsp_manager.get_client(&language) {
+            match client.document_symbols(uri) {
+                Ok(rx) => {
+                    self.pending_symbols = Some(rx);
+                    self.set_status("Loading symbols…".to_string());
+                },
+                Err(e) => self.set_status(format!("LSP error: {e}")),
+            }
+        } else {
+            self.set_status(format!("No LSP client for '{language}'"));
+        }
+    }
+
+    /// Navigate the editor to an absolute file path + 0-based line/col.
+    fn navigate_to_location(&mut self, path: std::path::PathBuf, line: u32, col: u32) {
+        let already_open =
+            self.buffers.iter().position(|b| b.file_path.as_deref() == Some(path.as_path()));
+        if let Some(idx) = already_open {
+            self.current_buffer_idx = idx;
+        } else {
+            let _ = self.open_file(&path);
+        }
+        self.with_buffer(|buf| {
+            buf.cursor.row = line as usize;
+            buf.cursor.col = col as usize;
+            buf.ensure_cursor_visible();
+        });
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.set_status(format!("{}:{}", name, line + 1));
+    }
+
+    /// Handle a goto-definition LSP response value.
+    fn handle_goto_definition_response(&mut self, value: serde_json::Value) {
+        if value.is_null() {
+            self.set_status("No definition found".to_string());
+            return;
+        }
+        // Scalar Location: { "uri": "...", "range": { ... } }
+        if value.get("uri").is_some() {
+            if let Some((path, line, col)) =
+                lsp_parse_location(value.get("uri"), value.get("range"))
+            {
+                self.navigate_to_location(path, line, col);
+            }
+            return;
+        }
+        if let Some(arr) = value.as_array() {
+            if arr.is_empty() {
+                self.set_status("No definition found".to_string());
+                return;
+            }
+            if arr.len() == 1 {
+                let loc = &arr[0];
+                let (uri_key, range_key) = if loc.get("targetUri").is_some() {
+                    ("targetUri", "targetSelectionRange")
+                } else {
+                    ("uri", "range")
+                };
+                if let Some((path, line, col)) =
+                    lsp_parse_location(loc.get(uri_key), loc.get(range_key))
+                {
+                    self.navigate_to_location(path, line, col);
+                }
+            } else {
+                let entries: Vec<LocationEntry> = arr
+                    .iter()
+                    .filter_map(|loc| {
+                        let (uri_key, range_key) = if loc.get("targetUri").is_some() {
+                            ("targetUri", "targetSelectionRange")
+                        } else {
+                            ("uri", "range")
+                        };
+                        let (path, line, col) =
+                            lsp_parse_location(loc.get(uri_key), loc.get(range_key))?;
+                        let label = format!(
+                            "{}:{}",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            line + 1
+                        );
+                        Some(LocationEntry { label, file_path: path, line, col })
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    self.set_status("No definition found".to_string());
+                } else {
+                    self.location_list = Some(LocationListState {
+                        title: "Definitions".to_string(),
+                        entries,
+                        selected: 0,
+                    });
+                    self.mode = Mode::LocationList;
+                }
+            }
+            return;
+        }
+        self.set_status("No definition found".to_string());
+    }
+
+    /// Handle a find-references LSP response value.
+    fn handle_references_response(&mut self, value: serde_json::Value) {
+        let arr = match value.as_array() {
+            Some(a) if !a.is_empty() => a,
+            _ => {
+                self.set_status("No references found".to_string());
+                return;
+            },
+        };
+        let entries: Vec<LocationEntry> = arr
+            .iter()
+            .filter_map(|loc| {
+                let (path, line, col) = lsp_parse_location(loc.get("uri"), loc.get("range"))?;
+                let label = format!(
+                    "{}:{}",
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    line + 1
+                );
+                Some(LocationEntry { label, file_path: path, line, col })
+            })
+            .collect();
+        if entries.is_empty() {
+            self.set_status("No references found".to_string());
+            return;
+        }
+        let count = entries.len();
+        self.location_list = Some(LocationListState {
+            title: format!("References ({count})"),
+            entries,
+            selected: 0,
+        });
+        self.mode = Mode::LocationList;
+    }
+
+    /// Handle a document-symbols LSP response value.
+    fn handle_symbols_response(&mut self, value: serde_json::Value) {
+        let arr = match value.as_array() {
+            Some(a) if !a.is_empty() => a,
+            _ => {
+                self.set_status("No symbols found".to_string());
+                return;
+            },
+        };
+        let current_path =
+            self.current_buffer().and_then(|b| b.file_path.clone()).unwrap_or_default();
+        let entries: Vec<LocationEntry> =
+            arr.iter().flat_map(|sym| lsp_flatten_symbol(sym, &current_path)).collect();
+        if entries.is_empty() {
+            self.set_status("No symbols found".to_string());
+            return;
+        }
+        let count = entries.len();
+        self.location_list =
+            Some(LocationListState { title: format!("Symbols ({count})"), entries, selected: 0 });
+        self.mode = Mode::LocationList;
+    }
+
+    /// Handle key events while Mode::LocationList is active.
+    fn handle_location_list_mode(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                self.location_list = None;
+            },
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(list) = &mut self.location_list {
+                    if list.selected + 1 < list.entries.len() {
+                        list.selected += 1;
+                    }
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(list) = &mut self.location_list {
+                    if list.selected > 0 {
+                        list.selected -= 1;
+                    }
+                }
+            },
+            KeyCode::Enter => {
+                if let Some(list) = &self.location_list {
+                    if let Some(entry) = list.entries.get(list.selected) {
+                        let path = entry.file_path.clone();
+                        let line = entry.line;
+                        let col = entry.col;
+                        self.mode = Mode::Normal;
+                        self.location_list = None;
+                        self.navigate_to_location(path, line, col);
+                    }
+                }
+            },
+            _ => {},
+        }
+        Ok(())
     }
 
     /// Go to next diagnostic in current buffer
@@ -4450,7 +4761,9 @@ impl Editor {
             return;
         }
 
-        let model_id = self.agent_panel.selected_model_id().to_string();
+        let model_id = self.agent_panel
+            .selected_model_id_with_fallback(&self.config.default_copilot_model)
+            .to_string();
 
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -4555,7 +4868,9 @@ impl Editor {
             return;
         }
 
-        let model_id = self.agent_panel.selected_model_id().to_string();
+        let model_id = self.agent_panel
+            .selected_model_id_with_fallback(&self.config.default_copilot_model)
+            .to_string();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let system = "You are a technical writer creating release notes for a software project. \
@@ -5017,5 +5332,125 @@ fn lcs_diff(old: &[String], new: &[String]) -> Vec<DiffLine> {
 impl Drop for Editor {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+// =============================================================================
+// LSP location-list helpers (free functions)
+// =============================================================================
+
+/// Parse a `(uri, range)` JSON pair into `(PathBuf, line, col)`.
+/// Handles both `Location` (`uri`/`range`) and `LocationLink` (`targetUri`/…) shapes.
+fn lsp_parse_location(
+    uri_val: Option<&serde_json::Value>,
+    range_val: Option<&serde_json::Value>,
+) -> Option<(std::path::PathBuf, u32, u32)> {
+    let uri_str = uri_val?.as_str()?;
+    let path = lsp_uri_to_path(uri_str)?;
+    let start = range_val?.get("start")?;
+    let line = start.get("line")?.as_u64()? as u32;
+    let col = start.get("character")?.as_u64()? as u32;
+    Some((path, line, col))
+}
+
+/// Convert a `file://` URI to a `PathBuf`.
+fn lsp_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    // Strip "file://" (two slashes) then percent-decode basic sequences.
+    let raw = uri.strip_prefix("file://")?;
+    // Percent-decode space and hash (the most common cases in file paths).
+    let decoded = raw.replace("%20", " ").replace("%23", "#");
+    Some(std::path::PathBuf::from(decoded))
+}
+
+/// Recursively flatten a DocumentSymbol (or SymbolInformation) JSON value into
+/// `LocationEntry` items.  Handles both the hierarchical (`DocumentSymbol`) and
+/// flat (`SymbolInformation`) response shapes.
+fn lsp_flatten_symbol(
+    sym: &serde_json::Value,
+    current_path: &std::path::Path,
+) -> Vec<LocationEntry> {
+    lsp_flatten_symbol_inner(sym, current_path, 0)
+}
+
+fn lsp_flatten_symbol_inner(
+    sym: &serde_json::Value,
+    current_path: &std::path::Path,
+    depth: u8,
+) -> Vec<LocationEntry> {
+    if depth > 32 {
+        return Vec::new();
+    }
+    let name = match sym.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return Vec::new(),
+    };
+    let kind = lsp_symbol_kind_name(sym.get("kind").and_then(|v| v.as_u64()).unwrap_or(0));
+
+    let mut results = Vec::new();
+
+    // DocumentSymbol shape: has "selectionRange" directly.
+    if let Some(sel) = sym.get("selectionRange") {
+        if let Some(start) = sel.get("start") {
+            let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let col = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            results.push(LocationEntry {
+                label: format!("{kind}  {name}  :{}", line + 1),
+                file_path: current_path.to_path_buf(),
+                line,
+                col,
+            });
+        }
+        // Recurse into children.
+        if let Some(children) = sym.get("children").and_then(|v| v.as_array()) {
+            for child in children {
+                results.extend(lsp_flatten_symbol_inner(child, current_path, depth + 1));
+            }
+        }
+        return results;
+    }
+
+    // SymbolInformation shape: has "location".
+    if let Some(loc) = sym.get("location") {
+        if let Some((path, line, col)) = lsp_parse_location(loc.get("uri"), loc.get("range")) {
+            results.push(LocationEntry {
+                label: format!("{kind}  {name}  :{}", line + 1),
+                file_path: path,
+                line,
+                col,
+            });
+        }
+    }
+    results
+}
+
+/// Map an LSP `SymbolKind` integer to a short display string.
+fn lsp_symbol_kind_name(kind: u64) -> &'static str {
+    match kind {
+        1 => "file",
+        2 => "mod",
+        3 => "ns",
+        4 => "pkg",
+        5 => "cls",
+        6 => "meth",
+        7 => "prop",
+        8 => "field",
+        9 => "ctor",
+        10 => "enum",
+        11 => "iface",
+        12 => "fn",
+        13 => "var",
+        14 => "const",
+        15 => "str",
+        16 => "num",
+        17 => "bool",
+        18 => "arr",
+        19 => "obj",
+        20 => "key",
+        21 => "null",
+        22 => "mem",
+        23 => "event",
+        24 => "op",
+        25 => "type",
+        _ => "sym",
     }
 }

@@ -85,6 +85,8 @@ that motivated it, what was decided, and the consequences.
 | [0075](0075-slash-menu-description-hints.md) | Slash-Menu Description Hints | Accepted |
 | [0076](0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) | Accepted |
 | [0077](0077-agent-context-window-management.md) | Agent Context Window Management (`SPC a n`, token-aware truncation) | Accepted |
+| [0085](0085-lsp-navigation-and-csharp-revival.md) | LSP Navigation (Goto Definition, Find References, Symbols) and C# Revival | Accepted |
+| [0086](0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling | Accepted |
 
 ## What is an ADR?
 

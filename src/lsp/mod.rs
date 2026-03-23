@@ -439,12 +439,15 @@ impl LspClient {
                             let _ = tx.send(result);
                         } else if let Some(err) = resp.error {
                             error!("LSP error for pending request {:?}: {:?}", resp.id, err);
+                            let _ = tx.send(serde_json::Value::Null);
                         }
                     }
                 },
                 Message::Notification(notif) => self.handle_notification(notif),
                 Message::Request(req) => {
-                    warn!("Received unexpected request from LSP server: {}", req.method);
+                    debug!("Server-initiated request during init: {}", req.method);
+                    let response = Response::new_ok(req.id, serde_json::Value::Null);
+                    let _ = self.writer_tx.send(Message::Response(response));
                 },
             }
         }
@@ -468,12 +471,20 @@ impl LspClient {
                             let _ = tx.send(result);
                         } else if let Some(err) = resp.error {
                             error!("LSP error response: {:?}", err);
+                            // Send Null so the receiver resolves immediately rather
+                            // than hanging until tx is dropped.
+                            let _ = tx.send(serde_json::Value::Null);
                         }
                     }
                 },
                 Ok(Message::Notification(notif)) => self.handle_notification(notif),
                 Ok(Message::Request(req)) => {
-                    warn!("Unexpected request from LSP server: {}", req.method);
+                    // Server-initiated requests (e.g. window/workDoneProgress/create,
+                    // workspace/configuration) require a response or the server stalls.
+                    // Send a null success response for all of them.
+                    debug!("Server-initiated request: {}", req.method);
+                    let response = Response::new_ok(req.id, serde_json::Value::Null);
+                    let _ = self.writer_tx.send(Message::Response(response));
                 },
                 Err(_) => break, // channel empty
             }
@@ -578,7 +589,6 @@ impl LspClient {
         })
     }
 
-    #[allow(dead_code)]
     pub fn goto_definition(
         &mut self,
         uri: Uri,
@@ -611,7 +621,6 @@ impl LspClient {
         })
     }
 
-    #[allow(dead_code)]
     pub fn references(
         &mut self,
         uri: Uri,
@@ -645,7 +654,6 @@ impl LspClient {
         })
     }
 
-    #[allow(dead_code)]
     pub fn document_symbols(&mut self, uri: Uri) -> Result<oneshot::Receiver<serde_json::Value>> {
         self.send_request::<request::DocumentSymbolRequest>(DocumentSymbolParams {
             text_document: TextDocumentIdentifier { uri },
@@ -893,6 +901,7 @@ impl LspManager {
                 "c" => "c",
                 "cpp" | "cc" | "cxx" => "cpp",
 
+                "cs" => "csharp",
                 "java" => "java",
                 "rb" => "ruby",
                 "sh" => "sh",
@@ -958,14 +967,35 @@ fn server_relevant_for_workspace(
         "ruby" => &["Gemfile"],
         "php" => &["composer.json"],
         // C# uses *.csproj — handled separately below.
+        // C#: accept .sln or .csproj at the workspace root, or .csproj one
+        // level deep (solution-style repos where projects live in src/).
         "csharp" => {
+            let has_cs_indicator = |dir: &std::path::Path| {
+                dir.read_dir()
+                    .ok()
+                    .map(|entries| {
+                        entries.filter_map(|e| e.ok()).any(|e| {
+                            matches!(
+                                e.path().extension().and_then(|x| x.to_str()),
+                                Some("csproj" | "sln")
+                            )
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+            // Check root first.
+            if has_cs_indicator(workspace_root) {
+                return true;
+            }
+            // Then check immediate subdirectories (src/, etc.).
             return workspace_root
                 .read_dir()
                 .ok()
                 .map(|entries| {
                     entries
                         .filter_map(|e| e.ok())
-                        .any(|e| e.path().extension().map(|ext| ext == "csproj").unwrap_or(false))
+                        .filter(|e| e.path().is_dir())
+                        .any(|e| has_cs_indicator(&e.path()))
                 })
                 .unwrap_or(false);
         },

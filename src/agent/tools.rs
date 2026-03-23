@@ -659,18 +659,40 @@ fn is_definition_line(line: &str) -> Option<String> {
 /// Extract the symbol name from a definition signature.
 fn name_from_signature(sig: &str) -> &str {
     // Skip keywords to reach the name token: `pub async fn foo` → `foo`
-    let skip = ["pub", "async", "fn", "struct", "enum", "trait", "impl", "type",
-                 "mod", "def", "class", "func", "function", "interface",
-                 "export", "default", "const", "public", "private", "protected",
-                 "static", "abstract", "override"];
+    let skip = [
+        "pub",
+        "async",
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "impl",
+        "type",
+        "mod",
+        "def",
+        "class",
+        "func",
+        "function",
+        "interface",
+        "export",
+        "default",
+        "const",
+        "public",
+        "private",
+        "protected",
+        "static",
+        "abstract",
+        "override",
+    ];
     for token in sig.split_whitespace() {
         if skip.contains(&token) {
             continue;
         }
         // Trim generic params, parens, angle brackets, colons.
-        let clean = token
-            .trim_end_matches(|c: char| matches!(c, '(' | '<' | ':' | '{' | ',' | ';'));
-        if !clean.is_empty() && clean.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
+        let clean = token.trim_end_matches(['(', '<', ':', '{', ',', ';']);
+        if !clean.is_empty()
+            && clean.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        {
             return clean;
         }
     }
@@ -710,8 +732,13 @@ fn find_end_line(lines: &[&str], start: usize) -> usize {
     for (offset, line) in lines[start..].iter().enumerate() {
         for ch in line.chars() {
             match ch {
-                '{' => { brace_depth += 1; found_open = true; },
-                '}' => { brace_depth -= 1; },
+                '{' => {
+                    brace_depth += 1;
+                    found_open = true;
+                },
+                '}' => {
+                    brace_depth -= 1;
+                },
                 _ => {},
             }
         }
@@ -736,13 +763,19 @@ fn symbol_context(path_str: &str, source: &str, symbol: &str) -> String {
     let symbols = extract_symbols(source);
 
     // Find the requested symbol (case-sensitive exact match first, then prefix).
-    let target = symbols.iter().find(|s| s.name == symbol)
+    let target = symbols
+        .iter()
+        .find(|s| s.name == symbol)
         .or_else(|| symbols.iter().find(|s| s.name.starts_with(symbol)));
 
     let target = match target {
         Some(t) => t,
-        None => return format!("{path_str}: symbol {symbol:?} not found.\nAvailable: {}",
-            symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")),
+        None => {
+            return format!(
+                "{path_str}: symbol {symbol:?} not found.\nAvailable: {}",
+                symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        },
     };
 
     const MAX_BODY_LINES: usize = 150;
@@ -772,10 +805,7 @@ fn symbol_context(path_str: &str, source: &str, symbol: &str) -> String {
         out.push_str(&format!("\n... (truncated at {MAX_BODY_LINES} lines)"));
     }
     if !sibling_sigs.is_empty() {
-        out.push_str(&format!(
-            "\n\nReferenced sibling definitions:\n{}",
-            sibling_sigs.join("\n")
-        ));
+        out.push_str(&format!("\n\nReferenced sibling definitions:\n{}", sibling_sigs.join("\n")));
     }
     out
 }
@@ -861,7 +891,11 @@ pub fn unified_diff(path: &str, old: &str, new: &str, max_lines: usize) -> Strin
                     j += 1;
                 }
             }
-            hunks.push((old_start, old_lines[old_start..i].to_vec(), new_lines[new_start..j].to_vec()));
+            hunks.push((
+                old_start,
+                old_lines[old_start..i].to_vec(),
+                new_lines[new_start..j].to_vec(),
+            ));
         }
     }
 
