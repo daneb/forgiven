@@ -117,6 +117,21 @@ pub struct AgentConfig {
     /// | `/path/to/dir`   | custom framework loaded from a directory of `.md`   |
     #[serde(default)]
     pub spec_framework: String,
+    /// Automatically compress eligible tool results using LLMLingua before
+    /// they are appended to the conversation history.
+    ///
+    /// Requires a connected MCP server named `"llmlingua"` that exposes a
+    /// `compress_text` tool (see `mcp_servers/llmlingua_server.py`).
+    ///
+    /// Code-reading tools (`read_file`, `get_file_outline`, `get_symbol_context`)
+    /// are always excluded — compressing source code corrupts identifiers and
+    /// operators.  Only tool results longer than 2 000 characters are compressed;
+    /// shorter results are returned unchanged.
+    ///
+    /// Adds ~100 ms–2 s latency per eligible tool call (CPU BERT inference).
+    /// Recommended for heavy sessions where context pressure is the bottleneck.
+    #[serde(default)]
+    pub auto_compress_tool_results: bool,
 }
 
 /// Top-level editor configuration.

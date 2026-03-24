@@ -237,6 +237,10 @@ pub struct AgentPanel {
     pub last_completion_tokens: u32,
     /// Tokens served from the provider's prompt cache in the last response.
     pub last_cached_tokens: u32,
+    /// Cumulative prompt + completion tokens for the current conversation session.
+    /// Reset by `new_conversation()`. Shown in the SPC d diagnostics overlay.
+    pub total_session_prompt_tokens: u32,
+    pub total_session_completion_tokens: u32,
     /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
     /// Cycle index for the Ctrl+M view-mermaid-diagram command.
@@ -437,6 +441,8 @@ impl AgentPanel {
             last_prompt_tokens: 0,
             last_completion_tokens: 0,
             last_cached_tokens: 0,
+            total_session_prompt_tokens: 0,
+            total_session_completion_tokens: 0,
             code_block_idx: 0,
             mermaid_block_idx: 0,
             pasted_blocks: Vec::new(),
@@ -702,6 +708,8 @@ impl AgentPanel {
         self.messages.clear();
         self.tasks.clear();
         self.streaming_reply = None;
+        self.total_session_prompt_tokens = 0;
+        self.total_session_completion_tokens = 0;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -717,6 +725,7 @@ impl AgentPanel {
         max_rounds: usize,
         warning_threshold: usize,
         preferred_model: &str,
+        auto_compress: bool,
     ) -> Result<()> {
         if self.input.trim().is_empty()
             && self.pasted_blocks.is_empty()
@@ -867,6 +876,27 @@ Available tools:\n\
         let system_tokens = (system.len() / 4) as u32;
         let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
 
+        // ── Context budget audit log ─────────────────────────────────────────
+        // Visible in SPC d → Recent Logs. One line per submission so you can
+        // track how much of the window each component consumes.
+        let ctx_file_tokens = context.as_ref().map(|c| c.len() / 4).unwrap_or(0);
+        info!(
+            "[ctx] window={}t  sys={}t (rules≈{}t + file≈{}t)  history_msgs={}  budget_for_history={}t",
+            context_limit,
+            system_tokens,
+            (system.len() - context.as_ref().map(|c| c.len()).unwrap_or(0)) / 4,
+            ctx_file_tokens,
+            self.messages.iter().filter(|m| !matches!(m.role, Role::System)).count(),
+            budget,
+        );
+        if system_tokens > context_limit / 2 {
+            warn!(
+                "[ctx] System prompt alone ({system_tokens}t) exceeds 50% of context window \
+                 ({context_limit}t) — the open file ({ctx_file_tokens}t) is the likely cause. \
+                 Close the file or switch to a model with a larger context window."
+            );
+        }
+
         // ── Phase 1: always keep the most recent MIN_RECENT non-system messages.
         const MIN_RECENT: usize = 4;
         let non_system: Vec<usize> = self
@@ -1005,6 +1035,7 @@ Available tools:\n\
             question_rx,
             abort_rx,
             mcp,
+            auto_compress,
         ));
         Ok(())
     }
@@ -1101,6 +1132,36 @@ Available tools:\n\
                         self.last_prompt_tokens = prompt_tokens;
                         self.last_completion_tokens = completion_tokens;
                         self.last_cached_tokens = cached_tokens;
+                        self.total_session_prompt_tokens =
+                            self.total_session_prompt_tokens.saturating_add(prompt_tokens);
+                        self.total_session_completion_tokens =
+                            self.total_session_completion_tokens.saturating_add(completion_tokens);
+                        let window = if self.available_models.is_empty() {
+                            128_000u32
+                        } else {
+                            self.available_models
+                                [self.selected_model.min(self.available_models.len() - 1)]
+                            .context_window
+                        }
+                        .max(1);
+                        let pct = prompt_tokens * 100 / window;
+                        let cached_note =
+                            if cached_tokens > 0 { format!("  cached={cached_tokens}t") } else { String::new() };
+                        if pct >= 80 {
+                            warn!(
+                                "[usage] prompt={prompt_tokens}t ({pct}% of {window}t window)  \
+                                 completion={completion_tokens}t{cached_note}  \
+                                 session_total={}t",
+                                self.total_session_prompt_tokens
+                            );
+                        } else {
+                            info!(
+                                "[usage] prompt={prompt_tokens}t ({pct}% of {window}t window)  \
+                                 completion={completion_tokens}t{cached_note}  \
+                                 session_total={}t",
+                                self.total_session_prompt_tokens
+                            );
+                        }
                     },
                     Ok(StreamEvent::ModelSwitched { from, to }) => {
                         active = true;
@@ -1438,6 +1499,84 @@ Available tools:\n\
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LLMLingua transparent compression helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tools whose results must never be compressed — they contain source code
+/// where LLMLingua could silently corrupt identifiers, operators, or
+/// indentation that the model will use verbatim for edits.
+const COMPRESSION_SKIP_TOOLS: &[&str] = &[
+    "read_file",
+    "get_file_outline",
+    "get_symbol_context",
+    "write_file",
+    "edit_file",
+    "list_directory",
+    "create_task",
+    "complete_task",
+    "ask_user",
+];
+
+/// Minimum result length (chars) worth sending to LLMLingua.
+/// Shorter results compress poorly and the round-trip latency is not worth it.
+const COMPRESSION_MIN_CHARS: usize = 2_000;
+
+/// Maximum time to wait for the LLMLingua MCP server to respond.
+const COMPRESSION_TIMEOUT_SECS: u64 = 10;
+
+/// If `auto_compress` is enabled and LLMLingua is connected, compress `result`
+/// before it enters the conversation history.  Falls back to the original text
+/// on timeout, MCP error, or if the tool is code-producing.
+async fn maybe_compress(
+    result: String,
+    tool_name: &str,
+    mcp: &crate::mcp::McpManager,
+) -> String {
+    if result.len() < COMPRESSION_MIN_CHARS || COMPRESSION_SKIP_TOOLS.contains(&tool_name) {
+        return result;
+    }
+
+    let args =
+        serde_json::json!({ "text": result, "rate": 0.5, "keep_first_sentence": true })
+            .to_string();
+
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(COMPRESSION_TIMEOUT_SECS),
+        mcp.call_tool("compress_text", &args),
+    )
+    .await
+    {
+        Ok(compressed)
+            if !compressed.starts_with("error")
+                && !compressed.starts_with("unknown")
+                && !compressed.starts_with("MCP tool error")
+                && !compressed.is_empty() =>
+        {
+            let before_t = result.len() / 4;
+            let after_t = compressed.len() / 4;
+            let reduction = 100u32.saturating_sub(
+                (after_t as u32).saturating_mul(100) / (before_t as u32).max(1),
+            );
+            info!(
+                "[llmlingua] {tool_name}: {before_t}t → {after_t}t  ({reduction}% reduction)"
+            );
+            compressed
+        },
+        Ok(err) => {
+            warn!("[llmlingua] compress_text returned error for {tool_name}: {err}");
+            result
+        },
+        Err(_) => {
+            warn!(
+                "[llmlingua] compress_text timed out after {COMPRESSION_TIMEOUT_SECS}s \
+                 for {tool_name} — using original"
+            );
+            result
+        },
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Agentic loop (runs in a background tokio task)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1454,6 +1593,7 @@ async fn agentic_loop(
     mut question_rx: mpsc::UnboundedReceiver<String>,
     mut abort_rx: oneshot::Receiver<()>,
     mcp_manager: Option<Arc<McpManager>>,
+    auto_compress: bool,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
     let mut tool_defs = tools::tool_definitions();
@@ -1886,6 +2026,23 @@ async fn agentic_loop(
                     }
                 }
             }
+
+            // Optionally compress the result before it enters history.
+            // Only fires when auto_compress is on, LLMLingua is connected,
+            // and the tool is not a code-reading tool.
+            let result = if auto_compress {
+                if let Some(ref mcp) = mcp_manager {
+                    if mcp.is_mcp_tool("compress_text") {
+                        maybe_compress(result, &call.name, mcp).await
+                    } else {
+                        result
+                    }
+                } else {
+                    result
+                }
+            } else {
+                result
+            };
 
             let result_summary = {
                 // Prefer "path (N lines)" summary lines (read_file header) over

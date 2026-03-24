@@ -106,6 +106,9 @@ pub struct DiagnosticsData<'a> {
     pub log_path: &'a str,
     /// Recent log entries (level, message) newest-last.
     pub recent_logs: &'a [(String, String)],
+    /// Agent session token totals: (prompt_total, completion_total, context_window).
+    /// None when no agent session has been active yet.
+    pub agent_session_tokens: Option<(u32, u32, u32)>,
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.
@@ -2597,6 +2600,41 @@ impl UI {
             lines.push(Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
                 Span::styled(name.to_string(), Style::default().fg(Color::White)),
+            ]));
+        }
+
+        // ── Agent session token usage ─────────────────────────────────────────
+        if let Some((prompt_total, completion_total, window)) = data.agent_session_tokens {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                " Agent Session ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )]));
+            let pct = prompt_total * 100 / window.max(1);
+            let gauge_color = if pct >= 80 {
+                Color::Red
+            } else if pct >= 50 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  prompt total  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}t", prompt_total),
+                    Style::default().fg(gauge_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ({pct}% of {window}t window)"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  completion    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}t", completion_total),
+                    Style::default().fg(Color::White),
+                ),
             ]));
         }
 

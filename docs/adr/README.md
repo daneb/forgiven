@@ -87,6 +87,8 @@ that motivated it, what was decided, and the consequences.
 | [0077](0077-agent-context-window-management.md) | Agent Context Window Management (`SPC a n`, token-aware truncation) | Accepted |
 | [0085](0085-lsp-navigation-and-csharp-revival.md) | LSP Navigation (Goto Definition, Find References, Symbols) and C# Revival | Accepted |
 | [0086](0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling | Accepted |
+| [0087](0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation | Accepted |
+| [0088](0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua | Accepted |
 
 ## What is an ADR?
 

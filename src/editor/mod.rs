@@ -1430,6 +1430,16 @@ impl Editor {
                 .unwrap_or(mcp_failed_empty.as_slice());
             let lsp_servers =
                 self.config.lsp.servers.iter().map(|s| s.language.as_str()).collect::<Vec<_>>();
+            let agent_session_tokens =
+                if self.agent_panel.total_session_prompt_tokens > 0 {
+                    Some((
+                        self.agent_panel.total_session_prompt_tokens,
+                        self.agent_panel.total_session_completion_tokens,
+                        self.agent_panel.context_window_size(),
+                    ))
+                } else {
+                    None
+                };
             Some(crate::ui::DiagnosticsData {
                 version: env!("CARGO_PKG_VERSION"),
                 mcp_connected,
@@ -1437,6 +1447,7 @@ impl Editor {
                 lsp_servers,
                 log_path: "/tmp/forgiven.log",
                 recent_logs: recent_logs_owned.as_slice(),
+                agent_session_tokens,
             })
         } else {
             None
@@ -2667,6 +2678,7 @@ impl Editor {
                 let max_rounds = self.config.max_agent_rounds;
                 let warning_threshold = self.config.agent_warning_threshold;
                 let preferred_model = self.config.default_copilot_model.clone();
+                let auto_compress = self.config.agent.auto_compress_tool_results;
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
@@ -2676,6 +2688,7 @@ impl Editor {
                     max_rounds,
                     warning_threshold,
                     &preferred_model,
+                    auto_compress,
                 );
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process

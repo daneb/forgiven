@@ -165,6 +165,16 @@ agent_warning_threshold = 3      # warn N rounds before the limit (default: 3)
 # "/path/dir"  — custom framework: directory of .md template files
 spec_framework = "none"
 
+# Automatically compress eligible tool results via LLMLingua before they
+# enter the conversation history.  Requires the "llmlingua" MCP server to
+# be connected (see mcp_servers/llmlingua_server.py).
+# Code-reading tools (read_file, get_file_outline, get_symbol_context) are
+# always excluded — compressing source code corrupts identifiers and
+# operators that edit_file relies on for exact matching.
+# Only results > 2 000 chars are compressed; adds ~100 ms–1.5 s per call.
+# Recommended for heavy agent sessions where context pressure is the bottleneck.
+auto_compress_tool_results = false
+
 # ── LSP servers ──────────────────────────────────────────────────────────
 # Each [[lsp.servers]] entry registers a language server.
 # forgiven ships built-in defaults for rust-analyzer and copilot-language-server;
@@ -214,7 +224,29 @@ args    = ["-y", "@modelcontextprotocol/server-memory"]
 ```
 
 Use `SPC d` (Diagnostics overlay) to inspect running LSP and MCP servers,
-view connection errors, and check recent log entries.
+view connection errors, check recent log entries, and see cumulative session
+token usage (prompt total, completion total, % of context window consumed).
+
+### Context management
+
+The agent panel title shows a live context gauge (tokens used / model limit).
+For heavy sessions, two additional tools help manage context pressure:
+
+- **`SPC a n`** — start a new conversation (clears history, resets session
+  token counters). Use this at natural task boundaries before beginning
+  unrelated work.
+- **`SPC d`** — the Diagnostics overlay shows a per-session token summary
+  and recent `[ctx]` / `[usage]` / `[llmlingua]` log lines that break down
+  exactly where tokens are going each round.
+
+Common sources of context bloat and their mitigations:
+
+| Source | Mitigation |
+|--------|-----------|
+| Large file open in editor | Open a smaller file or close the buffer before starting an agent session; the open file is injected into every system prompt |
+| Long conversation history | `SPC a n` to start fresh at task boundaries |
+| Verbose tool results (grep, test output) | Enable `auto_compress_tool_results = true` with the LLMLingua MCP sidecar |
+| Small model context window | Switch to a model with a larger window via `Ctrl+T` in the agent panel |
 
 ### Optional runtime dependencies
 
@@ -224,6 +256,7 @@ view connection errors, and check recent log entries.
 | `lazygit` | `brew install lazygit` / distro package | Git UI (`SPC g g`) |
 | `rust-analyzer` | `rustup component add rust-analyzer` | Rust LSP |
 | `mmdc` | `npm install -g @mermaid-js/mermaid-cli` | Mermaid diagram rendering (`SPC m d`) |
+| `llmlingua` | `pip install llmlingua` then configure `mcp_servers/llmlingua_server.py` | Automatic tool-result compression (`auto_compress_tool_results`) |
 
 ---
 
@@ -537,6 +570,10 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0082](docs/adr/0082-symbol-aware-context-tools.md) | Symbol-Aware Context Tools (get_file_outline, get_symbol_context) |
 | [0083](docs/adr/0083-mcp-memory-server.md) | MCP Memory Server for Cross-Session Context |
 | [0084](docs/adr/0084-llmlingua-mcp-sidecar.md) | LLMLingua MCP Sidecar for Tool Result Compression |
+| [0085](docs/adr/0085-lsp-navigation-and-csharp-revival.md) | LSP Navigation (Goto Definition, Find References, Symbols) and C# Revival |
+| [0086](docs/adr/0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling |
+| [0087](docs/adr/0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation |
+| [0088](docs/adr/0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua |
 
 ---
 
