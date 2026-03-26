@@ -163,7 +163,19 @@ fn syntect_to_ratatui(style: syntect::highlighting::Style) -> Style {
 }
 
 fn convert_color(c: SColor) -> Color {
-    // syntect uses a: 0 = opaque in some themes. Treat a == 0 as fully opaque.
+    // Guard 1 — syntect uses a == 0 as the "no explicit color" sentinel.
+    // Rendering it as RGB(0,0,0) makes text invisible on dark backgrounds.
+    if c.a == 0 {
+        return Color::Reset;
+    }
+    // Guard 2 — some themes assign background-level dark colours (e.g. base00
+    // #2b303b, luma ≈ 47) to foreground scopes, making text invisible on a
+    // matching dark terminal background. Treat any colour whose perceived
+    // luminance is below 50 as "inherit terminal default foreground".
+    let luma = (c.r as u32 * 299 + c.g as u32 * 587 + c.b as u32 * 114) / 1000;
+    if luma < 50 {
+        return Color::Reset;
+    }
     Color::Rgb(c.r, c.g, c.b)
 }
 

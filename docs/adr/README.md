@@ -89,6 +89,7 @@ that motivated it, what was decided, and the consequences.
 | [0086](0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling | Accepted |
 | [0087](0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation | Accepted |
 | [0088](0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua | Accepted |
+| [0089](0089-large-file-split-editor-agent-ui.md) | Large File Split: editor, agent, and ui modules | Accepted |
 
 ## What is an ADR?
 

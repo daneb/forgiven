@@ -130,6 +130,8 @@ pub enum Action {
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
+    // Memory
+    MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -245,6 +247,9 @@ impl KeyHandler {
         agent_node
             .children
             .insert('n', KeyNode::leaf("new conversation", Action::AgentNewConversation));
+        agent_node
+            .children
+            .insert('s', KeyNode::leaf("save session to memory", Action::MemorySave));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree
