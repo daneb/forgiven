@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,6 +32,21 @@ use crate::config::McpServerConfig;
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// A record of a single MCP tool call made during the session.
+#[derive(Debug, Clone)]
+pub struct McpCallRecord {
+    /// Name of the tool called.
+    pub tool_name: String,
+    /// Truncated argument summary for display.
+    pub args_summary: String,
+    /// Truncated first-line result for display.
+    pub result_summary: String,
+    /// Round-trip duration.
+    pub duration_ms: u64,
+    /// Whether the result was an error.
+    pub is_error: bool,
+}
 
 /// A single tool advertised by an MCP server.
 pub struct McpTool {
@@ -459,6 +474,8 @@ pub struct McpManager {
     children: Vec<Child>,
     /// Names of servers that failed to start, with the error reason.
     pub failed_servers: Vec<(String, String)>,
+    /// Session activity log — capped at 50 entries, oldest dropped first.
+    call_log: std::sync::Mutex<VecDeque<McpCallRecord>>,
 }
 
 impl Drop for McpManager {
@@ -540,7 +557,13 @@ impl McpManager {
             }
         }
 
-        McpManager { servers, tool_map, children, failed_servers }
+        McpManager {
+            servers,
+            tool_map,
+            children,
+            failed_servers,
+            call_log: std::sync::Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Returns `true` if `name` is a tool provided by one of our MCP servers.
@@ -565,6 +588,11 @@ impl McpManager {
                 })
             })
             .collect()
+    }
+
+    /// Returns a snapshot of recent MCP tool calls (newest-last, up to 50).
+    pub fn recent_calls(&self) -> Vec<McpCallRecord> {
+        self.call_log.lock().map(|g| g.iter().cloned().collect()).unwrap_or_default()
     }
 
     /// Returns (name, tool_count) for every successfully connected server.
@@ -606,21 +634,50 @@ impl McpManager {
         };
 
         let server = &self.servers[server_idx];
+        let args_summary = mcp_summarise(arguments, 60);
+        let started_at = std::time::Instant::now();
+
         let mut handle = server.handle.lock().await;
 
-        match handle
+        let result = match handle
             .request("tools/call", serde_json::json!({ "name": name, "arguments": args_val }))
             .await
         {
-            Ok(result) => extract_tool_result(&result),
+            Ok(r) => extract_tool_result(&r),
             Err(e) => format!("MCP tool error: {e}"),
+        };
+
+        let duration_ms = started_at.elapsed().as_millis() as u64;
+        let is_error = result.starts_with("error") || result.starts_with("MCP tool error");
+        let result_summary = mcp_summarise(result.lines().next().unwrap_or(""), 70);
+
+        if let Ok(mut log) = self.call_log.lock() {
+            if log.len() >= 50 {
+                log.pop_front();
+            }
+            log.push_back(McpCallRecord {
+                tool_name: name.to_string(),
+                args_summary,
+                result_summary,
+                duration_ms,
+                is_error,
+            });
         }
+
+        result
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Truncate a string to at most `max` Unicode scalar values, appending "…" if truncated.
+fn mcp_summarise(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() { format!("{head}…") } else { head }
+}
 
 /// Connect to an MCP server using whichever transport the config specifies.
 /// Returns `(server, Option<child>)` — HTTP servers have no child process.

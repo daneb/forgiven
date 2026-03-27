@@ -1,5 +1,12 @@
 use super::*;
 
+/// Truncate `s` to `max` chars, appending `…` if cut.
+fn trunc(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() { format!("{head}…") } else { head }
+}
+
 impl UI {
     /// Render the centred delete confirmation popup (Mode::DeleteFile).
     pub(super) fn render_delete_popup(frame: &mut Frame, name: &str, area: Rect) {
@@ -372,6 +379,51 @@ impl UI {
             ]));
         }
 
+        // ── MCP Activity ──────────────────────────────────────────────────────
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            " MCP Activity ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+
+        if data.mcp_call_log.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "  no tool calls this session",
+                Style::default().fg(Color::DarkGray),
+            )]));
+        } else {
+            // Show last 5 calls, one line each.
+            let start = data.mcp_call_log.len().saturating_sub(5);
+            for record in &data.mcp_call_log[start..] {
+                let (icon, icon_color) =
+                    if record.is_error { ("  ✗ ", Color::Red) } else { ("  ✓ ", Color::Green) };
+                let dur = if record.duration_ms < 1000 {
+                    format!("{}ms", record.duration_ms)
+                } else {
+                    format!("{:.1}s", record.duration_ms as f64 / 1000.0)
+                };
+                let result_color = if record.is_error { Color::Red } else { Color::DarkGray };
+                // Truncate args + result to keep the line short.
+                let args = trunc(&record.args_summary, 22);
+                let result = trunc(&record.result_summary, 22);
+                lines.push(Line::from(vec![
+                    Span::styled(icon, Style::default().fg(icon_color)),
+                    Span::styled(
+                        record.tool_name.clone(),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {args} → {result}"),
+                        Style::default().fg(result_color).add_modifier(Modifier::DIM),
+                    ),
+                    Span::styled(
+                        format!("  {dur}"),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            }
+        }
+
         // ── Recent logs ───────────────────────────────────────────────────────
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -389,7 +441,7 @@ impl UI {
             )]));
         }
 
-        for (level, msg) in data.recent_logs {
+        for (level, msg) in data.recent_logs.iter().rev().take(5).rev() {
             let (prefix, color) = match level.as_str() {
                 "ERROR" => ("  ERROR ", Color::Red),
                 "WARN" => ("  WARN  ", Color::Yellow),
@@ -397,7 +449,7 @@ impl UI {
             };
             lines.push(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                Span::styled(trunc(msg, 46), Style::default().fg(Color::White)),
             ]));
         }
 

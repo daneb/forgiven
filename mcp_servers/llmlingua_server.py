@@ -49,7 +49,7 @@ def _get_compressor():
         )
     model_name = os.environ.get(
         "LLMLINGUA_MODEL",
-        "llmlingua-2-bert-base-multilingual-cased-meetingbank",
+        "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
     )
     _compressor = PromptCompressor(
         model_name=model_name,

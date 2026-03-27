@@ -90,6 +90,8 @@ that motivated it, what was decided, and the consequences.
 | [0087](0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation | Accepted |
 | [0088](0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua | Accepted |
 | [0089](0089-large-file-split-editor-agent-ui.md) | Large File Split: editor, agent, and ui modules | Accepted |
+| [0090](0090-visual-indent-markdown-tables-mcp-call-log.md) | Visual indent/dedent, Markdown table rendering, MCP call log | Accepted |
+| [0091](0091-lsp-hover-and-rename.md) | LSP Hover popup and Rename (WorkspaceEdit) | Accepted |
 
 ## What is an ADR?
 

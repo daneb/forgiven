@@ -768,7 +768,10 @@ impl LspClient {
         // the whole group without needing libc or unsafe code.
         #[cfg(unix)]
         if let Some(pid) = self.child_pid.take() {
-            let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).status();
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &format!("-{pid}")])
+                .stderr(std::process::Stdio::null())
+                .status();
         }
     }
 }

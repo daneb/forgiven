@@ -26,6 +26,8 @@ pub enum Mode {
     Diagnostics,     // Read-only diagnostics overlay (SPC d)
     BinaryFile,      // Unsupported binary file popup: o=open default app, Esc=dismiss
     LocationList,    // LSP location list overlay (goto-definition / references / symbols)
+    LspHover,        // Read-only hover info popup (K / SPC l h)
+    LspRename,       // LSP rename input popup (SPC l r)
 }
 
 /// An editor action to be executed

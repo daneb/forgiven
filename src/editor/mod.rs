@@ -103,6 +103,14 @@ pub struct LocationListState {
     pub selected: usize,
 }
 
+/// State for Mode::LspHover — a scrollable popup showing hover documentation.
+pub struct HoverPopupState {
+    /// Hover text (plain text or Markdown).
+    pub content: String,
+    /// Vertical scroll offset in lines.
+    pub scroll: u16,
+}
+
 // ── Mode-specific sub-states ──────────────────────────────────────────────────
 // Each struct owns all fields that are active only during a single Mode variant.
 // Grouping them prevents the top-level Editor struct from growing unboundedly as
@@ -311,6 +319,16 @@ pub struct Editor {
     pending_symbols: Option<oneshot::Receiver<serde_json::Value>>,
     /// State for the location list overlay (Mode::LocationList).
     pub location_list: Option<LocationListState>,
+    /// In-flight hover request; polled non-blocking each frame.
+    pending_hover: Option<oneshot::Receiver<serde_json::Value>>,
+    /// Hover popup state (Mode::LspHover).
+    pub hover_popup: Option<HoverPopupState>,
+    /// Text typed into the LSP rename input popup (Mode::LspRename).
+    pub lsp_rename_buffer: String,
+    /// URI + position of the symbol being renamed; set when entering Mode::LspRename.
+    lsp_rename_origin: Option<(lsp_types::Uri, lsp_types::Position)>,
+    /// In-flight rename request; polled non-blocking each frame.
+    pending_rename: Option<oneshot::Receiver<serde_json::Value>>,
 
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Watches paths of all open buffers; detects external changes.
@@ -407,6 +425,11 @@ impl Editor {
             pending_references: None,
             pending_symbols: None,
             location_list: None,
+            pending_hover: None,
+            hover_popup: None,
+            lsp_rename_buffer: String::new(),
+            lsp_rename_origin: None,
+            pending_rename: None,
             file_watcher: None,
             watcher_rx: None,
             self_saved: std::collections::HashMap::new(),
@@ -984,6 +1007,12 @@ impl Editor {
             if let Some(v) = poll_lsp_rx!(self.pending_symbols) {
                 self.handle_symbols_response(v);
             }
+            if let Some(v) = poll_lsp_rx!(self.pending_hover) {
+                self.handle_hover_response(v);
+            }
+            if let Some(v) = poll_lsp_rx!(self.pending_rename) {
+                self.handle_rename_response(v);
+            }
             // ──────────────────────────────────────────────────────────────────
 
             // ── Commit-message AI response poll ───────────────────────────────
@@ -1457,6 +1486,11 @@ impl Editor {
                 log_path: "/tmp/forgiven.log",
                 recent_logs: recent_logs_owned.as_slice(),
                 agent_session_tokens,
+                mcp_call_log: self
+                    .mcp_manager
+                    .as_ref()
+                    .map(|m| m.recent_calls())
+                    .unwrap_or_default(),
             })
         } else {
             None
@@ -1541,6 +1575,16 @@ impl Editor {
                 },
                 in_file_search_query: if mode == Mode::InFileSearch {
                     Some(self.in_file_search_buffer.as_str())
+                } else {
+                    None
+                },
+                hover_popup: if mode == Mode::LspHover {
+                    self.hover_popup.as_ref()
+                } else {
+                    None
+                },
+                lsp_rename_buffer: if mode == Mode::LspRename {
+                    Some(self.lsp_rename_buffer.as_str())
                 } else {
                     None
                 },

@@ -362,8 +362,7 @@ impl Editor {
                 self.request_references();
             },
             Action::LspRename => {
-                self.set_status("Rename not yet implemented".to_string());
-                // TODO: Implement rename workflow
+                self.start_lsp_rename();
             },
             Action::LspDocumentSymbols => {
                 self.request_document_symbols();

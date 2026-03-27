@@ -1,3 +1,5 @@
+use crate::editor::HoverPopupState;
+
 use super::*;
 
 impl UI {
@@ -206,6 +208,92 @@ impl UI {
             .border_style(Style::default().fg(Color::LightCyan));
 
         let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, popup_area);
+    }
+
+    /// Render the hover info popup (Mode::LspHover).
+    pub(super) fn render_hover_popup(frame: &mut Frame, state: &HoverPopupState, area: Rect) {
+        let popup_width = 80.min(area.width);
+        let popup_height = (area.height * 3 / 5).max(6).min(area.height);
+        let h_pad = area.width.saturating_sub(popup_width) / 2;
+        let v_pad = area.height.saturating_sub(popup_height) / 2;
+
+        let horiz = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(h_pad),
+                Constraint::Length(popup_width),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(v_pad),
+                Constraint::Length(popup_height),
+                Constraint::Min(0),
+            ])
+            .split(horiz[1]);
+        let popup_area = vert[1];
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .title(Span::styled(
+                " Hover ",
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(Span::styled(
+                "  j/k  scroll   Esc  close",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightYellow));
+
+        let para = Paragraph::new(state.content.as_str())
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((state.scroll, 0));
+        frame.render_widget(para, popup_area);
+    }
+
+    /// Render the LSP rename input popup (Mode::LspRename).
+    pub(super) fn render_lsp_rename_popup(frame: &mut Frame, buffer: &str, area: Rect) {
+        let popup_width = 50.min(area.width);
+        let popup_height = 3u16;
+        let h_pad = area.width.saturating_sub(popup_width) / 2;
+        let v_pad = area.height.saturating_sub(popup_height) / 2;
+
+        let horiz = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(h_pad),
+                Constraint::Length(popup_width),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(v_pad),
+                Constraint::Length(popup_height),
+                Constraint::Min(0),
+            ])
+            .split(horiz[1]);
+        let popup_area = vert[1];
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .title(Span::styled(
+                " Rename symbol ",
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightGreen));
+
+        let display = format!("{buffer}█");
+        let para = Paragraph::new(display.as_str()).block(block);
         frame.render_widget(para, popup_area);
     }
 }

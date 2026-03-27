@@ -947,6 +947,48 @@ impl Buffer {
         Some(yanked)
     }
 
+    /// Indent all lines touched by the current selection by one level.
+    /// Works for both Visual (charwise) and Visual Line selections.
+    pub fn indent_selected_lines(&mut self, use_spaces: bool, tab_width: usize) {
+        let sel = match self.selection.as_ref() {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let (start, end) = sel.normalized();
+        let end_row = end.row.min(self.lines.len().saturating_sub(1));
+        let indent = if use_spaces {
+            " ".repeat(tab_width)
+        } else {
+            "\t".to_string()
+        };
+        for row in start.row..=end_row {
+            self.lines[row].insert_str(0, &indent);
+        }
+        self.mark_modified();
+    }
+
+    /// Dedent all lines touched by the current selection by one level.
+    pub fn dedent_selected_lines(&mut self, tab_width: usize) {
+        let sel = match self.selection.as_ref() {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let (start, end) = sel.normalized();
+        let end_row = end.row.min(self.lines.len().saturating_sub(1));
+        for row in start.row..=end_row {
+            let line = &self.lines[row];
+            let remove = if line.starts_with('\t') {
+                1
+            } else {
+                line.chars().take(tab_width).take_while(|c| *c == ' ').count()
+            };
+            if remove > 0 {
+                self.lines[row].drain(..remove);
+            }
+        }
+        self.mark_modified();
+    }
+
     /// Jump to an absolute line number (1-based, as typed by the user).
     /// Used by `5G` / `5gg` count-prefix navigation.
     pub fn goto_line(&mut self, one_based: usize) {

@@ -1,0 +1,4 @@
+FROM python:3.11-slim
+  RUN pip install --no-cache-dir llmlingua
+  COPY llmlingua_server.py /app/llmlingua_server.py
+  ENTRYPOINT ["python3", "/app/llmlingua_server.py"]

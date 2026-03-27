@@ -86,6 +86,7 @@ impl Editor {
                     | Mode::ApplyDiff
                     | Mode::CommitMsg
                     | Mode::Diagnostics
+                    | Mode::LspRename
             )
         {
             self.cycle_panel_focus();
@@ -117,6 +118,8 @@ impl Editor {
             },
             Mode::BinaryFile => self.handle_binary_file_mode(key)?,
             Mode::LocationList => self.handle_location_list_mode(key)?,
+            Mode::LspHover => self.handle_lsp_hover_mode(key)?,
+            Mode::LspRename => self.handle_lsp_rename_mode(key)?,
         }
 
         Ok(())
@@ -219,6 +222,26 @@ impl Editor {
                     buf.update_selection();
                 });
             },
+
+            // ── Indent / dedent selection ─────────────────────────────────────
+            KeyCode::Tab => {
+                let use_spaces = self.config.use_spaces;
+                let tab_width = self.config.tab_width;
+                self.with_buffer(|buf| {
+                    buf.save_undo_snapshot();
+                    buf.indent_selected_lines(use_spaces, tab_width);
+                });
+                self.notify_lsp_change();
+            },
+            KeyCode::BackTab => {
+                let tab_width = self.config.tab_width;
+                self.with_buffer(|buf| {
+                    buf.save_undo_snapshot();
+                    buf.dedent_selected_lines(tab_width);
+                });
+                self.notify_lsp_change();
+            },
+
             _ => {},
         }
         Ok(())
@@ -304,6 +327,25 @@ impl Editor {
                     buf.goto_first_line();
                     buf.update_selection_line();
                 });
+            },
+
+            // ── Indent / dedent selection ─────────────────────────────────────
+            KeyCode::Tab => {
+                let use_spaces = self.config.use_spaces;
+                let tab_width = self.config.tab_width;
+                self.with_buffer(|buf| {
+                    buf.save_undo_snapshot();
+                    buf.indent_selected_lines(use_spaces, tab_width);
+                });
+                self.notify_lsp_change();
+            },
+            KeyCode::BackTab => {
+                let tab_width = self.config.tab_width;
+                self.with_buffer(|buf| {
+                    buf.save_undo_snapshot();
+                    buf.dedent_selected_lines(tab_width);
+                });
+                self.notify_lsp_change();
             },
 
             _ => {},

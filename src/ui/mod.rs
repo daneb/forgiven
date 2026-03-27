@@ -13,7 +13,7 @@ use crate::agent::{
     SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
-use crate::editor::{DiffLine, LocationListState};
+use crate::editor::{DiffLine, HoverPopupState, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
@@ -117,6 +117,8 @@ pub struct DiagnosticsData<'a> {
     /// Agent session token totals: (prompt_total, completion_total, context_window).
     /// None when no agent session has been active yet.
     pub agent_session_tokens: Option<(u32, u32, u32)>,
+    /// Recent MCP tool calls this session (newest-last).
+    pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.
@@ -201,6 +203,10 @@ pub struct RenderContext<'a> {
     pub location_list: Option<&'a LocationListState>,
     /// In-file search query string (Mode::InFileSearch only).
     pub in_file_search_query: Option<&'a str>,
+    /// Hover popup (Mode::LspHover only).
+    pub hover_popup: Option<&'a HoverPopupState>,
+    /// Text in the LSP rename input (Mode::LspRename only).
+    pub lsp_rename_buffer: Option<&'a str>,
 }
 
 /// UI rendering for the editor
@@ -239,7 +245,9 @@ impl UI {
         let startup_elapsed = ctx.startup_elapsed;
         let file_info = ctx.file_info;
         let location_list = ctx.location_list;
-        let _in_file_search_query = ctx.in_file_search_query;
+        let in_file_search_query = ctx.in_file_search_query;
+        let hover_popup = ctx.hover_popup;
+        let lsp_rename_buffer = ctx.lsp_rename_buffer;
 
         let size = frame.area();
 
@@ -418,6 +426,7 @@ impl UI {
             mode,
             status_message,
             command_buffer,
+            in_file_search_query,
             key_sequence,
             status_area,
             diagnostics,
@@ -475,6 +484,16 @@ impl UI {
         // Render LSP location list overlay if active
         if let Some(list) = location_list {
             Self::render_location_list(frame, list, size);
+        }
+
+        // Render hover popup (Mode::LspHover)
+        if let Some(popup) = hover_popup {
+            Self::render_hover_popup(frame, popup, size);
+        }
+
+        // Render LSP rename input popup (Mode::LspRename)
+        if let Some(buf) = lsp_rename_buffer {
+            Self::render_lsp_rename_popup(frame, buf, size);
         }
 
         // Render file-info popup if active (explorer `i` key)

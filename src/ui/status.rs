@@ -9,6 +9,7 @@ impl UI {
         mode: Mode,
         status_message: Option<&str>,
         command_buffer: Option<&str>,
+        in_file_search_query: Option<&str>,
         key_sequence: &str,
         area: Rect,
         diagnostics: &[Diagnostic],
@@ -35,6 +36,8 @@ impl UI {
             Mode::Diagnostics => "DIAG",
             Mode::BinaryFile => "BINARY",
             Mode::LocationList => "LSP",
+            Mode::LspHover => "HOVER",
+            Mode::LspRename => "RENAME",
         };
 
         let mode_color = match mode {
@@ -59,6 +62,8 @@ impl UI {
             Mode::Diagnostics => Color::LightCyan,
             Mode::BinaryFile => Color::Yellow,
             Mode::LocationList => Color::LightCyan,
+            Mode::LspHover => Color::LightYellow,
+            Mode::LspRename => Color::LightGreen,
         };
 
         let mut spans = vec![
@@ -118,9 +123,11 @@ impl UI {
             }
         }
 
-        // Status message or command buffer
+        // Status message or command buffer or in-file search query
         if let Some(cmd) = command_buffer {
             spans = vec![Span::raw(format!(":{}", cmd))];
+        } else if let Some(query) = in_file_search_query {
+            spans = vec![Span::raw(format!("/{}", query))];
         } else if let Some(msg) = status_message {
             // Show status message on the right
             let msg_span = Span::styled(msg, Style::default().fg(Color::Yellow));

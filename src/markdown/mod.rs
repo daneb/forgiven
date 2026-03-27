@@ -13,6 +13,19 @@
 //!         convention) and are not re-wrapped.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+// ── String helpers ────────────────────────────────────────────────────────────
+
+/// Truncate `s` to at most `max_chars` Unicode scalar values, appending `…`
+/// when truncation occurs.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars || max_chars == 0 {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", truncated)
+}
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -62,6 +75,14 @@ struct Renderer {
     is_tool_line: bool,
     /// True when the current paragraph lives inside a list item.
     paragraph_in_item: bool,
+
+    // ── Table state ───────────────────────────────────────────────────────────
+    in_table_cell: bool,
+    table_is_header_row: bool,
+    table_header: Vec<String>,
+    table_body: Vec<Vec<String>>,
+    table_current_row: Vec<String>,
+    table_current_cell: String,
 }
 
 impl Renderer {
@@ -81,6 +102,12 @@ impl Renderer {
             blockquote_depth: 0,
             is_tool_line: false,
             paragraph_in_item: false,
+            in_table_cell: false,
+            table_is_header_row: false,
+            table_header: Vec::new(),
+            table_body: Vec::new(),
+            table_current_row: Vec::new(),
+            table_current_cell: String::new(),
         }
     }
 
@@ -209,6 +236,113 @@ impl Renderer {
         if trail_blank {
             self.output.push(Line::from(""));
         }
+    }
+
+    // ── Table flush ───────────────────────────────────────────────────────────
+
+    fn flush_table(&mut self) {
+        let n_cols = self
+            .table_header
+            .len()
+            .max(self.table_body.iter().map(|r| r.len()).max().unwrap_or(0));
+        if n_cols == 0 {
+            return;
+        }
+
+        // Natural column widths (max content char-width across header + body).
+        let mut col_widths: Vec<usize> = (0..n_cols)
+            .map(|i| {
+                let h = self.table_header.get(i).map(|s| s.chars().count()).unwrap_or(0);
+                let b = self
+                    .table_body
+                    .iter()
+                    .filter_map(|row| row.get(i))
+                    .map(|s| s.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                h.max(b).max(1)
+            })
+            .collect();
+
+        // Available chars for cell content: width - margin - border chars (n+1) - padding (2 per col).
+        let margin_len = MARGIN.len();
+        let borders = n_cols + 1;
+        let padding = n_cols * 2;
+        let available = self
+            .width
+            .saturating_sub(margin_len + borders + padding)
+            .max(n_cols); // at least 1 char per column
+
+        // Scale down proportionally if we exceed available width.
+        let natural_total: usize = col_widths.iter().sum();
+        if natural_total > available {
+            for w in &mut col_widths {
+                *w = (*w * available / natural_total).max(1);
+            }
+        }
+
+        // ── Border line builders ──────────────────────────────────────────────
+        let top_border: String = format!(
+            "{MARGIN}┌{}┐",
+            col_widths
+                .iter()
+                .map(|&w| "─".repeat(w + 2))
+                .collect::<Vec<_>>()
+                .join("┬")
+        );
+        let mid_border: String = format!(
+            "{MARGIN}├{}┤",
+            col_widths
+                .iter()
+                .map(|&w| "─".repeat(w + 2))
+                .collect::<Vec<_>>()
+                .join("┼")
+        );
+        let bot_border: String = format!(
+            "{MARGIN}└{}┘",
+            col_widths
+                .iter()
+                .map(|&w| "─".repeat(w + 2))
+                .collect::<Vec<_>>()
+                .join("┴")
+        );
+
+        let border_style = Style::default().fg(Color::DarkGray);
+
+        // ── Row renderer (returns a Line) ─────────────────────────────────────
+        let render_row = |cells: &[String], widths: &[usize], is_header: bool| -> Line<'static> {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            spans.push(Span::styled(format!("{MARGIN}│"), border_style));
+            for (i, &w) in widths.iter().enumerate() {
+                let raw = cells.get(i).map(|s| s.as_str()).unwrap_or("");
+                let text = truncate_str(raw, w);
+                let padded = format!(" {:<width$} ", text, width = w);
+                let style = if is_header {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                spans.push(Span::styled(padded, style));
+                spans.push(Span::styled("│".to_string(), border_style));
+            }
+            Line::from(spans)
+        };
+
+        // ── Emit lines ────────────────────────────────────────────────────────
+        self.output.push(Line::from(Span::styled(top_border, border_style)));
+        if !self.table_header.is_empty() {
+            let header = self.table_header.clone();
+            self.output.push(render_row(&header, &col_widths, true));
+            self.output.push(Line::from(Span::styled(mid_border, border_style)));
+        }
+        let body = std::mem::take(&mut self.table_body);
+        for row in &body {
+            self.output.push(render_row(row, &col_widths, false));
+        }
+        self.output.push(Line::from(Span::styled(bot_border, border_style)));
+        self.output.push(Line::from(""));
+
+        self.table_header.clear();
     }
 
     // ── List helpers ──────────────────────────────────────────────────────────
@@ -349,9 +483,13 @@ impl Renderer {
 
                 // ── Leaf events ───────────────────────────────────────────────
                 Event::Code(code) => {
-                    // Inline code — cyan; color alone signals code, no backticks.
-                    self.pending
-                        .push(Span::styled(code.to_string(), Style::default().fg(Color::Cyan)));
+                    if self.in_table_cell {
+                        self.table_current_cell.push_str(&code);
+                    } else {
+                        // Inline code — cyan; color alone signals code, no backticks.
+                        self.pending
+                            .push(Span::styled(code.to_string(), Style::default().fg(Color::Cyan)));
+                    }
                 },
                 Event::Text(text) => {
                     if self.in_code_block {
@@ -369,6 +507,8 @@ impl Renderer {
                                 Span::styled(line.to_string(), Style::default().fg(text_color)),
                             ]));
                         }
+                    } else if self.in_table_cell {
+                        self.table_current_cell.push_str(&text);
                     } else {
                         if self.pending.is_empty() && text.trim_start().starts_with('⚙') {
                             self.is_tool_line = true;
@@ -377,7 +517,9 @@ impl Renderer {
                     }
                 },
                 Event::SoftBreak => {
-                    if !self.in_code_block {
+                    if self.in_table_cell {
+                        self.table_current_cell.push(' ');
+                    } else if !self.in_code_block {
                         self.push_text(" ");
                     }
                 },
@@ -396,6 +538,40 @@ impl Renderer {
                         Style::default().fg(Color::DarkGray),
                     )));
                     self.output.push(Line::from(""));
+                },
+
+                // ── Tables ────────────────────────────────────────────────────
+                Event::Start(Tag::Table(_)) => {
+                    self.table_header.clear();
+                    self.table_body.clear();
+                },
+                Event::End(TagEnd::Table) => {
+                    self.flush_table();
+                },
+                Event::Start(Tag::TableHead) => {
+                    self.table_is_header_row = true;
+                    self.table_current_row.clear();
+                },
+                Event::End(TagEnd::TableHead) => {
+                    self.table_header = std::mem::take(&mut self.table_current_row);
+                    self.table_is_header_row = false;
+                },
+                Event::Start(Tag::TableRow) => {
+                    self.table_current_row.clear();
+                },
+                Event::End(TagEnd::TableRow) => {
+                    let row = std::mem::take(&mut self.table_current_row);
+                    if !row.is_empty() {
+                        self.table_body.push(row);
+                    }
+                },
+                Event::Start(Tag::TableCell) => {
+                    self.in_table_cell = true;
+                    self.table_current_cell.clear();
+                },
+                Event::End(TagEnd::TableCell) => {
+                    self.in_table_cell = false;
+                    self.table_current_row.push(std::mem::take(&mut self.table_current_cell));
                 },
 
                 _ => {},
