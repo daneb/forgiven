@@ -28,7 +28,7 @@ use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
-use crate::keymap::{KeyHandler, Mode};
+use crate::keymap::{Action, KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
 use crate::search::{SearchState, SearchStatus};
@@ -800,12 +800,18 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Agent panel stream polling ─────────────────────────────────────
-            let agent_active = self.agent_panel.poll_stream();
+            let agent_active =
+                self.agent_panel.poll_stream(self.config.agent.janitor_threshold_tokens);
             if let Some(err) = self.agent_panel.last_error.take() {
                 self.set_status(format!("Agent error: {err}"));
             }
             if agent_active {
                 needs_render = true;
+            }
+            // ── Auto-Janitor trigger ───────────────────────────────────────────
+            if self.agent_panel.pending_janitor {
+                self.agent_panel.pending_janitor = false;
+                let _ = self.execute_action(Action::AgentJanitorCompress);
             }
 
             // Reload any buffers the agent modified on disk this tick.

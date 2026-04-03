@@ -134,6 +134,8 @@ pub enum Action {
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
     // Memory
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
+    // Janitor
+    AgentJanitorCompress, // SPC a j — summarise + compress chat history
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -252,6 +254,9 @@ impl KeyHandler {
         agent_node
             .children
             .insert('s', KeyNode::leaf("save session to memory", Action::MemorySave));
+        agent_node
+            .children
+            .insert('j', KeyNode::leaf("compress history (janitor)", Action::AgentJanitorCompress));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

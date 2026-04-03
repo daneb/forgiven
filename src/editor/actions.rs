@@ -506,6 +506,52 @@ Skip anything already obvious from reading the code.";
                     self.set_status(format!("Memory save error: {e}"));
                 }
             },
+            // ── Auto-Janitor ──────────────────────────────────────────────────
+            Action::AgentJanitorCompress => {
+                self.agent_panel.compress_history();
+                if self.agent_panel.input.is_empty() {
+                    // compress_history() bailed — nothing to summarise.
+                    self.set_status("Janitor: nothing to compress".to_string());
+                } else {
+                    self.agent_panel.visible = true;
+                    self.mode = Mode::Agent;
+                    self.set_status("Janitor: compressing history…".to_string());
+                    let project_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let max_rounds = 1; // Summarisation needs only one round.
+                    let warning_threshold = 0;
+                    // Use the cheap janitor model when configured, else fall back.
+                    let janitor_model = self.config.agent.janitor_model.clone();
+                    let preferred_model = if janitor_model.is_empty() {
+                        self.config.active_default_model().to_string()
+                    } else {
+                        janitor_model
+                    };
+                    let auto_compress = false; // Don't compress the summariser's own output.
+                    let fut = self.agent_panel.submit(
+                        None,
+                        project_root,
+                        max_rounds,
+                        warning_threshold,
+                        &preferred_model,
+                        auto_compress,
+                    );
+                    let submit_err = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            match fut.await {
+                                Ok(()) => None,
+                                Err(e) => {
+                                    tracing::warn!("Janitor compress error: {}", e);
+                                    Some(e.to_string())
+                                },
+                            }
+                        })
+                    });
+                    if let Some(e) = submit_err {
+                        self.set_status(format!("Janitor error: {e}"));
+                    }
+                }
+            },
             // ── Diagnostics overlay ───────────────────────────────────────────
             Action::DiagnosticsOpen => {
                 self.mode = Mode::Diagnostics;

@@ -112,6 +112,8 @@ impl AgentPanel {
             slash_menu: None,
             file_blocks: Vec::new(),
             at_picker: None,
+            janitor_compressing: false,
+            pending_janitor: false,
         }
     }
 
@@ -424,6 +426,55 @@ impl AgentPanel {
             content: format!("── New conversation · {model_name} ──"),
             images: vec![],
         });
+    }
+
+    /// Prepare a janitor summarisation round.
+    ///
+    /// Serialises the current non-separator conversation into the user input field
+    /// as a single summarisation prompt, clears the message history so the outgoing
+    /// API call carries no prior context, and sets `janitor_compressing = true` so
+    /// `poll_stream()` knows to replace history with the returned summary.
+    ///
+    /// The caller is responsible for immediately calling `submit()` after this.
+    pub fn compress_history(&mut self) {
+        // Collect all non-separator messages (skip Role::System separators like
+        // "── New conversation · …" and "── Context compressed · …").
+        let history_text: String = self
+            .messages
+            .iter()
+            .filter(|m| {
+                // Keep user/assistant messages; drop system separator lines.
+                !matches!(m.role, Role::System)
+            })
+            .map(|m| {
+                let label = match m.role {
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                    Role::System => "System",
+                };
+                format!("**{}:** {}", label, m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+
+        if history_text.is_empty() {
+            // Nothing to compress.
+            return;
+        }
+
+        let prompt = format!(
+            "Summarise the technical decisions, key findings, and important context \
+             from the conversation below into a concise bulleted list. \
+             Discard chit-chat and completed throwaway tasks. \
+             Focus on what would be expensive to re-discover.\n\n\
+             <conversation>\n{history_text}\n</conversation>"
+        );
+
+        // Drop existing history — the janitor round goes out bare (no prior context).
+        self.messages.clear();
+        self.tasks.clear();
+        self.input = prompt;
+        self.janitor_compressing = true;
     }
 
     /// Submit input, launching the agentic tool-calling loop in the background.
@@ -894,7 +945,7 @@ Available tools:\n\
         Ok(())
     }
 
-    pub fn poll_stream(&mut self) -> bool {
+    pub fn poll_stream(&mut self, janitor_threshold: u32) -> bool {
         // Process at most this many tokens per frame to avoid stalling the render loop
         // when the LLM is streaming a large response at high speed.
         const MAX_TOKENS_PER_FRAME: usize = 64;
@@ -1046,6 +1097,46 @@ Available tools:\n\
                                 });
                             }
                         }
+                        // ── Auto-Janitor: apply summary if this was a compression round ──
+                        if self.janitor_compressing {
+                            self.janitor_compressing = false;
+                            // The last message is the LLM's summary — extract and rebuild history.
+                            let summary = self
+                                .messages
+                                .last()
+                                .filter(|m| matches!(m.role, Role::Assistant))
+                                .map(|m| m.content.clone())
+                                .unwrap_or_default();
+                            self.messages.clear();
+                            self.total_session_prompt_tokens = 0;
+                            self.total_session_completion_tokens = 0;
+                            self.session_rounds = 0;
+                            self.messages.push(ChatMessage {
+                                role: Role::System,
+                                content: "── Context compressed by Auto-Janitor ──".to_string(),
+                                images: vec![],
+                            });
+                            if !summary.is_empty() {
+                                self.messages.push(ChatMessage {
+                                    role: Role::System,
+                                    content: format!("**Session summary (Auto-Janitor):**\n\n{summary}"),
+                                    images: vec![],
+                                });
+                            }
+                            // Skip metrics append and the threshold check below — the session
+                            // counters were just reset.
+                            self.code_block_idx = 0;
+                            self.mermaid_block_idx = 0;
+                            self.scroll = 0;
+                            self.stream_rx = None;
+                            self.continuation_tx = None;
+                            self.question_tx = None;
+                            self.asking_user = None;
+                            self.awaiting_continuation = false;
+                            self.current_round = 0;
+                            self.status = AgentStatus::Idle;
+                            break;
+                        }
                         // ── Persist invocation metrics ───────────────────────
                         self.session_rounds = self.session_rounds.saturating_add(1);
                         if self.last_prompt_tokens > 0 {
@@ -1071,6 +1162,12 @@ Available tools:\n\
                                 "session_completion_total": self.total_session_completion_tokens,
                                 "pct": pct,
                             }));
+                        }
+                        // ── Auto-Janitor threshold check ─────────────────────
+                        if janitor_threshold > 0
+                            && self.total_session_prompt_tokens >= janitor_threshold
+                        {
+                            self.pending_janitor = true;
                         }
                         self.code_block_idx = 0;
                         self.mermaid_block_idx = 0;

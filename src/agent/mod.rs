@@ -373,6 +373,14 @@ pub struct AgentPanel {
     pub file_blocks: Vec<(String, String, usize)>,
     /// Ctrl+P file-context picker state. `Some` while the overlay is open.
     pub at_picker: Option<AtPickerState>,
+    /// Set by `compress_history()` to signal that the in-flight submit is a
+    /// janitor summarisation round.  Cleared in `poll_stream()` when `Done`
+    /// arrives, after the summary has replaced the message history.
+    pub janitor_compressing: bool,
+    /// Set by `poll_stream()` when a round completes and `total_session_prompt_tokens`
+    /// exceeds the configured threshold.  The editor tick-loop reads this flag
+    /// and triggers `Action::AgentJanitorCompress` automatically.
+    pub pending_janitor: bool,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
