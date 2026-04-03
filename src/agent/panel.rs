@@ -479,6 +479,20 @@ impl AgentPanel {
         //
         // Resolve into owned Strings first so the immutable borrow on self.spec_framework
         // is released before the potential mutable new_conversation() call.
+        //
+        // Phase 2 (ADR 0100): capture the raw command name and feature arg before
+        // template expansion so the SpecSlicer can inject a virtual context block
+        // for speckit.implement and speckit.tasks without reparsing user_text.
+        let spec_cmd_ctx: Option<(String, String)> =
+            user_text.trim_start().strip_prefix('/').and_then(|s| {
+                let cmd = s.split_whitespace().next()?;
+                if cmd.starts_with("speckit.") {
+                    let rest = s[cmd.len()..].trim_start().to_string();
+                    Some((cmd.to_string(), rest))
+                } else {
+                    None
+                }
+            });
         let resolved: Option<(String, String, bool)> =
             self.spec_framework.as_ref().and_then(|fw| {
                 fw.resolve(&user_text)
@@ -497,6 +511,35 @@ impl AgentPanel {
                 template
             } else {
                 format!("{template}{rest}")
+            }
+        } else {
+            user_text
+        };
+        // Phase 2 — SpecSlicer (ADR 0100): for speckit.implement and speckit.tasks,
+        // inject a pre-extracted virtual context block (active task + relevant spec
+        // sections) to save the model a full-file read round on every implement turn.
+        let user_text = if matches!(
+            spec_cmd_ctx.as_ref().map(|(c, _)| c.as_str()),
+            Some("speckit.implement") | Some("speckit.tasks")
+        ) {
+            let feature =
+                spec_cmd_ctx.as_ref().and_then(|(_, r)| r.split_whitespace().next()).unwrap_or("");
+            if !feature.is_empty() {
+                let feature_dir = project_root.join("docs/spec/features").join(feature);
+                match crate::spec_framework::spec_slicer::SpecSlicer::build(&feature_dir) {
+                    Some(vctx) => {
+                        let block = vctx.to_prompt_block();
+                        info!(
+                            "[spec] SpecSlicer: injected virtual context ({} t, task: {:?})",
+                            super::token_count::count(&block),
+                            vctx.active_task.title
+                        );
+                        format!("{user_text}\n\n{block}")
+                    },
+                    None => user_text,
+                }
+            } else {
+                user_text
             }
         } else {
             user_text
@@ -797,10 +840,8 @@ Available tools:\n\
             .iter()
             .map(|v| super::token_count::count(v["content"].as_str().unwrap_or("")))
             .sum();
-        let ctx_file_t = context_snippet
-            .as_ref()
-            .map(|c| super::token_count::count(c))
-            .unwrap_or(0);
+        let ctx_file_t =
+            context_snippet.as_ref().map(|c| super::token_count::count(c)).unwrap_or(0);
         let system_t = super::token_count::count(&system);
         let user_msg_t = super::token_count::count(&user_text);
         self.last_breakdown = Some(super::ContextBreakdown {

@@ -21,6 +21,8 @@
 //! # spec_framework = "none"                      # disabled (default when absent)
 //! ```
 
+pub mod spec_slicer;
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::warn;

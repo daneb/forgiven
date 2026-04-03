@@ -141,8 +141,7 @@ impl UI {
         if command_buffer.is_none() && in_file_search_query.is_none() {
             if let Some(pct) = agent_fuel {
                 let filled = (pct as usize * 6 / 100).min(6);
-                let bar: String =
-                    "█".repeat(filled) + &"░".repeat(6_usize.saturating_sub(filled));
+                let bar: String = "█".repeat(filled) + &"░".repeat(6_usize.saturating_sub(filled));
                 let color = if pct >= 80 {
                     Color::Red
                 } else if pct >= 50 {
@@ -151,10 +150,7 @@ impl UI {
                     Color::Green
                 };
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    format!("[{bar} {pct}%]"),
-                    Style::default().fg(color),
-                ));
+                spans.push(Span::styled(format!("[{bar} {pct}%]"), Style::default().fg(color)));
             }
         }
 

@@ -417,8 +417,7 @@ impl UI {
             for (label, t) in rows {
                 let pct = t * 100 / w;
                 let filled = (pct as usize * 8 / 100).min(8);
-                let bar: String =
-                    "█".repeat(filled) + &"░".repeat(8_usize.saturating_sub(filled));
+                let bar: String = "█".repeat(filled) + &"░".repeat(8_usize.saturating_sub(filled));
                 let color = if pct >= 80 {
                     Color::Red
                 } else if pct >= 40 {
@@ -427,25 +426,21 @@ impl UI {
                     Color::Green
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {label}  "),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("{t:>6}t  "),
-                        Style::default().fg(Color::White),
-                    ),
+                    Span::styled(format!("  {label}  "), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{t:>6}t  "), Style::default().fg(Color::White)),
                     Span::styled(bar, Style::default().fg(color)),
-                    Span::styled(
-                        format!("  {pct:>3}%"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("  {pct:>3}%"), Style::default().fg(Color::DarkGray)),
                 ]));
             }
             let total = bd.total();
             let used_pct = bd.used_pct();
-            let total_color =
-                if used_pct >= 80 { Color::Red } else if used_pct >= 50 { Color::Yellow } else { Color::Green };
+            let total_color = if used_pct >= 80 {
+                Color::Red
+            } else if used_pct >= 50 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
             lines.push(Line::from(vec![Span::styled(
                 "  ──────────────────────────────────────",
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),

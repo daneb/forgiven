@@ -119,7 +119,7 @@ Which-key popup shows available bindings after a 500 ms pause.
 ### Other
 - lazygit full-screen overlay (`SPC g g`)
 - System clipboard integration via `arboard`
-- Log output to `/tmp/forgiven.log` (never pollutes the TUI)
+- Log output to `~/.local/share/forgiven/forgiven.log` (XDG-aware, append mode; never pollutes the TUI)
 
 ---
 
@@ -224,8 +224,10 @@ args    = ["-y", "@modelcontextprotocol/server-memory"]
 ```
 
 Use `SPC d` (Diagnostics overlay) to inspect running LSP and MCP servers,
-view connection errors, check recent log entries, and see cumulative session
-token usage (prompt total, completion total, % of context window consumed).
+view connection errors, check recent log entries, and see token usage broken
+down by segment: system rules, open file, chat history, and user message — with
+a per-segment percentage bar for each. A compact **fuel gauge** (`[████░░ 38%]`)
+also appears in the status bar after the first agent invocation.
 
 ### Context management
 
@@ -468,6 +470,7 @@ forgiven/
 | `syntect` | 5 | Syntax highlighting engine (Base16 Ocean Dark) |
 | `arboard` | 3 | System clipboard read/write |
 | `pulldown-cmark` | 0.12 | CommonMark parser for markdown rendering |
+| `tiktoken-rs` | 0.5 | GPT-4 tokeniser (cl100k_base) for accurate per-segment token counts |
 
 ### Dev crates
 
@@ -574,6 +577,11 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0086](docs/adr/0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling |
 | [0087](docs/adr/0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation |
 | [0088](docs/adr/0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua |
+| [0095](docs/adr/0095-persistent-log-file.md) | Persistent XDG-Aware Log File |
+| [0096](docs/adr/0096-session-rounds-and-avg-tokens-diagnostic.md) | Session Rounds Counter and Average Tokens per Invocation |
+| [0097](docs/adr/0097-speckit-auto-clear-context-per-phase.md) | SpecKit Auto-Clear Context per Phase |
+| [0098](docs/adr/0098-ollama-local-provider.md) | Ollama Local Provider |
+| [0099](docs/adr/0099-context-breakdown-token-awareness.md) | Context Breakdown: Per-Segment Token Awareness (Phase 1) |
 
 ---
 
@@ -584,7 +592,7 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 cargo build
 
 # Watch logs while running
-tail -f /tmp/forgiven.log
+tail -f ~/.local/share/forgiven/forgiven.log
 
 # Run tests
 cargo test
