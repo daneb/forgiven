@@ -255,6 +255,17 @@ impl AgentPanel {
     /// Matches `preferred_model` against `id` first, then `version` (so configs that stored
     /// a versioned ID like "gpt-4o-2024-11-20" still resolve correctly).
     fn set_models(&mut self, models: Vec<ModelVersion>, preferred_model: &str) {
+        let mut models = models;
+        // For Copilot, prepend a synthetic "Auto" entry — GitHub routes server-side
+        // when model: "auto" is sent.  VS Code does the same; it's not in /models.
+        if self.provider == super::provider::ProviderKind::Copilot {
+            models.insert(0, ModelVersion {
+                id: "auto".to_string(),
+                version: "auto".to_string(),
+                name: "Auto".to_string(),
+                context_window: 128_000,
+            });
+        }
         let found =
             models.iter().position(|m| m.id == preferred_model || m.version == preferred_model);
         if found.is_none() && !preferred_model.is_empty() {
@@ -1073,18 +1084,28 @@ Available tools:\n\
                     },
                     Ok(StreamEvent::ModelSwitched { from, to }) => {
                         active = true;
-                        // Update selected_model index to reflect the actual model being used.
-                        if let Some(idx) =
-                            self.available_models.iter().position(|m| m.id == to || m.version == to)
-                        {
-                            self.selected_model = idx;
-                        }
-                        let notice = format!(
-                            "\n\n> ⚠  Copilot switched model: **{from}** → **{to}** (premium quota exceeded)\n\n"
-                        );
-                        match self.streaming_reply.as_mut() {
-                            Some(r) => r.push_str(&notice),
-                            None => self.streaming_reply = Some(notice),
+                        let currently_auto = self.available_models
+                            .get(self.selected_model)
+                            .map(|m| m.id == "auto")
+                            .unwrap_or(false);
+                        if currently_auto {
+                            // Auto-routing to a specific model is expected; just log it.
+                            info!("[auto] Copilot routed to {to:?}");
+                        } else {
+                            // Unexpected switch = premium quota exceeded; update selection and warn.
+                            if let Some(idx) = self.available_models
+                                .iter()
+                                .position(|m| m.id == to || m.version == to)
+                            {
+                                self.selected_model = idx;
+                            }
+                            let notice = format!(
+                                "\n\n> ⚠  Copilot switched model: **{from}** → **{to}** (premium quota exceeded)\n\n"
+                            );
+                            match self.streaming_reply.as_mut() {
+                                Some(r) => r.push_str(&notice),
+                                None => self.streaming_reply = Some(notice),
+                            }
                         }
                     },
                     Ok(StreamEvent::Done) => {
