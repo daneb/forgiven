@@ -1119,7 +1119,9 @@ Available tools:\n\
                             if !summary.is_empty() {
                                 self.messages.push(ChatMessage {
                                     role: Role::System,
-                                    content: format!("**Session summary (Auto-Janitor):**\n\n{summary}"),
+                                    content: format!(
+                                        "**Session summary (Auto-Janitor):**\n\n{summary}"
+                                    ),
                                     images: vec![],
                                 });
                             }
