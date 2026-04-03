@@ -13,6 +13,8 @@ impl UI {
         key_sequence: &str,
         area: Rect,
         diagnostics: &[Diagnostic],
+        // Context window usage % from last agent invocation (0–100); None before first submit.
+        agent_fuel: Option<u32>,
     ) {
         let mode_str = match mode {
             Mode::Normal => "NORMAL",
@@ -133,6 +135,27 @@ impl UI {
             let msg_span = Span::styled(msg, Style::default().fg(Color::Yellow));
             spans.push(Span::raw(" "));
             spans.push(msg_span);
+        }
+
+        // Fuel gauge: only when not showing a command/search prompt and data is available.
+        if command_buffer.is_none() && in_file_search_query.is_none() {
+            if let Some(pct) = agent_fuel {
+                let filled = (pct as usize * 6 / 100).min(6);
+                let bar: String =
+                    "█".repeat(filled) + &"░".repeat(6_usize.saturating_sub(filled));
+                let color = if pct >= 80 {
+                    Color::Red
+                } else if pct >= 50 {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                };
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("[{bar} {pct}%]"),
+                    Style::default().fg(color),
+                ));
+            }
         }
 
         let status_line = Line::from(spans);

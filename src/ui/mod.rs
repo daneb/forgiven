@@ -118,6 +118,9 @@ pub struct DiagnosticsData<'a> {
     /// prompt_total is cumulative re-send cost; divide by rounds for avg per-invocation.
     /// None when no agent session has been active yet (rounds == 0).
     pub agent_session_tokens: Option<(u32, u32, u32, u32)>,
+    /// Per-segment context breakdown from the most recent agent invocation.
+    /// Drives the Context Breakdown section in this overlay.
+    pub agent_ctx_breakdown: Option<crate::agent::ContextBreakdown>,
     /// Recent MCP tool calls this session (newest-last).
     pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
 }
@@ -421,6 +424,7 @@ impl UI {
         }
 
         // Render status line
+        let agent_fuel = agent_panel.and_then(|p| p.last_breakdown).map(|b| b.used_pct());
         Self::render_status_line(
             frame,
             buffer_data,
@@ -431,6 +435,7 @@ impl UI {
             key_sequence,
             status_area,
             diagnostics,
+            agent_fuel,
         );
 
         // Render agent panel if visible

@@ -1491,6 +1491,7 @@ impl Editor {
                 log_path: "~/.local/share/forgiven/forgiven.log",
                 recent_logs: recent_logs_owned.as_slice(),
                 agent_session_tokens,
+                agent_ctx_breakdown: self.agent_panel.last_breakdown,
                 mcp_call_log: self
                     .mcp_manager
                     .as_ref()

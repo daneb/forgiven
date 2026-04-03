@@ -1,6 +1,6 @@
 [package]
 name = "forgiven"
-version = "0.8.9-alpha.5"
+version = "0.8.9-alpha.6"
 edition = "2021"
 authors = ["Dane Balia"]
 description = "An AI-first, terminal-based code editor with GitHub Copilot agent integration"
@@ -62,6 +62,9 @@ base64 = "0.22"
 
 # Markdown rendering (agent panel + editor preview)
 pulldown-cmark = "0.12"
+
+# Token counting for context breakdown (Phase 1 — context optimisation)
+tiktoken-rs = "0.5"
 
 [dev-dependencies]
 pretty_assertions = "1"

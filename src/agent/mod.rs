@@ -17,6 +17,7 @@ mod auth;
 mod models;
 mod panel;
 pub mod provider;
+pub mod token_count;
 pub mod tools;
 pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
@@ -189,6 +190,33 @@ pub struct SlashMenuState {
 /// Files exceeding this limit are truncated and a warning is appended.
 pub const AT_PICKER_MAX_LINES: usize = 500;
 
+/// Per-segment token breakdown captured at `submit()` time.
+/// Shown in the `SPC d` diagnostics overlay and the status-bar fuel gauge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContextBreakdown {
+    /// Tokens used by the system-prompt rules + preamble (without the open file).
+    pub sys_rules_t: u32,
+    /// Tokens used by the open-file snippet injected into the system prompt.
+    pub ctx_file_t: u32,
+    /// Tokens used by the chat history sent this round (after truncation).
+    pub history_t: u32,
+    /// Tokens used by the new user message.
+    pub user_msg_t: u32,
+    /// Model context window size in tokens.
+    pub ctx_window: u32,
+}
+
+impl ContextBreakdown {
+    pub fn total(&self) -> u32 {
+        self.sys_rules_t + self.ctx_file_t + self.history_t + self.user_msg_t
+    }
+
+    /// Percentage of the context window consumed (0–100).
+    pub fn used_pct(&self) -> u32 {
+        self.total() * 100 / self.ctx_window.max(1)
+    }
+}
+
 /// Context-budget snapshot captured at `submit()` time, correlated with the
 /// `StreamEvent::Usage` that arrives after the round completes.
 /// Used to write per-invocation metrics to `~/.local/share/forgiven/sessions.jsonl`.
@@ -329,6 +357,9 @@ pub struct AgentPanel {
     /// Context-budget snapshot from the most recent `submit()` call.
     /// Correlated with `StreamEvent::Usage` to write per-invocation metrics.
     pub last_submit_ctx: Option<SubmitCtx>,
+    /// Per-segment token breakdown from the most recent `submit()` call.
+    /// Drives the `SPC d` Context Breakdown section and the status-bar fuel gauge.
+    pub last_breakdown: Option<ContextBreakdown>,
     /// Model ID used in the most recent `submit()` call (e.g. "claude-sonnet-4").
     pub last_submit_model: String,
     /// Images captured from the system clipboard via Ctrl+V.

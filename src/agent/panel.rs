@@ -104,6 +104,7 @@ impl AgentPanel {
             spec_framework: None,
             abort_tx: None,
             last_submit_ctx: None,
+            last_breakdown: None,
             last_submit_model: String::new(),
             session_rounds: 0,
             question_tx: None,
@@ -788,6 +789,28 @@ Available tools:\n\
             serde_json::json!({ "role": "user", "content": content_parts })
         };
         send_messages.push(user_msg);
+
+        // ── Context breakdown for diagnostics / fuel gauge (Phase 1) ─────────
+        // Compute per-segment token counts now that send_messages is fully assembled.
+        // history = send_messages[1..n-1] (everything except system[0] and user[-1]).
+        let history_t: u32 = send_messages[1..send_messages.len().saturating_sub(1)]
+            .iter()
+            .map(|v| super::token_count::count(v["content"].as_str().unwrap_or("")))
+            .sum();
+        let ctx_file_t = context_snippet
+            .as_ref()
+            .map(|c| super::token_count::count(c))
+            .unwrap_or(0);
+        let system_t = super::token_count::count(&system);
+        let user_msg_t = super::token_count::count(&user_text);
+        self.last_breakdown = Some(super::ContextBreakdown {
+            sys_rules_t: system_t.saturating_sub(ctx_file_t),
+            ctx_file_t,
+            history_t,
+            user_msg_t,
+            ctx_window: context_limit,
+        });
+
         self.messages.push(ChatMessage {
             role: Role::User,
             content: user_text,

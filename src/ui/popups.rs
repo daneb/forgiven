@@ -400,6 +400,69 @@ impl UI {
             ]));
         }
 
+        // ── Context Breakdown (last invocation) ───────────────────────────────
+        if let Some(bd) = data.agent_ctx_breakdown {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                " Context Breakdown ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )]));
+            let w = bd.ctx_window.max(1);
+            let rows: [(&str, u32); 4] = [
+                ("sys rules", bd.sys_rules_t),
+                ("open file", bd.ctx_file_t),
+                ("history  ", bd.history_t),
+                ("user msg ", bd.user_msg_t),
+            ];
+            for (label, t) in rows {
+                let pct = t * 100 / w;
+                let filled = (pct as usize * 8 / 100).min(8);
+                let bar: String =
+                    "█".repeat(filled) + &"░".repeat(8_usize.saturating_sub(filled));
+                let color = if pct >= 80 {
+                    Color::Red
+                } else if pct >= 40 {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {label}  "),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{t:>6}t  "),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(bar, Style::default().fg(color)),
+                    Span::styled(
+                        format!("  {pct:>3}%"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            let total = bd.total();
+            let used_pct = bd.used_pct();
+            let total_color =
+                if used_pct >= 80 { Color::Red } else if used_pct >= 50 { Color::Yellow } else { Color::Green };
+            lines.push(Line::from(vec![Span::styled(
+                "  ──────────────────────────────────────",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            )]));
+            lines.push(Line::from(vec![
+                Span::styled("  total    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{total:>6}t"),
+                    Style::default().fg(total_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  of {w}t  ({used_pct}%)"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
         // ── MCP Activity ──────────────────────────────────────────────────────
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
@@ -481,7 +544,7 @@ impl UI {
         )]));
 
         // Centre the popup.
-        let popup_width = 60.min(area.width);
+        let popup_width = 64.min(area.width);
         let popup_height = (lines.len() as u16 + 2).min(area.height);
         let x = (area.width.saturating_sub(popup_width)) / 2;
         let y = (area.height.saturating_sub(popup_height)) / 2;
