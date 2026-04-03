@@ -94,10 +94,18 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up logging to a file so it doesn't interfere with the TUI.
+    // Set up logging to a persistent file so it doesn't interfere with the TUI
+    // and survives across restarts.  Fall back to /tmp if HOME is unavailable.
     // Also install a ring-buffer layer so the in-app diagnostics panel can
     // display recent WARN/ERROR events without the user leaving the editor.
-    let log_file = std::fs::File::create("/tmp/forgiven.log")?;
+    let log_path = Config::log_path().unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
     let log_buf: Arc<Mutex<VecDeque<(String, String)>>> = Arc::new(Mutex::new(VecDeque::new()));
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))

@@ -114,9 +114,10 @@ pub struct DiagnosticsData<'a> {
     pub log_path: &'a str,
     /// Recent log entries (level, message) newest-last.
     pub recent_logs: &'a [(String, String)],
-    /// Agent session token totals: (prompt_total, completion_total, context_window).
-    /// None when no agent session has been active yet.
-    pub agent_session_tokens: Option<(u32, u32, u32)>,
+    /// Agent session token totals: (prompt_total, completion_total, context_window, rounds).
+    /// prompt_total is cumulative re-send cost; divide by rounds for avg per-invocation.
+    /// None when no agent session has been active yet (rounds == 0).
+    pub agent_session_tokens: Option<(u32, u32, u32, u32)>,
     /// Recent MCP tool calls this session (newest-last).
     pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
 }

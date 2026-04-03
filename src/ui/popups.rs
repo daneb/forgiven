@@ -348,34 +348,51 @@ impl UI {
         }
 
         // ── Agent session token usage ─────────────────────────────────────────
-        if let Some((prompt_total, completion_total, window)) = data.agent_session_tokens {
+        if let Some((prompt_total, completion_total, window, rounds)) = data.agent_session_tokens {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![Span::styled(
                 " Agent Session ",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )]));
-            let pct = prompt_total * 100 / window.max(1);
-            let gauge_color = if pct >= 80 {
+            let last_pct = prompt_total * 100 / window.max(1);
+            let avg_prompt = prompt_total / rounds.max(1);
+            let avg_pct = avg_prompt * 100 / window.max(1);
+            let gauge_color = if avg_pct >= 80 {
                 Color::Red
-            } else if pct >= 50 {
+            } else if avg_pct >= 50 {
                 Color::Yellow
             } else {
                 Color::Green
             };
             lines.push(Line::from(vec![
-                Span::styled("  prompt total  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  invocations   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{rounds}"), Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  avg prompt    ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{}t", prompt_total),
+                    format!("{avg_prompt}t"),
                     Style::default().fg(gauge_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  ({pct}% of {window}t window)"),
+                    format!("  ({avg_pct}% of {window}t window)"),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
             lines.push(Line::from(vec![
+                Span::styled("  session total ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{prompt_total}t prompt"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("  ({last_pct}% cumulative re-send)"),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                ),
+            ]));
+            lines.push(Line::from(vec![
                 Span::styled("  completion    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}t", completion_total), Style::default().fg(Color::White)),
+                Span::styled(format!("{completion_total}t"), Style::default().fg(Color::White)),
             ]));
         }
 

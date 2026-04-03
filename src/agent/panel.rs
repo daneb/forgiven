@@ -9,8 +9,8 @@ use super::agentic_loop::agentic_loop;
 use super::auth::{exchange_token, load_oauth_token};
 use super::models::fetch_models;
 use super::{
-    AgentPanel, AgentStatus, AgentTask, AskUserState, ChatMessage, ClipboardImage, ModelVersion,
-    Role, SlashMenuState, StreamEvent,
+    append_session_metric, AgentPanel, AgentStatus, AgentTask, AskUserState, ChatMessage,
+    ClipboardImage, ModelVersion, Role, SlashMenuState, StreamEvent, SubmitCtx,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +98,9 @@ impl AgentPanel {
             mcp_manager: None,
             spec_framework: None,
             abort_tx: None,
+            last_submit_ctx: None,
+            last_submit_model: String::new(),
+            session_rounds: 0,
             question_tx: None,
             asking_user: None,
             slash_menu: None,
@@ -362,6 +365,7 @@ impl AgentPanel {
         self.streaming_reply = None;
         self.total_session_prompt_tokens = 0;
         self.total_session_completion_tokens = 0;
+        self.session_rounds = 0;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -415,22 +419,69 @@ impl AgentPanel {
         // typed "/<command> [context]", resolve the template and rebuild the message.
         // The template becomes the structured instruction; any trailing text is
         // appended as "user context" and the combined string is sent as the user turn.
-        let user_text = if let Some(ref fw) = self.spec_framework {
-            if let Some((template, rest)) = fw.resolve(&user_text) {
-                // Append whatever the user typed after the command as context.
-                if rest.is_empty() {
-                    template.to_string()
-                } else {
-                    format!("{template}{rest}")
-                }
-            } else {
-                user_text
+        //
+        // When the command sets clears_context (all built-in spec-kit phases do),
+        // a new conversation is started automatically so the phase template runs
+        // against a clean context window — no prior-phase history to re-send.
+        //
+        // Resolve into owned Strings first so the immutable borrow on self.spec_framework
+        // is released before the potential mutable new_conversation() call.
+        let resolved: Option<(String, String, bool)> =
+            self.spec_framework.as_ref().and_then(|fw| {
+                fw.resolve(&user_text)
+                    .map(|(tmpl, rest, clears)| (tmpl.to_string(), rest.to_string(), clears))
+            });
+        let user_text = if let Some((template, rest, clears_context)) = resolved {
+            if clears_context {
+                let model_display = self.selected_model_display().to_string();
+                let cmd = user_text
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("?");
+                info!("[spec] auto-clearing conversation before /{cmd} (clears_context = true)");
+                self.new_conversation(&model_display);
             }
+            // Append whatever the user typed after the command as context.
+            if rest.is_empty() { template } else { format!("{template}{rest}") }
         } else {
             user_text
         };
 
+        // ── Resolve token + model before computing the context budget ────────
+        // Fetching models first ensures context_window_size() returns the real
+        // limit rather than the 128k fallback, so history truncation is correct
+        // even on the very first message of a session (Fix for ADR 0087 §2).
+        let api_token = self.ensure_token().await?;
+        if self.available_models.is_empty() {
+            match fetch_models(&api_token).await {
+                Ok(models) if !models.is_empty() => {
+                    info!("Fetched {} models from Copilot API", models.len());
+                    self.set_models(models, preferred_model);
+                },
+                Ok(_) => warn!("Copilot /models returned an empty list"),
+                Err(e) => warn!("Could not fetch Copilot model list: {e}"),
+            }
+        }
+        let model_id = self.selected_model_id().to_string();
+        self.last_submit_model = model_id.clone();
+
         let root_display = project_root.display().to_string();
+
+        // ── Cap open-file context injection ─────────────────────────────────
+        // The active buffer is useful orientation for small files, but sending
+        // tens-of-thousands of tokens on every round (even unrelated rounds)
+        // is the primary driver of context bloat (ADR 0087).
+        // Cap to MAX_CTX_LINES; the model can call read_file for the rest.
+        const MAX_CTX_LINES: usize = 150;
+        let ctx_total_lines = context.as_ref().map(|c| c.lines().count()).unwrap_or(0);
+        let context_snippet: Option<String> = context.as_ref().map(|raw| {
+            if ctx_total_lines > MAX_CTX_LINES {
+                raw.lines().take(MAX_CTX_LINES).collect::<Vec<_>>().join("\n")
+            } else {
+                raw.clone()
+            }
+        });
 
         // Build a shallow file tree so the model knows the project layout upfront
         // and never needs to burn rounds on list_directory exploration.
@@ -497,15 +548,23 @@ Available tools:\n\
 - list_directory       List a directory's contents.\n\
 - ask_user             Show the user a question dialog and wait for their choice.\n";
 
-        let system = if let Some(ref ctx) = context {
+        let system = if let Some(ref ctx) = context_snippet {
+            let truncation_note = if ctx_total_lines > MAX_CTX_LINES {
+                format!(
+                    "\n[Showing first {MAX_CTX_LINES} of {ctx_total_lines} lines — \
+                     call read_file for the full content]"
+                )
+            } else {
+                String::new()
+            };
             format!(
                 "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
                  Project root: {root_display}\n\n\
                  Project file tree (depth 2 — use read_file to see contents):\n\
                  ```\n{project_tree}```\n\n\
                  {tool_rules}\n\
-                 Currently open file (already read — you may use this content directly for edits):\n\
-                 ```\n{ctx}\n```"
+                 Currently open file (use read_file for full content):\n\
+                 ```\n{ctx}{truncation_note}\n```"
             )
         } else {
             format!(
@@ -528,16 +587,20 @@ Available tools:\n\
         let system_tokens = (system.len() / 4) as u32;
         let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
 
+        // Snapshot for per-invocation metrics written on Done.
+        self.last_submit_ctx = Some(SubmitCtx { ctx_window: context_limit, sys_tokens: system_tokens, budget_for_history: budget });
+
         // ── Context budget audit log ─────────────────────────────────────────
         // Visible in SPC d → Recent Logs. One line per submission so you can
         // track how much of the window each component consumes.
-        let ctx_file_tokens = context.as_ref().map(|c| c.len() / 4).unwrap_or(0);
+        let ctx_file_tokens = context_snippet.as_ref().map(|c| c.len() / 4).unwrap_or(0);
         info!(
-            "[ctx] window={}t  sys={}t (rules≈{}t + file≈{}t)  history_msgs={}  budget_for_history={}t",
+            "[ctx] window={}t  sys={}t (rules≈{}t + file≈{}t{})  history_msgs={}  budget_for_history={}t",
             context_limit,
             system_tokens,
-            (system.len() - context.as_ref().map(|c| c.len()).unwrap_or(0)) / 4,
+            (system.len() - context_snippet.as_ref().map(|c| c.len()).unwrap_or(0)) / 4,
             ctx_file_tokens,
+            if ctx_total_lines > MAX_CTX_LINES { format!(" [{}/{}lines]", MAX_CTX_LINES, ctx_total_lines) } else { String::new() },
             self.messages.iter().filter(|m| !matches!(m.role, Role::System)).count(),
             budget,
         );
@@ -641,24 +704,6 @@ Available tools:\n\
         self.scroll = 0;
         self.streaming_reply = Some(String::new());
         self.tasks.clear();
-
-        let api_token = self.ensure_token().await?;
-
-        // Lazily populate the model list on first submit (or after a token refresh
-        // that cleared it).  Failure is non-fatal — we just keep the fallback.
-        if self.available_models.is_empty() {
-            match fetch_models(&api_token).await {
-                Ok(models) if !models.is_empty() => {
-                    info!("Fetched {} models from Copilot API", models.len());
-                    // Select user's preferred model from config
-                    self.set_models(models, preferred_model);
-                },
-                Ok(_) => warn!("Copilot /models returned an empty list"),
-                Err(e) => warn!("Could not fetch Copilot model list: {e}"),
-            }
-        }
-
-        let model_id = self.selected_model_id().to_string();
 
         self.status = AgentStatus::WaitingForResponse { round: 1 };
 
@@ -843,6 +888,32 @@ Available tools:\n\
                                     images: vec![],
                                 });
                             }
+                        }
+                        // ── Persist invocation metrics ───────────────────────
+                        self.session_rounds = self.session_rounds.saturating_add(1);
+                        if self.last_prompt_tokens > 0 {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let (ctx_window, sys_tokens, budget) = self
+                                .last_submit_ctx
+                                .map(|c| (c.ctx_window, c.sys_tokens, c.budget_for_history))
+                                .unwrap_or((128_000, 0, 0));
+                            let pct = self.last_prompt_tokens * 100 / ctx_window.max(1);
+                            append_session_metric(&serde_json::json!({
+                                "ts": ts,
+                                "model": self.last_submit_model,
+                                "prompt_tokens": self.last_prompt_tokens,
+                                "completion_tokens": self.last_completion_tokens,
+                                "cached_tokens": self.last_cached_tokens,
+                                "ctx_window": ctx_window,
+                                "sys_tokens": sys_tokens,
+                                "budget_for_history": budget,
+                                "session_prompt_total": self.total_session_prompt_tokens,
+                                "session_completion_total": self.total_session_completion_tokens,
+                                "pct": pct,
+                            }));
                         }
                         self.code_block_idx = 0;
                         self.mermaid_block_idx = 0;

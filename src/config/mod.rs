@@ -239,4 +239,18 @@ impl Config {
         };
         Some(base.join("forgiven").join("config.toml"))
     }
+
+    /// Return the path to the persistent log file.
+    /// `$XDG_DATA_HOME/forgiven/forgiven.log`, falling back to
+    /// `$HOME/.local/share/forgiven/forgiven.log`.
+    /// Returns `None` if `$HOME` is not set; callers should fall back to `/tmp/forgiven.log`.
+    pub fn log_path() -> Option<PathBuf> {
+        let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            PathBuf::from(xdg)
+        } else {
+            let home = std::env::var("HOME").ok()?;
+            PathBuf::from(home).join(".local/share")
+        };
+        Some(base.join("forgiven").join("forgiven.log"))
+    }
 }

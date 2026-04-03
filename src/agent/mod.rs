@@ -187,6 +187,49 @@ pub struct SlashMenuState {
 /// Files exceeding this limit are truncated and a warning is appended.
 pub const AT_PICKER_MAX_LINES: usize = 500;
 
+/// Context-budget snapshot captured at `submit()` time, correlated with the
+/// `StreamEvent::Usage` that arrives after the round completes.
+/// Used to write per-invocation metrics to `~/.local/share/forgiven/sessions.jsonl`.
+#[derive(Debug, Clone, Copy)]
+pub struct SubmitCtx {
+    /// Model context window in tokens (from the /models API, or 128k fallback).
+    pub ctx_window: u32,
+    /// Estimated system-prompt tokens (system.len() / 4).
+    pub sys_tokens: u32,
+    /// Tokens remaining for history after system-prompt deduction (80% of window − sys).
+    pub budget_for_history: u32,
+}
+
+/// Resolve the path for the persistent session-metrics JSONL file.
+/// `~/.local/share/forgiven/sessions.jsonl` (XDG_DATA_HOME-aware).
+pub fn metrics_data_path() -> Option<std::path::PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        std::path::PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").ok()?;
+        std::path::PathBuf::from(home).join(".local/share")
+    };
+    Some(base.join("forgiven").join("sessions.jsonl"))
+}
+
+/// Append one JSON line to the persistent session-metrics file.
+/// Creates the directory and file on first use. Silently swallows I/O errors
+/// so a permissions problem never interrupts the agentic loop.
+pub fn append_session_metric(record: &serde_json::Value) {
+    let Some(path) = metrics_data_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut line = record.to_string();
+    line.push('\n');
+    use std::io::Write as _;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+}
+
 /// Transient state for the Ctrl+P file-context picker overlay in the agent panel.
 /// `None` when the picker is closed; `Some` while it is open.
 #[derive(Debug, Clone)]
@@ -239,9 +282,14 @@ pub struct AgentPanel {
     /// Tokens served from the provider's prompt cache in the last response.
     pub last_cached_tokens: u32,
     /// Cumulative prompt + completion tokens for the current conversation session.
+    /// NOTE: prompt total is a re-send cost (history is re-sent each round), not
+    /// a count of unique tokens. Divide by session_rounds for average per-invocation cost.
     /// Reset by `new_conversation()`. Shown in the SPC d diagnostics overlay.
     pub total_session_prompt_tokens: u32,
     pub total_session_completion_tokens: u32,
+    /// Number of completed agent invocations in this conversation session.
+    /// Incremented on each StreamEvent::Done. Reset by new_conversation().
+    pub session_rounds: u32,
     /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
     /// Cycle index for the Ctrl+M view-mermaid-diagram command.
@@ -265,6 +313,11 @@ pub struct AgentPanel {
     pub asking_user: Option<AskUserState>,
     /// Slash-command autocomplete dropdown state. Some while the user is typing a `/` command.
     pub slash_menu: Option<SlashMenuState>,
+    /// Context-budget snapshot from the most recent `submit()` call.
+    /// Correlated with `StreamEvent::Usage` to write per-invocation metrics.
+    pub last_submit_ctx: Option<SubmitCtx>,
+    /// Model ID used in the most recent `submit()` call (e.g. "claude-sonnet-4").
+    pub last_submit_model: String,
     /// Images captured from the system clipboard via Ctrl+V.
     /// Each entry is a pre-encoded PNG ready for submission.
     /// Cleared by `submit()` via `std::mem::take`.
