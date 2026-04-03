@@ -3,7 +3,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use std::path::PathBuf;
 
-use super::diff::lcs_diff;
 use super::{ClipboardType, Editor};
 use crate::keymap::{Action, Mode};
 
@@ -83,7 +82,6 @@ impl Editor {
                     | Mode::RenameFile
                     | Mode::DeleteFile
                     | Mode::NewFolder
-                    | Mode::ApplyDiff
                     | Mode::CommitMsg
                     | Mode::Diagnostics
                     | Mode::LspRename
@@ -109,7 +107,6 @@ impl Editor {
             Mode::RenameFile => self.handle_rename_mode(key)?,
             Mode::DeleteFile => self.handle_delete_mode(key)?,
             Mode::NewFolder => self.handle_new_folder_mode(key)?,
-            Mode::ApplyDiff => self.handle_apply_diff_mode(key)?,
             Mode::CommitMsg => self.handle_commit_msg_mode(key)?,
             Mode::ReleaseNotes => self.handle_release_notes_mode(key)?,
             Mode::Diagnostics => {
@@ -522,53 +519,6 @@ impl Editor {
                     self.set_status(format!("Copied {} lines to clipboard", len));
                 } else {
                     self.set_status("No reply to copy".to_string());
-                }
-            },
-            // Ctrl+A — open apply-diff overlay for the last code block in the reply.
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some((path_hint, proposed_code)) = self.agent_panel.get_apply_candidate() {
-                    let cwd =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let (resolved_path, current_content) = if let Some(hint) = path_hint {
-                        let abs = cwd.join(&hint);
-                        let content = self
-                            .buffers
-                            .iter()
-                            .find(|b| {
-                                b.file_path
-                                    .as_ref()
-                                    .map(|fp| {
-                                        fp.canonicalize().unwrap_or_else(|_| fp.clone())
-                                            == abs.canonicalize().unwrap_or_else(|_| abs.clone())
-                                    })
-                                    .unwrap_or(false)
-                            })
-                            .map(|b| b.lines().join("\n"))
-                            .or_else(|| {
-                                if abs.exists() {
-                                    std::fs::read_to_string(&abs).ok()
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_default();
-                        (Some(abs), content)
-                    } else {
-                        let (path, content) = self
-                            .current_buffer()
-                            .map(|b| (b.file_path.clone(), b.lines().join("\n")))
-                            .unwrap_or_default();
-                        (path, content)
-                    };
-                    let old: Vec<String> = current_content.lines().map(str::to_string).collect();
-                    let new: Vec<String> = proposed_code.lines().map(str::to_string).collect();
-                    self.apply_diff.lines = lcs_diff(&old, &new);
-                    self.apply_diff.path = resolved_path;
-                    self.apply_diff.content = Some(proposed_code);
-                    self.apply_diff.scroll = 0;
-                    self.mode = Mode::ApplyDiff;
-                } else {
-                    self.set_status("No code block in latest reply to apply".to_string());
                 }
             },
             // Ctrl+P — open the file-context picker (attach a file to agent message).

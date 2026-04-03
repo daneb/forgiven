@@ -20,7 +20,6 @@ pub enum Mode {
     RenameFile,      // Rename popup: user edits a filename from the explorer
     DeleteFile,      // Confirmation popup: y=delete, n/Esc=cancel
     NewFolder,       // New folder popup: user types a folder name from the explorer
-    ApplyDiff,       // Full-screen diff preview before applying agent code block
     CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
     ReleaseNotes,    // Release notes generation popup (SPC g n)
     Diagnostics,     // Read-only diagnostics overlay (SPC d)

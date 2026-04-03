@@ -13,7 +13,7 @@ use crate::agent::{
     ProviderKind, Role, SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
-use crate::editor::{DiffLine, HoverPopupState, LocationListState};
+use crate::editor::{HoverPopupState, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
@@ -79,13 +79,6 @@ fn wrapped_line_count(lines: &[Line<'static>], inner_width: usize) -> usize {
 thread_local! {
     static PANEL_CACHE: std::cell::RefCell<PanelRenderCache> =
         std::cell::RefCell::new(PanelRenderCache::default());
-}
-
-/// Data for the full-screen apply-diff overlay (Mode::ApplyDiff).
-pub struct ApplyDiffView<'a> {
-    pub target: &'a str,
-    pub lines: &'a [DiffLine],
-    pub scroll: usize,
 }
 
 /// Data for the release notes popup (Mode::ReleaseNotes).
@@ -183,8 +176,6 @@ pub struct RenderContext<'a> {
     pub delete_name: Option<&'a str>,
     /// New folder name buffer (Mode::NewFolder only).
     pub new_folder_buffer: Option<&'a str>,
-    /// Apply-diff overlay data (Mode::ApplyDiff only).
-    pub apply_diff: Option<&'a ApplyDiffView<'a>>,
     /// Inactive split pane buffer data; `None` = no split active.
     pub split_buffer_data: Option<&'a BufferData>,
     /// Pre-computed highlighted spans for the inactive split pane.
@@ -238,7 +229,6 @@ impl UI {
         let rename_buffer = ctx.rename_buffer;
         let delete_name = ctx.delete_name;
         let new_folder_buffer = ctx.new_folder_buffer;
-        let apply_diff = ctx.apply_diff;
         let split_buffer_data = ctx.split_buffer_data;
         let split_highlighted_lines = ctx.split_highlighted_lines;
         let split_right_focused = ctx.split_right_focused;
@@ -254,13 +244,6 @@ impl UI {
         let lsp_rename_buffer = ctx.lsp_rename_buffer;
 
         let size = frame.area();
-
-        if mode == Mode::ApplyDiff {
-            if let Some(view) = apply_diff {
-                Self::render_apply_diff_overlay(frame, view, size);
-            }
-            return;
-        }
 
         // If in PickBuffer mode, show buffer picker
         if mode == Mode::PickBuffer {

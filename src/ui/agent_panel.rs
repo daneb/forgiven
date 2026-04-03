@@ -250,14 +250,11 @@ impl UI {
                     )),
                     Some(mcp) => {
                         let mut spans = vec![Span::raw(" MCP: ")];
-                        let connected: Vec<String> = mcp
-                            .connected_servers()
-                            .into_iter()
-                            .map(|(name, count)| format!("{} ({})", name, count))
-                            .collect();
-                        if !connected.is_empty() {
+                        let total: usize =
+                            mcp.connected_servers().into_iter().map(|(_, count)| count).sum();
+                        if total > 0 {
                             spans.push(Span::styled(
-                                connected.join(", "),
+                                total.to_string(),
                                 Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
                             ));
                         } else {
@@ -299,17 +296,9 @@ impl UI {
         }
 
         // ── Input box ─────────────────────────────────────────────────────────
-        // Show [a] apply hint when the latest reply contains a code block.
         let hint = if panel.messages.is_empty() {
             " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+V=paste image, Ctrl+P=attach file, Ctrl+T=model)"
                 .to_string()
-        } else if panel.has_code_to_apply()
-            && panel.input.is_empty()
-            && panel.pasted_blocks.is_empty()
-            && panel.image_blocks.is_empty()
-            && panel.file_blocks.is_empty()
-        {
-            " Message Copilot… | [a] diff+apply  Ctrl+P=attach  Ctrl+T=model ".to_string()
         } else {
             " Message Copilot… (Ctrl+T=model) ".to_string()
         };

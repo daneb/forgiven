@@ -731,7 +731,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forgiven"
-version = "0.8.9-alpha.10"
+version = "0.8.9-alpha.11"
 dependencies = [
  "anyhow",
  "arboard",

@@ -1,6 +1,5 @@
 mod actions;
 mod ai;
-mod diff;
 mod file_ops;
 mod input;
 mod lsp;
@@ -46,14 +45,6 @@ enum ClipboardType {
     Linewise,
     /// Produced by `yw`/`y$`/visual-y etc — paste inserts inline at cursor.
     Charwise,
-}
-
-/// A line in an LCS-based unified diff.
-#[derive(Debug, Clone)]
-pub enum DiffLine {
-    Context(String),
-    Added(String),
-    Removed(String),
 }
 
 /// Cached syntax-highlight spans for the visible viewport.
@@ -125,15 +116,6 @@ struct SplitState {
     right_focused: bool,
     /// Per-viewport highlight cache for the inactive (background) pane.
     highlight_cache: Option<HighlightCache>,
-}
-
-/// State for the apply-diff overlay (Mode::ApplyDiff).
-#[derive(Default)]
-struct ApplyDiffState {
-    path: Option<std::path::PathBuf>,
-    content: Option<String>,
-    lines: Vec<DiffLine>,
-    scroll: usize,
 }
 
 /// State for the commit message generation popup (Mode::CommitMsg).
@@ -290,9 +272,6 @@ pub struct Editor {
     /// Toggled by `i` in Mode::Explorer; cleared when focus leaves the explorer.
     show_file_info: bool,
 
-    // ── Apply-diff overlay (Mode::ApplyDiff) ──────────────────────────────────
-    apply_diff: ApplyDiffState,
-
     // ── Vertical split ────────────────────────────────────────────────────────
     split: SplitState,
 
@@ -416,7 +395,6 @@ impl Editor {
             new_folder_buffer: String::new(),
             new_folder_parent: None,
             show_file_info: false,
-            apply_diff: ApplyDiffState::default(),
             split: SplitState::default(),
             commit_msg: CommitMsgState { from_staged: true, ..Default::default() },
             release_notes: ReleaseNotesState {
@@ -1436,22 +1414,6 @@ impl Editor {
         };
         let delete_name = delete_path_owned.as_deref();
 
-        let apply_diff_target_owned: Option<String> = if mode == Mode::ApplyDiff {
-            Some(
-                self.apply_diff
-                    .path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(unsaved buffer)".to_string()),
-            )
-        } else {
-            None
-        };
-        let apply_diff_view = apply_diff_target_owned.as_ref().map(|t| crate::ui::ApplyDiffView {
-            target: t.as_str(),
-            lines: &self.apply_diff.lines,
-            scroll: self.apply_diff.scroll,
-        });
         let commit_msg_buf =
             if mode == Mode::CommitMsg { Some(self.commit_msg.buffer.as_str()) } else { None };
 
@@ -1570,7 +1532,6 @@ impl Editor {
                 rename_buffer: rename_buf,
                 delete_name,
                 new_folder_buffer: new_folder_buf,
-                apply_diff: apply_diff_view.as_ref(),
                 split_buffer_data: split_buffer_data.as_ref(),
                 split_highlighted_lines: split_hl_ref,
                 split_right_focused,
