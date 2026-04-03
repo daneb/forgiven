@@ -116,7 +116,7 @@ impl SpecSlicer {
     /// Splits by `## ` headings. Scores each section by keyword overlap with
     /// the task title. Returns the three highest-scoring matches (minimum score
     /// of 1 required — at least one keyword must match).
-    pub fn slice_spec<'a>(spec_md: &'a str, task: &ActiveTask) -> Vec<SpecSection> {
+    pub fn slice_spec(spec_md: &str, task: &ActiveTask) -> Vec<SpecSection> {
         let keywords = extract_keywords(&task.title);
         if keywords.is_empty() {
             return vec![];

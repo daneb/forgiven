@@ -83,11 +83,12 @@ fn infer_ollama_context_window(name: &str) -> u32 {
     let n = name.to_lowercase();
     if n.contains("qwen2.5") || n.contains("qwen3") {
         32_768
-    } else if n.contains("deepseek") {
-        131_072
-    } else if n.contains("llama3") || n.contains("llama-3") {
-        131_072
-    } else if n.contains("gemma3") || n.contains("gemma-3") {
+    } else if n.contains("deepseek")
+        || n.contains("llama3")
+        || n.contains("llama-3")
+        || n.contains("gemma3")
+        || n.contains("gemma-3")
+    {
         131_072
     } else if n.contains("phi4") || n.contains("phi-4") {
         16_384
