@@ -16,9 +16,11 @@ mod agentic_loop;
 mod auth;
 mod models;
 mod panel;
+pub mod provider;
 pub mod tools;
 use auth::CopilotApiToken;
-pub use auth::{acquire_copilot_token, one_shot_complete};
+pub use auth::acquire_copilot_token;
+pub use provider::ProviderKind;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -246,6 +248,17 @@ pub struct AtPickerState {
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
+    /// Active provider.  Set at startup from config; never changed at runtime.
+    pub provider: ProviderKind,
+    /// Base URL of the Ollama server (e.g. `"http://localhost:11434"`).
+    /// Only used when `provider == ProviderKind::Ollama`.
+    pub ollama_base_url: String,
+    /// Explicit `num_ctx` for Ollama requests.  Pins the active KV-cache size
+    /// on the server so history truncation and Ollama are in sync.
+    pub ollama_context_length: Option<u32>,
+    /// Whether to enable tool calling for Ollama (default: false).
+    /// Set from `[provider.ollama] tool_calls = true` in config.
+    pub ollama_tool_calls: bool,
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub scroll: usize,

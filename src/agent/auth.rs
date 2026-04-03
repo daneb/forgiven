@@ -67,56 +67,6 @@ pub async fn acquire_copilot_token() -> Result<String> {
     Ok(api_token.token)
 }
 
-/// Single non-streaming Copilot completion — for short one-shot tasks such as
-/// generating a commit message. Returns the assistant reply as a plain `String`.
-pub async fn one_shot_complete(
-    api_token: &str,
-    model_id: &str,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-) -> Result<String> {
-    let body = serde_json::json!({
-        "model": model_id,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user",   "content": user   }
-        ],
-        "stream": false,
-        "temperature": 0.3,
-        "max_tokens": max_tokens
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap_or_default();
-    let resp = client
-        .post("https://api.githubcopilot.com/chat/completions")
-        .header("Authorization", format!("Bearer {api_token}"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("Copilot-Integration-Id", "vscode-chat")
-        .header("editor-version", "forgiven/0.1.0")
-        .header("editor-plugin-version", "forgiven-copilot/0.1.0")
-        .header("openai-intent", "conversation-panel")
-        .header("User-Agent", "forgiven/0.1.0")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("one_shot_complete: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Copilot API error ({status}): {text}"));
-    }
-
-    let val: serde_json::Value =
-        resp.json().await.context("one_shot_complete: response not JSON")?;
-    let content = val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
-    Ok(content)
-}
 
 pub(super) async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
     let client = reqwest::Client::builder()

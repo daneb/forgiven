@@ -436,7 +436,7 @@ impl Editor {
                 let panel = &mut self.agent_panel;
                 let max_rounds = self.config.max_agent_rounds;
                 let warning_threshold = self.config.agent_warning_threshold;
-                let preferred_model = self.config.default_copilot_model.clone();
+                let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.

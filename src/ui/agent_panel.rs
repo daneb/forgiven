@@ -96,8 +96,19 @@ impl UI {
                         continue;
                     }
                     let (label, color) = match msg.role {
-                        Role::User => ("🧑 You", Color::Green),
-                        Role::Assistant => ("🤖 Copilot", Color::Cyan),
+                        Role::User => (
+                            format!("{} You", panel.provider.user_emoji()),
+                            Color::Green,
+                        ),
+                        Role::Assistant => {
+                            let name = panel.ai_label_name();
+                            let emoji = panel.provider.ai_emoji();
+                            let color = match panel.provider {
+                                ProviderKind::Copilot => Color::Cyan,
+                                ProviderKind::Ollama => Color::Magenta,
+                            };
+                            (format!("{emoji} {name}"), color)
+                        },
                         Role::System => unreachable!(),
                     };
                     ml.push(Line::from(vec![Span::styled(
@@ -127,10 +138,19 @@ impl UI {
             // — Streaming reply —
             if cache.streaming_len != cur_streaming_len || cache.streaming_width != content_width {
                 if let Some(ref partial) = panel.streaming_reply {
+                    // Provider-aware streaming header:
+                    //   Copilot → "╔ 🤖 Copilot ▋"  (cyan)
+                    //   Ollama  → "╔ 🦙 qwen2.5-coder ▋"  (magenta, model name)
+                    let stream_label =
+                        format!("╔ {} {} ", panel.provider.ai_emoji(), panel.ai_label_name());
+                    let stream_color = match panel.provider {
+                        ProviderKind::Copilot => Color::Cyan,
+                        ProviderKind::Ollama => Color::Magenta,
+                    };
                     let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
                         Span::styled(
-                            "╔ 🤖 Copilot ",
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            stream_label,
+                            Style::default().fg(stream_color).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             "▋",
@@ -207,8 +227,10 @@ impl UI {
             Span::raw("")
         };
 
+        let panel_title =
+            format!(" {} [{model_label}]", panel.provider.display_name());
         let title_line = Line::from(vec![
-            Span::raw(format!(" Copilot Chat [{model_label}]")),
+            Span::raw(panel_title),
             token_span,
             Span::raw(format!("{status_suffix}{scroll_suffix}")),
         ]);

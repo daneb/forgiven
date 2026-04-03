@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{KeyCode, KeyEvent},
     execute,
@@ -7,8 +7,88 @@ use crossterm::{
 use tokio::sync::oneshot;
 
 use super::Editor;
+use crate::agent::ProviderKind;
 use crate::keymap::Mode;
 use crate::lsp::LspManager;
+
+// =============================================================================
+// Provider-aware one-shot completion
+// =============================================================================
+
+/// Non-streaming single-turn completion using the active provider.
+///
+/// Used for short generation tasks (commit messages, release notes) that don't
+/// need the full agentic loop.  Acquires a Copilot token when needed; for Ollama
+/// uses the OpenAI-compatible endpoint with no auth.
+async fn one_shot_with_provider(
+    provider: &ProviderKind,
+    ollama_base_url: &str,
+    model_id: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String> {
+    let (api_token, endpoint, need_copilot_headers) = match provider {
+        ProviderKind::Copilot => {
+            let token = crate::agent::acquire_copilot_token().await?;
+            (token, "https://api.githubcopilot.com/chat/completions".to_string(), true)
+        },
+        ProviderKind::Ollama => {
+            (String::new(), format!("{ollama_base_url}/v1/chat/completions"), false)
+        },
+    };
+
+    let body = serde_json::json!({
+        "model": model_id,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user",   "content": user   }
+        ],
+        "stream": false,
+        "temperature": 0.3,
+        "max_tokens": max_tokens
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_default();
+
+    let mut req = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "forgiven/0.1.0");
+
+    if !api_token.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_token}"));
+    }
+    if need_copilot_headers {
+        req = req
+            .header("Copilot-Integration-Id", "vscode-chat")
+            .header("editor-version", "forgiven/0.1.0")
+            .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+            .header("openai-intent", "conversation-panel");
+    }
+
+    let resp = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("one_shot_with_provider: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("{} API error ({status}): {text}", provider.display_name()));
+    }
+
+    let val: serde_json::Value =
+        resp.json().await.context("one_shot_with_provider: response not JSON")?;
+    let content =
+        val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    Ok(content)
+}
 
 // =============================================================================
 // Free functions
@@ -218,8 +298,10 @@ impl Editor {
 
         let model_id = self
             .agent_panel
-            .selected_model_id_with_fallback(&self.config.default_copilot_model)
+            .selected_model_id_with_fallback(self.config.active_default_model())
             .to_string();
+        let provider_kind = self.agent_panel.provider.clone();
+        let ollama_base_url = self.agent_panel.ollama_base_url.clone();
 
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -229,11 +311,9 @@ impl Editor {
                 then an optional bullet-point body with the key changes. \
                 No preamble, no explanation, just the commit message.";
             let user = format!("Write a commit message for this diff:\n\n```\n{diff_text}\n```");
-            let result = async {
-                let api_token = crate::agent::acquire_copilot_token().await?;
-                crate::agent::one_shot_complete(&api_token, &model_id, system, &user, 256).await
-            }
-            .await;
+            let result =
+                one_shot_with_provider(&provider_kind, &ollama_base_url, &model_id, system, &user, 256)
+                    .await;
             let _ = tx.send(result);
         });
 
@@ -326,8 +406,10 @@ impl Editor {
 
         let model_id = self
             .agent_panel
-            .selected_model_id_with_fallback(&self.config.default_copilot_model)
+            .selected_model_id_with_fallback(self.config.active_default_model())
             .to_string();
+        let provider_kind = self.agent_panel.provider.clone();
+        let ollama_base_url = self.agent_panel.ollama_base_url.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let system = "You are a technical writer creating release notes for a software project. \
@@ -338,11 +420,9 @@ impl Editor {
             let user = format!(
                 "Generate release notes from these {count} commits:\n\n```\n{log_text}\n```"
             );
-            let result = async {
-                let api_token = crate::agent::acquire_copilot_token().await?;
-                crate::agent::one_shot_complete(&api_token, &model_id, system, &user, 1024).await
-            }
-            .await;
+            let result =
+                one_shot_with_provider(&provider_kind, &ollama_base_url, &model_id, system, &user, 1024)
+                    .await;
             let _ = tx.send(result);
         });
 

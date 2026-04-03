@@ -105,6 +105,124 @@ pub struct LspConfig {
     pub servers: Vec<LspServerConfig>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-provider settings for GitHub Copilot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CopilotProviderConfig {
+    /// Preferred model ID (e.g. `"claude-sonnet-4"`, `"gpt-5.1"`).
+    /// Falls back to `"claude-sonnet-4"` if not set or no longer available.
+    #[serde(default = "default_copilot_model")]
+    pub default_model: String,
+}
+
+impl Default for CopilotProviderConfig {
+    fn default() -> Self {
+        Self { default_model: default_copilot_model() }
+    }
+}
+
+/// Per-provider settings for a local Ollama server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OllamaProviderConfig {
+    /// Base URL of the Ollama server.
+    ///
+    /// Default: `"http://localhost:11434"`.
+    /// Override to reach a remote Ollama instance (e.g. `"http://192.168.1.10:11434"`).
+    #[serde(default = "default_ollama_base_url")]
+    pub base_url: String,
+    /// Preferred Ollama model tag (e.g. `"qwen2.5-coder:14b"`, `"llama3.3:latest"`).
+    /// Must match a tag returned by `ollama list` on the server.
+    #[serde(default = "default_ollama_model")]
+    pub default_model: String,
+    /// Active context-window size in tokens sent to Ollama as `options.num_ctx`.
+    ///
+    /// Without this, Ollama may use a server default as low as 4 096 tokens.
+    /// Recommended values:
+    ///
+    /// | RAM   | Model | `context_length` |
+    /// |-------|-------|-----------------|
+    /// | 16 GB | 14 B  | 32768           |
+    /// | 24 GB | 14 B  | 65536           |
+    ///
+    /// Omit to let Ollama choose (uses `OLLAMA_CONTEXT_LENGTH` env var or its
+    /// own default, which may be very small for older versions).
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    /// Enable the agentic tool-calling loop for Ollama.
+    ///
+    /// Defaults to `false`.  Tool-calling behaviour varies widely across Ollama
+    /// model versions — many models emit calls as raw JSON text instead of the
+    /// structured OpenAI `tool_calls` delta format, which breaks the loop and
+    /// shows garbled JSON in the panel.
+    ///
+    /// Enable only for models you have verified support it:
+    /// ```toml
+    /// [provider.ollama]
+    /// tool_calls = true   # requires qwen2.5-coder:14b + Ollama ≥ 0.5
+    /// ```
+    #[serde(default)]
+    pub tool_calls: bool,
+}
+
+impl Default for OllamaProviderConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_ollama_base_url(),
+            default_model: default_ollama_model(),
+            context_length: None,
+            tool_calls: false,
+        }
+    }
+}
+
+/// Top-level provider selection block (`[provider]` in `config.toml`).
+///
+/// Example:
+/// ```toml
+/// [provider]
+/// active = "ollama"
+///
+/// [provider.ollama]
+/// base_url       = "http://localhost:11434"
+/// default_model  = "qwen2.5-coder:14b"
+/// context_length = 32768
+///
+/// [provider.copilot]
+/// default_model = "claude-sonnet-4"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProviderConfig {
+    /// Which provider to use: `"copilot"` (default) or `"ollama"`.
+    /// Only one provider is active at a time; switching requires a restart.
+    #[serde(default = "default_provider_active")]
+    pub active: String,
+    /// Copilot-specific settings.
+    #[serde(default)]
+    pub copilot: CopilotProviderConfig,
+    /// Ollama-specific settings.
+    #[serde(default)]
+    pub ollama: OllamaProviderConfig,
+}
+
+fn default_provider_active() -> String {
+    "copilot".to_string()
+}
+
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "qwen2.5-coder:14b".to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent config
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Configuration for the agent panel.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentConfig {
@@ -147,8 +265,14 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub agent: AgentConfig,
-    /// Preferred Copilot model ID (e.g., "claude-sonnet-4", "gpt-5.1", "gemini-2.5-pro").
-    /// Falls back to "claude-sonnet-4" if not set or if the model is no longer available.
+    /// Active provider and per-provider settings.
+    /// See [`ProviderConfig`] for the full TOML schema.
+    #[serde(default)]
+    pub provider: ProviderConfig,
+    /// Preferred Copilot model ID — kept for backwards compatibility with configs
+    /// that predate the `[provider]` block.  When `provider.active = "copilot"`,
+    /// this value seeds `provider.copilot.default_model` if the latter is absent.
+    /// Prefer setting `[provider.copilot] default_model` in new configs.
     #[serde(default = "default_copilot_model")]
     pub default_copilot_model: String,
     /// Maximum number of agentic tool-calling rounds before prompting the user.
@@ -184,6 +308,7 @@ impl Default for Config {
             lsp: LspConfig::default(),
             mcp: McpConfig::default(),
             agent: AgentConfig::default(),
+            provider: ProviderConfig::default(),
             default_copilot_model: default_copilot_model(),
             max_agent_rounds: default_max_agent_rounds(),
             agent_warning_threshold: default_agent_warning_threshold(),
@@ -192,6 +317,29 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Return the preferred model ID for the active provider.
+    ///
+    /// - For `"copilot"`: returns `provider.copilot.default_model`, falling back to
+    ///   the legacy `default_copilot_model` field for backwards-compatible configs.
+    /// - For `"ollama"`: returns `provider.ollama.default_model`.
+    pub fn active_default_model(&self) -> &str {
+        match self.provider.active.as_str() {
+            "ollama" => &self.provider.ollama.default_model,
+            _ => {
+                // Honour the legacy top-level field when the new nested field
+                // still holds its default ("claude-sonnet-4"), giving precedence
+                // to an explicit `[provider.copilot] default_model` setting.
+                let nested = &self.provider.copilot.default_model;
+                let legacy = &self.default_copilot_model;
+                if nested == "claude-sonnet-4" && legacy != "claude-sonnet-4" {
+                    legacy
+                } else {
+                    nested
+                }
+            },
+        }
+    }
+
     /// Load config from `~/.config/forgiven/config.toml`.
     /// Falls back to defaults silently if the file is missing; logs a warning on parse errors.
     pub fn load() -> Self {

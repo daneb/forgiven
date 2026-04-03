@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
     let t0 = Instant::now();
 
     let config = Config::load();
-    let mut editor = Editor::new(config)?;
+    let mut editor = Editor::new(config.clone())?;
     editor.log_buffer = log_buf;
 
     // Open any files passed on the command line
@@ -167,6 +167,17 @@ async fn main() -> Result<()> {
     // Start LSP + MCP servers concurrently (each group also starts its members in parallel).
     editor.render_loading("starting services…")?;
     editor.setup_services().await;
+
+    // Pre-warm the Ollama model into RAM so the user's first message is fast.
+    // Runs in the background — startup is not blocked on model load completion.
+    // Pre-warm the Ollama model into RAM so the user's first message is fast.
+    // Runs in the background — startup is not blocked on model load completion.
+    if config.provider.active == "ollama" {
+        let base_url = config.provider.ollama.base_url.clone();
+        let model = config.provider.ollama.default_model.clone();
+        tracing::info!("[ollama] background warmup started for model={model:?}");
+        tokio::spawn(crate::agent::provider::warmup_ollama(base_url, model));
+    }
 
     editor.startup_elapsed = Some(t0.elapsed());
     tracing::info!("startup: total ready in {}ms", t0.elapsed().as_millis());

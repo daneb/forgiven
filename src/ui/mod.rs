@@ -9,8 +9,8 @@ use ratatui::{
 use std::path::PathBuf;
 
 use crate::agent::{
-    split_thinking, AgentPanel, AgentTask, AskUserState, AtPickerState, ContentSegment, Role,
-    SlashMenuState,
+    split_thinking, AgentPanel, AgentTask, AskUserState, AtPickerState, ContentSegment,
+    ProviderKind, Role, SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
 use crate::editor::{DiffLine, HoverPopupState, LocationListState};

@@ -391,6 +391,10 @@ impl Editor {
                 let mut panel = AgentPanel::new();
                 panel.spec_framework =
                     spec_framework::load_from_config(&config.agent.spec_framework);
+                panel.provider = crate::agent::ProviderKind::from_str(&config.provider.active);
+                panel.ollama_base_url = config.provider.ollama.base_url.clone();
+                panel.ollama_context_length = config.provider.ollama.context_length;
+                panel.ollama_tool_calls = config.provider.ollama.tool_calls;
                 panel
             },
             clipboard: None::<(String, ClipboardType)>,

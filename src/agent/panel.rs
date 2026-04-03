@@ -7,7 +7,8 @@ use tracing::{info, warn};
 
 use super::agentic_loop::agentic_loop;
 use super::auth::{exchange_token, load_oauth_token};
-use super::models::fetch_models;
+use super::models::{fetch_models, fetch_models_ollama};
+use super::provider::{ProviderKind, ProviderSettings};
 use super::{
     append_session_metric, AgentPanel, AgentStatus, AgentTask, AskUserState, ChatMessage,
     ClipboardImage, ModelVersion, Role, SlashMenuState, StreamEvent, SubmitCtx,
@@ -70,6 +71,10 @@ impl AgentPanel {
         Self {
             visible: false,
             focused: false,
+            provider: ProviderKind::Copilot,
+            ollama_base_url: "http://localhost:11434".to_string(),
+            ollama_context_length: None,
+            ollama_tool_calls: false,
             messages: Vec::new(),
             input: String::new(),
             scroll: 0,
@@ -153,45 +158,96 @@ impl AgentPanel {
         }
     }
 
-    /// Ensure the model list is populated.  Fetches from /models if it hasn't
-    /// been loaded yet.  Safe to call multiple times — no-op after first load.
+    /// Human-readable name placed after the AI emoji in message headers.
+    ///
+    /// - Copilot: `"Copilot"`
+    /// - Ollama: model base name without the tag (e.g. `"qwen2.5-coder"`)
+    pub fn ai_label_name(&self) -> String {
+        match self.provider {
+            ProviderKind::Copilot => "Copilot".to_string(),
+            ProviderKind::Ollama => {
+                // "qwen2.5-coder:14b" → "qwen2.5-coder"
+                self.selected_model_id()
+                    .split(':')
+                    .next()
+                    .unwrap_or("Ollama")
+                    .to_string()
+            },
+        }
+    }
+
+    /// Ensure the model list is populated.  Fetches from the active provider's
+    /// model endpoint if not yet loaded.  Safe to call multiple times — no-op
+    /// after first load.
     pub async fn ensure_models(&mut self, preferred_model: &str) -> Result<()> {
         if !self.available_models.is_empty() {
             return Ok(());
         }
-        let api_token = self.ensure_token().await?;
-        match fetch_models(&api_token).await {
-            Ok(models) if !models.is_empty() => {
-                self.set_models(models, preferred_model);
+        match self.provider.clone() {
+            ProviderKind::Copilot => {
+                let api_token = self.ensure_token().await?;
+                match fetch_models(&api_token).await {
+                    Ok(models) if !models.is_empty() => self.set_models(models, preferred_model),
+                    Ok(_) => warn!("Copilot /models returned an empty list"),
+                    Err(e) => return Err(e),
+                }
             },
-            Ok(_) => warn!("Copilot /models returned an empty list"),
-            Err(e) => return Err(e),
+            ProviderKind::Ollama => {
+                let base_url = self.ollama_base_url.clone();
+                let ctx = self.ollama_context_length;
+                match fetch_models_ollama(&base_url, ctx).await {
+                    Ok(models) if !models.is_empty() => self.set_models(models, preferred_model),
+                    Ok(_) => warn!("Ollama /api/tags returned an empty model list"),
+                    Err(e) => return Err(e),
+                }
+            },
         }
         Ok(())
     }
 
-    /// Refresh the model list from the API, preserving the current selection if possible.
-    /// Use this to pick up newly released models or remove deprecated ones.
+    /// Refresh the model list from the active provider, preserving the current
+    /// selection if possible.  Use this to pick up newly pulled Ollama models
+    /// or newly released Copilot models without restarting.
     pub async fn refresh_models(&mut self, preferred_model: &str) -> Result<()> {
         let current_id = if !self.available_models.is_empty() {
             Some(self.available_models[self.selected_model].id.clone())
         } else {
             None
         };
+        let preferred = current_id.as_deref().unwrap_or(preferred_model);
 
-        let api_token = self.ensure_token().await?;
-        match fetch_models(&api_token).await {
-            Ok(models) if !models.is_empty() => {
-                let preferred = current_id.as_deref().unwrap_or(preferred_model);
-                self.set_models(models, preferred);
-                info!(
-                    "Refreshed model list, selected: {} ({})",
-                    self.selected_model_display(),
-                    self.selected_model_id()
-                );
+        match self.provider.clone() {
+            ProviderKind::Copilot => {
+                let api_token = self.ensure_token().await?;
+                match fetch_models(&api_token).await {
+                    Ok(models) if !models.is_empty() => {
+                        self.set_models(models, preferred);
+                        info!(
+                            "Refreshed Copilot model list, selected: {} ({})",
+                            self.selected_model_display(),
+                            self.selected_model_id()
+                        );
+                    },
+                    Ok(_) => warn!("Copilot /models returned an empty list"),
+                    Err(e) => return Err(e),
+                }
             },
-            Ok(_) => warn!("Copilot /models returned an empty list"),
-            Err(e) => return Err(e),
+            ProviderKind::Ollama => {
+                let base_url = self.ollama_base_url.clone();
+                let ctx = self.ollama_context_length;
+                match fetch_models_ollama(&base_url, ctx).await {
+                    Ok(models) if !models.is_empty() => {
+                        self.set_models(models, preferred);
+                        info!(
+                            "Refreshed Ollama model list, selected: {} ({})",
+                            self.selected_model_display(),
+                            self.selected_model_id()
+                        );
+                    },
+                    Ok(_) => warn!("Ollama /api/tags returned an empty list"),
+                    Err(e) => return Err(e),
+                }
+            },
         }
         Ok(())
     }
@@ -454,17 +510,57 @@ impl AgentPanel {
         // even on the very first message of a session (Fix for ADR 0087 §2).
         let api_token = self.ensure_token().await?;
         if self.available_models.is_empty() {
-            match fetch_models(&api_token).await {
-                Ok(models) if !models.is_empty() => {
-                    info!("Fetched {} models from Copilot API", models.len());
-                    self.set_models(models, preferred_model);
+            match self.provider.clone() {
+                ProviderKind::Copilot => {
+                    match fetch_models(&api_token).await {
+                        Ok(models) if !models.is_empty() => {
+                            info!("Fetched {} models from Copilot API", models.len());
+                            self.set_models(models, preferred_model);
+                        },
+                        Ok(_) => warn!("Copilot /models returned an empty list"),
+                        Err(e) => warn!("Could not fetch Copilot model list: {e}"),
+                    }
                 },
-                Ok(_) => warn!("Copilot /models returned an empty list"),
-                Err(e) => warn!("Could not fetch Copilot model list: {e}"),
+                ProviderKind::Ollama => {
+                    let base_url = self.ollama_base_url.clone();
+                    let ctx = self.ollama_context_length;
+                    match fetch_models_ollama(&base_url, ctx).await {
+                        Ok(models) if !models.is_empty() => {
+                            info!("Fetched {} models from Ollama", models.len());
+                            self.set_models(models, preferred_model);
+                        },
+                        Ok(_) => warn!("Ollama /api/tags returned an empty list"),
+                        Err(e) => warn!("Could not fetch Ollama model list: {e}"),
+                    }
+                },
             }
         }
         let model_id = self.selected_model_id().to_string();
         self.last_submit_model = model_id.clone();
+
+        // ── Build provider settings for this invocation ──────────────────────
+        let chat_endpoint = match self.provider {
+            ProviderKind::Copilot => {
+                "https://api.githubcopilot.com/chat/completions".to_string()
+            },
+            ProviderKind::Ollama => {
+                format!("{}/v1/chat/completions", self.ollama_base_url)
+            },
+        };
+        let provider_settings = ProviderSettings {
+            kind: self.provider.clone(),
+            api_token: api_token.clone(),
+            chat_endpoint,
+            num_ctx: if self.provider == ProviderKind::Ollama {
+                self.ollama_context_length
+            } else {
+                None
+            },
+            supports_tool_calls: match self.provider {
+                ProviderKind::Copilot => true,
+                ProviderKind::Ollama => self.ollama_tool_calls,
+            },
+        };
 
         let root_display = project_root.display().to_string();
 
@@ -721,7 +817,7 @@ Available tools:\n\
 
         let mcp = self.mcp_manager.as_ref().map(Arc::clone);
         tokio::spawn(agentic_loop(
-            api_token,
+            provider_settings,
             send_messages,
             project_root,
             tx,
@@ -1209,6 +1305,10 @@ Available tools:\n\
     }
 
     async fn ensure_token(&mut self) -> Result<String> {
+        // Ollama uses no authentication — return an empty token immediately.
+        if self.provider != ProviderKind::Copilot {
+            return Ok(String::new());
+        }
         if let Some(ref t) = self.token {
             if !t.is_expired() {
                 info!("Using cached token, expires at: {}", t.expires_at);

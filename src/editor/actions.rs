@@ -481,7 +481,7 @@ Skip anything already obvious from reading the code.";
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 let max_rounds = self.config.max_agent_rounds;
                 let warning_threshold = self.config.agent_warning_threshold;
-                let preferred_model = self.config.default_copilot_model.clone();
+                let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
                 let fut = self.agent_panel.submit(
                     None,

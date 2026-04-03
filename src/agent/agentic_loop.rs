@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::mcp::McpManager;
 
 use super::auth::{exchange_token, load_oauth_token, TokenExpiredError};
+use super::provider::{ProviderKind, ProviderSettings};
 use super::tools;
 use super::StreamEvent;
 
@@ -89,7 +90,7 @@ async fn maybe_compress(result: String, tool_name: &str, mcp: &crate::mcp::McpMa
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn agentic_loop(
-    mut api_token: String,
+    mut provider: ProviderSettings,
     mut messages: Vec<serde_json::Value>,
     project_root: PathBuf,
     tx: mpsc::UnboundedSender<StreamEvent>,
@@ -103,17 +104,29 @@ pub(super) async fn agentic_loop(
     auto_compress: bool,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
-    let mut tool_defs = tools::tool_definitions();
-    if let Some(ref mcp) = mcp_manager {
-        let mcp_tools = mcp.tool_definitions();
-        if !mcp_tools.is_empty() {
-            info!("Agentic loop: adding {} MCP tools", mcp_tools.len());
-            tool_defs
-                .as_array_mut()
-                .expect("tool_definitions() always returns a JSON array")
-                .extend(mcp_tools);
+    // When the provider does not support tool calling (e.g. Ollama with an
+    // unverified model), send an empty list so the model never attempts to
+    // output tool calls — many local models emit calls as raw JSON text rather
+    // than the structured OpenAI tool_calls delta, which would pollute the panel.
+    let tool_defs = if provider.supports_tool_calls {
+        let mut defs = tools::tool_definitions();
+        if let Some(ref mcp) = mcp_manager {
+            let mcp_tools = mcp.tool_definitions();
+            if !mcp_tools.is_empty() {
+                info!("Agentic loop: adding {} MCP tools", mcp_tools.len());
+                defs.as_array_mut()
+                    .expect("tool_definitions() always returns a JSON array")
+                    .extend(mcp_tools);
+            }
         }
-    }
+        defs
+    } else {
+        info!(
+            "Agentic loop: tool calling disabled for {} — running in chat-only mode",
+            provider.kind.display_name()
+        );
+        serde_json::Value::Array(vec![])
+    };
 
     // Use a manual counter so we can extend the limit when the user approves
     // continuation. A `for round in 0..max_rounds` loop cannot be extended
@@ -154,7 +167,7 @@ pub(super) async fn agentic_loop(
                 return;
             }
             res = start_chat_stream_with_tools(
-                api_token.clone(),
+                &provider,
                 messages.clone(),
                 tool_defs.clone(),
                 &model_id,
@@ -162,18 +175,21 @@ pub(super) async fn agentic_loop(
             ) => res,
         };
 
-        // On token expiry: refresh the API token once and retry the call.  A second
-        // 401 after a fresh token means a genuine auth failure — surface it as an error.
+        // On token expiry (Copilot only): refresh the API token once and retry the
+        // call.  A second 401 after a fresh token means a genuine auth failure.
+        // Ollama uses no auth so it never returns TokenExpiredError.
         let api_result = match api_result {
-            Err(ref e) if e.is::<TokenExpiredError>() => {
+            Err(ref e)
+                if e.is::<TokenExpiredError>() && provider.kind == ProviderKind::Copilot =>
+            {
                 warn!("API token expired mid-session — refreshing and retrying this round");
                 match load_oauth_token() {
                     Ok(oauth) => match exchange_token(&oauth).await {
                         Ok(new_tok) => {
                             info!("Token refreshed successfully");
-                            api_token = new_tok.token;
+                            provider.api_token = new_tok.token;
                             start_chat_stream_with_tools(
-                                api_token.clone(),
+                                &provider,
                                 messages.clone(),
                                 tool_defs.clone(),
                                 &model_id,
@@ -202,12 +218,14 @@ pub(super) async fn agentic_loop(
         let mut partial_tools: HashMap<usize, tools::PartialToolCall> = HashMap::new();
         let mut sse_buf = String::new();
         let mut byte_stream = response.bytes_stream();
-        const STREAM_TIMEOUT_SECS: u64 = 60; // Timeout if no data for 60 seconds
+        // Per-provider chunk timeout: local Ollama is fast once warm; cloud
+        // needs more headroom for network jitter.
+        let chunk_timeout_secs = provider.chunk_timeout_secs();
 
         'sse: loop {
             // Wrap stream read in timeout to detect stalled connections
             let item = match tokio::time::timeout(
-                tokio::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
+                tokio::time::Duration::from_secs(chunk_timeout_secs),
                 byte_stream.next(),
             )
             .await
@@ -215,9 +233,9 @@ pub(super) async fn agentic_loop(
                 Ok(Some(result)) => result,
                 Ok(None) => break 'sse, // Stream ended normally
                 Err(_) => {
-                    warn!("Stream timeout after {STREAM_TIMEOUT_SECS}s with no data");
+                    warn!("Stream timeout after {chunk_timeout_secs}s with no data");
                     let _ = tx
-                        .send(StreamEvent::Error("Stream stalled - no data received".to_string()));
+                        .send(StreamEvent::Error("Stream stalled — no data received".to_string()));
                     break 'sse;
                 },
             };
@@ -640,51 +658,87 @@ pub(super) async fn agentic_loop(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(super) async fn start_chat_stream_with_tools(
-    api_token: String,
+    provider: &ProviderSettings,
     messages: Vec<serde_json::Value>,
     tools: serde_json::Value,
     model_id: &str,
     tx: &mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<reqwest::Response> {
-    info!("Sending completion request with model_id={model_id:?}");
-    let body = serde_json::json!({
+    info!(
+        "Sending completion request model={model_id:?} provider={}",
+        provider.kind.display_name()
+    );
+
+    // ── Build request body ────────────────────────────────────────────────────
+    let mut body = serde_json::json!({
         "model": model_id,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "stream": true,
-        "stream_options": { "include_usage": true },
         "n": 1,
         "temperature": 0.1,
         "max_tokens": 4096
     });
 
+    // Only attach tool definitions and tool_choice when the provider can use them.
+    // Sending an empty tools array with tool_choice="auto" can confuse some models.
+    if provider.supports_tool_calls {
+        body["tools"] = tools;
+        body["tool_choice"] = serde_json::json!("auto");
+    }
+
+    // stream_options is OpenAI/Copilot-specific — omit for Ollama to avoid
+    // breaking older server versions that reject unknown fields.
+    if provider.supports_stream_usage() {
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+
+    // Ollama: pin the active KV-cache size.  Without this, Ollama may use a
+    // server default as low as 4 096 tokens, silently ignoring the context window
+    // reported by /api/tags and truncating long conversations.
+    if let Some(num_ctx) = provider.num_ctx {
+        body["options"] = serde_json::json!({ "num_ctx": num_ctx });
+    }
+
+    // ── HTTP client ───────────────────────────────────────────────────────────
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(provider.connect_timeout_secs()))
         .build()
         .unwrap_or_default();
+
     let mut retry_attempts = 0;
-    let max_retries = 5;
+    let max_retries = provider.max_retries();
     let mut delay = tokio::time::Duration::from_secs(1);
 
     loop {
-        let resp = client
-            .post("https://api.githubcopilot.com/chat/completions")
-            .header("Authorization", format!("Bearer {api_token}"))
+        // ── Build request with provider-specific headers ──────────────────────
+        let mut req = client
+            .post(&provider.chat_endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("Copilot-Integration-Id", "vscode-chat")
-            .header("editor-version", "forgiven/0.1.0")
-            .header("editor-plugin-version", "forgiven-copilot/0.1.0")
-            .header("openai-intent", "conversation-panel")
-            .header("User-Agent", "forgiven/0.1.0")
-            .json(&body)
-            .send()
-            .await;
+            .header("User-Agent", "forgiven/0.1.0");
+
+        if provider.requires_auth() {
+            req = req.header("Authorization", format!("Bearer {}", provider.api_token));
+        }
+
+        // Copilot routing hints — unknown to Ollama and harmless to omit.
+        if provider.kind == ProviderKind::Copilot {
+            req = req
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .header("editor-version", "forgiven/0.1.0")
+                .header("editor-plugin-version", "forgiven-copilot/0.1.0")
+                .header("openai-intent", "conversation-panel");
+        }
+
+        let resp = req.json(&body).send().await;
 
         let failure_reason = match resp {
             Ok(response) if response.status().is_success() => {
-                info!("Copilot Chat stream started ({})", response.status());
+                info!(
+                    "{} stream started ({})",
+                    provider.kind.display_name(),
+                    response.status()
+                );
                 return Ok(response);
             },
             Ok(response) => {
@@ -695,26 +749,28 @@ pub(super) async fn start_chat_stream_with_tools(
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
-                let body = response.text().await.unwrap_or_default();
-                // 401 means the short-lived API token expired — caller will refresh and retry.
+                let body_text = response.text().await.unwrap_or_default();
+
+                // 401 — short-lived API token expired; caller will refresh and retry.
+                // (Only relevant for Copilot; Ollama never sends 401.)
                 if status.as_u16() == 401 {
                     return Err(anyhow::Error::new(TokenExpiredError));
                 }
+
                 if status.as_u16() == 429 {
-                    // If the server says to wait more than 2 minutes, the quota is likely
-                    // exhausted for the session — fail fast with a helpful message.
+                    // Quota exhausted — fail fast if the wait is impractical.
                     if retry_after_secs.unwrap_or(0) > 120 {
                         return Err(anyhow::anyhow!(
-                            "Copilot rate limit: quota exhausted (Retry-After: {}s). \
+                            "{} rate limit: quota exhausted (Retry-After: {}s). \
                              Try again later or switch models with Ctrl+T.",
+                            provider.kind.display_name(),
                             retry_after_secs.unwrap_or(0)
                         ));
                     }
-                    // Respect Retry-After if provided; otherwise fall through to exponential backoff.
                     if let Some(secs) = retry_after_secs {
                         delay = tokio::time::Duration::from_secs(secs);
                     }
-                    warn!("Rate limited (429), retrying after {}s: {body}", delay.as_secs());
+                    warn!("Rate limited (429), retrying after {}s: {body_text}", delay.as_secs());
                     let _ = tx.send(StreamEvent::Retrying {
                         attempt: retry_attempts + 1,
                         max: max_retries,
@@ -723,17 +779,22 @@ pub(super) async fn start_chat_stream_with_tools(
                     retry_attempts += 1;
                     if retry_attempts >= max_retries {
                         return Err(anyhow::anyhow!(
-                            "Max retries reached for Copilot Chat API (last error: HTTP 429 Too Many Requests)"
+                            "Max retries reached for {} (last error: HTTP 429 Too Many Requests)",
+                            provider.kind.display_name()
                         ));
                     }
                     delay *= 2;
                     continue;
                 }
+
                 // Other 4xx errors are permanent — don't retry.
                 if status.is_client_error() {
-                    return Err(anyhow::anyhow!("Copilot Chat API error ({status}): {body}"));
+                    return Err(anyhow::anyhow!(
+                        "{} API error ({status}): {body_text}",
+                        provider.kind.display_name()
+                    ));
                 }
-                warn!("Retrying due to API error ({status}): {body}");
+                warn!("Retrying due to API error ({status}): {body_text}");
                 format!("HTTP {status}")
             },
             Err(e) => {
@@ -745,12 +806,13 @@ pub(super) async fn start_chat_stream_with_tools(
         retry_attempts += 1;
         if retry_attempts >= max_retries {
             return Err(anyhow::anyhow!(
-                "Max retries reached for Copilot Chat API (last error: {failure_reason})"
+                "Max retries reached for {} (last error: {failure_reason})",
+                provider.kind.display_name()
             ));
         }
 
         let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts, max: max_retries });
         tokio::time::sleep(delay).await;
-        delay *= 2; // Exponential backoff
+        delay *= 2;
     }
 }
