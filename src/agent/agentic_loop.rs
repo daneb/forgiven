@@ -179,9 +179,7 @@ pub(super) async fn agentic_loop(
         // call.  A second 401 after a fresh token means a genuine auth failure.
         // Ollama uses no auth so it never returns TokenExpiredError.
         let api_result = match api_result {
-            Err(ref e)
-                if e.is::<TokenExpiredError>() && provider.kind == ProviderKind::Copilot =>
-            {
+            Err(ref e) if e.is::<TokenExpiredError>() && provider.kind == ProviderKind::Copilot => {
                 warn!("API token expired mid-session — refreshing and retrying this round");
                 match load_oauth_token() {
                     Ok(oauth) => match exchange_token(&oauth).await {
@@ -734,11 +732,7 @@ pub(super) async fn start_chat_stream_with_tools(
 
         let failure_reason = match resp {
             Ok(response) if response.status().is_success() => {
-                info!(
-                    "{} stream started ({})",
-                    provider.kind.display_name(),
-                    response.status()
-                );
+                info!("{} stream started ({})", provider.kind.display_name(), response.status());
                 return Ok(response);
             },
             Ok(response) => {

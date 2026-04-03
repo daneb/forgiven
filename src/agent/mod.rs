@@ -18,8 +18,8 @@ mod models;
 mod panel;
 pub mod provider;
 pub mod tools;
-use auth::CopilotApiToken;
 pub use auth::acquire_copilot_token;
+use auth::CopilotApiToken;
 pub use provider::ProviderKind;
 
 use std::path::PathBuf;

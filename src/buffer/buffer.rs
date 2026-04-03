@@ -956,11 +956,7 @@ impl Buffer {
         };
         let (start, end) = sel.normalized();
         let end_row = end.row.min(self.lines.len().saturating_sub(1));
-        let indent = if use_spaces {
-            " ".repeat(tab_width)
-        } else {
-            "\t".to_string()
-        };
+        let indent = if use_spaces { " ".repeat(tab_width) } else { "\t".to_string() };
         for row in start.row..=end_row {
             self.lines[row].insert_str(0, &indent);
         }

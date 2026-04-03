@@ -56,11 +56,7 @@ pub(super) async fn fetch_models_ollama(
                         .to_string();
                     // Display name: strip tag suffix for panel clarity.
                     // "qwen2.5-coder:14b" → "qwen2.5-coder"
-                    let display = name
-                        .split(':')
-                        .next()
-                        .unwrap_or(name.as_str())
-                        .to_string();
+                    let display = name.split(':').next().unwrap_or(name.as_str()).to_string();
                     Some(ModelVersion { id: name, version, name: display, context_window })
                 })
                 .collect()

@@ -71,11 +71,8 @@ async fn one_shot_with_provider(
             .header("openai-intent", "conversation-panel");
     }
 
-    let resp = req
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("one_shot_with_provider: {e}"))?;
+    let resp =
+        req.json(&body).send().await.map_err(|e| anyhow::anyhow!("one_shot_with_provider: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -85,8 +82,7 @@ async fn one_shot_with_provider(
 
     let val: serde_json::Value =
         resp.json().await.context("one_shot_with_provider: response not JSON")?;
-    let content =
-        val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    let content = val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
     Ok(content)
 }
 
@@ -311,9 +307,15 @@ impl Editor {
                 then an optional bullet-point body with the key changes. \
                 No preamble, no explanation, just the commit message.";
             let user = format!("Write a commit message for this diff:\n\n```\n{diff_text}\n```");
-            let result =
-                one_shot_with_provider(&provider_kind, &ollama_base_url, &model_id, system, &user, 256)
-                    .await;
+            let result = one_shot_with_provider(
+                &provider_kind,
+                &ollama_base_url,
+                &model_id,
+                system,
+                &user,
+                256,
+            )
+            .await;
             let _ = tx.send(result);
         });
 
@@ -420,9 +422,15 @@ impl Editor {
             let user = format!(
                 "Generate release notes from these {count} commits:\n\n```\n{log_text}\n```"
             );
-            let result =
-                one_shot_with_provider(&provider_kind, &ollama_base_url, &model_id, system, &user, 1024)
-                    .await;
+            let result = one_shot_with_provider(
+                &provider_kind,
+                &ollama_base_url,
+                &model_id,
+                system,
+                &user,
+                1024,
+            )
+            .await;
             let _ = tx.send(result);
         });
 

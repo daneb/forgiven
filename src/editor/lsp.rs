@@ -148,10 +148,7 @@ fn extract_hover_content(value: &serde_json::Value) -> String {
     if let Some(arr) = contents.as_array() {
         let parts: Vec<&str> = arr
             .iter()
-            .filter_map(|item| {
-                item.as_str()
-                    .or_else(|| item.get("value").and_then(|v| v.as_str()))
-            })
+            .filter_map(|item| item.as_str().or_else(|| item.get("value").and_then(|v| v.as_str())))
             .collect();
         return parts.join("\n\n");
     }
@@ -383,11 +380,8 @@ impl Editor {
 
     /// Apply a list of LSP TextEdits to a file, opening it if not already in a buffer.
     fn apply_text_edits(&mut self, path: &std::path::Path, edits: &[serde_json::Value]) {
-        let buf_idx = self
-            .buffers
-            .iter()
-            .position(|b| b.file_path.as_deref() == Some(path))
-            .or_else(|| {
+        let buf_idx =
+            self.buffers.iter().position(|b| b.file_path.as_deref() == Some(path)).or_else(|| {
                 self.open_file(path).ok()?;
                 Some(self.buffers.len().saturating_sub(1))
             });
@@ -418,10 +412,24 @@ impl Editor {
                 Some(r) => r,
                 None => continue,
             };
-            let sl = range.get("start").and_then(|s| s.get("line")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let sc = range.get("start").and_then(|s| s.get("character")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let el = range.get("end").and_then(|s| s.get("line")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let ec = range.get("end").and_then(|s| s.get("character")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let sl = range
+                .get("start")
+                .and_then(|s| s.get("line"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let sc = range
+                .get("start")
+                .and_then(|s| s.get("character"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let el =
+                range.get("end").and_then(|s| s.get("line")).and_then(|v| v.as_u64()).unwrap_or(0)
+                    as usize;
+            let ec = range
+                .get("end")
+                .and_then(|s| s.get("character"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             let new_text = match edit.get("newText").and_then(|v| v.as_str()) {
                 Some(t) => t,
                 None => continue,

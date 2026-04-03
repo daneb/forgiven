@@ -676,7 +676,11 @@ impl McpManager {
 fn mcp_summarise(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let head: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() { format!("{head}…") } else { head }
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 /// Connect to an MCP server using whichever transport the config specifies.

@@ -241,10 +241,8 @@ impl Renderer {
     // ── Table flush ───────────────────────────────────────────────────────────
 
     fn flush_table(&mut self) {
-        let n_cols = self
-            .table_header
-            .len()
-            .max(self.table_body.iter().map(|r| r.len()).max().unwrap_or(0));
+        let n_cols =
+            self.table_header.len().max(self.table_body.iter().map(|r| r.len()).max().unwrap_or(0));
         if n_cols == 0 {
             return;
         }
@@ -268,10 +266,7 @@ impl Renderer {
         let margin_len = MARGIN.len();
         let borders = n_cols + 1;
         let padding = n_cols * 2;
-        let available = self
-            .width
-            .saturating_sub(margin_len + borders + padding)
-            .max(n_cols); // at least 1 char per column
+        let available = self.width.saturating_sub(margin_len + borders + padding).max(n_cols); // at least 1 char per column
 
         // Scale down proportionally if we exceed available width.
         let natural_total: usize = col_widths.iter().sum();
@@ -284,27 +279,15 @@ impl Renderer {
         // ── Border line builders ──────────────────────────────────────────────
         let top_border: String = format!(
             "{MARGIN}┌{}┐",
-            col_widths
-                .iter()
-                .map(|&w| "─".repeat(w + 2))
-                .collect::<Vec<_>>()
-                .join("┬")
+            col_widths.iter().map(|&w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┬")
         );
         let mid_border: String = format!(
             "{MARGIN}├{}┤",
-            col_widths
-                .iter()
-                .map(|&w| "─".repeat(w + 2))
-                .collect::<Vec<_>>()
-                .join("┼")
+            col_widths.iter().map(|&w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┼")
         );
         let bot_border: String = format!(
             "{MARGIN}└{}┘",
-            col_widths
-                .iter()
-                .map(|&w| "─".repeat(w + 2))
-                .collect::<Vec<_>>()
-                .join("┴")
+            col_widths.iter().map(|&w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┴")
         );
 
         let border_style = Style::default().fg(Color::DarkGray);

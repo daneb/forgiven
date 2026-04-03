@@ -103,11 +103,10 @@ fn parse_front_matter(content: &str) -> (bool, &str) {
     };
     let front_matter = &after_open[..close_pos];
     let body_raw = &after_open[close_pos + 5..]; // skip "\n---\n"
-    // Strip one leading newline — the conventional blank line after the closing "---".
+                                                 // Strip one leading newline — the conventional blank line after the closing "---".
     let body = body_raw.strip_prefix('\n').unwrap_or(body_raw);
-    let clears = front_matter
-        .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("clears_context: true"));
+    let clears =
+        front_matter.lines().any(|line| line.trim().eq_ignore_ascii_case("clears_context: true"));
     (clears, body)
 }
 

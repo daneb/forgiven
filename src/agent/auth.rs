@@ -67,7 +67,6 @@ pub async fn acquire_copilot_token() -> Result<String> {
     Ok(api_token.token)
 }
 
-
 pub(super) async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))

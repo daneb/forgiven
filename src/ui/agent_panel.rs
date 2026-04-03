@@ -96,10 +96,9 @@ impl UI {
                         continue;
                     }
                     let (label, color) = match msg.role {
-                        Role::User => (
-                            format!("{} You", panel.provider.user_emoji()),
-                            Color::Green,
-                        ),
+                        Role::User => {
+                            (format!("{} You", panel.provider.user_emoji()), Color::Green)
+                        },
                         Role::Assistant => {
                             let name = panel.ai_label_name();
                             let emoji = panel.provider.ai_emoji();
@@ -227,8 +226,7 @@ impl UI {
             Span::raw("")
         };
 
-        let panel_title =
-            format!(" {} [{model_label}]", panel.provider.display_name());
+        let panel_title = format!(" {} [{model_label}]", panel.provider.display_name());
         let title_line = Line::from(vec![
             Span::raw(panel_title),
             token_span,

@@ -4,7 +4,11 @@ use super::*;
 fn trunc(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let head: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() { format!("{head}…") } else { head }
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 impl UI {

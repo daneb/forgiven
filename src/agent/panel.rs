@@ -167,11 +167,7 @@ impl AgentPanel {
             ProviderKind::Copilot => "Copilot".to_string(),
             ProviderKind::Ollama => {
                 // "qwen2.5-coder:14b" → "qwen2.5-coder"
-                self.selected_model_id()
-                    .split(':')
-                    .next()
-                    .unwrap_or("Ollama")
-                    .to_string()
+                self.selected_model_id().split(':').next().unwrap_or("Ollama").to_string()
             },
         }
     }
@@ -490,16 +486,17 @@ impl AgentPanel {
         let user_text = if let Some((template, rest, clears_context)) = resolved {
             if clears_context {
                 let model_display = self.selected_model_display().to_string();
-                let cmd = user_text
-                    .trim_start_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("?");
+                let cmd =
+                    user_text.trim_start_matches('/').split_whitespace().next().unwrap_or("?");
                 info!("[spec] auto-clearing conversation before /{cmd} (clears_context = true)");
                 self.new_conversation(&model_display);
             }
             // Append whatever the user typed after the command as context.
-            if rest.is_empty() { template } else { format!("{template}{rest}") }
+            if rest.is_empty() {
+                template
+            } else {
+                format!("{template}{rest}")
+            }
         } else {
             user_text
         };
@@ -511,15 +508,13 @@ impl AgentPanel {
         let api_token = self.ensure_token().await?;
         if self.available_models.is_empty() {
             match self.provider.clone() {
-                ProviderKind::Copilot => {
-                    match fetch_models(&api_token).await {
-                        Ok(models) if !models.is_empty() => {
-                            info!("Fetched {} models from Copilot API", models.len());
-                            self.set_models(models, preferred_model);
-                        },
-                        Ok(_) => warn!("Copilot /models returned an empty list"),
-                        Err(e) => warn!("Could not fetch Copilot model list: {e}"),
-                    }
+                ProviderKind::Copilot => match fetch_models(&api_token).await {
+                    Ok(models) if !models.is_empty() => {
+                        info!("Fetched {} models from Copilot API", models.len());
+                        self.set_models(models, preferred_model);
+                    },
+                    Ok(_) => warn!("Copilot /models returned an empty list"),
+                    Err(e) => warn!("Could not fetch Copilot model list: {e}"),
                 },
                 ProviderKind::Ollama => {
                     let base_url = self.ollama_base_url.clone();
@@ -540,9 +535,7 @@ impl AgentPanel {
 
         // ── Build provider settings for this invocation ──────────────────────
         let chat_endpoint = match self.provider {
-            ProviderKind::Copilot => {
-                "https://api.githubcopilot.com/chat/completions".to_string()
-            },
+            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
             ProviderKind::Ollama => {
                 format!("{}/v1/chat/completions", self.ollama_base_url)
             },
@@ -684,7 +677,11 @@ Available tools:\n\
         let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
 
         // Snapshot for per-invocation metrics written on Done.
-        self.last_submit_ctx = Some(SubmitCtx { ctx_window: context_limit, sys_tokens: system_tokens, budget_for_history: budget });
+        self.last_submit_ctx = Some(SubmitCtx {
+            ctx_window: context_limit,
+            sys_tokens: system_tokens,
+            budget_for_history: budget,
+        });
 
         // ── Context budget audit log ─────────────────────────────────────────
         // Visible in SPC d → Recent Logs. One line per submission so you can

@@ -1583,11 +1583,7 @@ impl Editor {
                 } else {
                     None
                 },
-                hover_popup: if mode == Mode::LspHover {
-                    self.hover_popup.as_ref()
-                } else {
-                    None
-                },
+                hover_popup: if mode == Mode::LspHover { self.hover_popup.as_ref() } else { None },
                 lsp_rename_buffer: if mode == Mode::LspRename {
                     Some(self.lsp_rename_buffer.as_str())
                 } else {
