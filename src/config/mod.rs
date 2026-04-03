@@ -312,7 +312,7 @@ fn default_agent_warning_threshold() -> usize {
     3
 }
 fn default_janitor_threshold() -> u32 {
-    10_000
+    50_000
 }
 
 impl Default for Config {

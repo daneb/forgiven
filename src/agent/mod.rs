@@ -288,6 +288,11 @@ pub struct AgentPanel {
     /// Set from `[provider.ollama] tool_calls = true` in config.
     pub ollama_tool_calls: bool,
     pub messages: Vec<ChatMessage>,
+    /// Messages from sessions that have been compressed by the Auto-Janitor.
+    /// Rendered above the live session in a dimmed style so the user can still
+    /// scroll back to them.  Excluded from the API history sent in `submit()`.
+    /// Cleared by `new_conversation()`.
+    pub archived_messages: Vec<ChatMessage>,
     pub input: String,
     pub scroll: usize,
     token: Option<CopilotApiToken>,

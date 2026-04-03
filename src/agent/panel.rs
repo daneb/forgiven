@@ -76,6 +76,7 @@ impl AgentPanel {
             ollama_context_length: None,
             ollama_tool_calls: false,
             messages: Vec::new(),
+            archived_messages: Vec::new(),
             input: String::new(),
             scroll: 0,
             token: None,
@@ -259,12 +260,15 @@ impl AgentPanel {
         // For Copilot, prepend a synthetic "Auto" entry — GitHub routes server-side
         // when model: "auto" is sent.  VS Code does the same; it's not in /models.
         if self.provider == super::provider::ProviderKind::Copilot {
-            models.insert(0, ModelVersion {
-                id: "auto".to_string(),
-                version: "auto".to_string(),
-                name: "Auto".to_string(),
-                context_window: 128_000,
-            });
+            models.insert(
+                0,
+                ModelVersion {
+                    id: "auto".to_string(),
+                    version: "auto".to_string(),
+                    name: "Auto".to_string(),
+                    context_window: 128_000,
+                },
+            );
         }
         let found =
             models.iter().position(|m| m.id == preferred_model || m.version == preferred_model);
@@ -427,6 +431,7 @@ impl AgentPanel {
     /// clean context — not the prior conversation from a different model.
     pub fn new_conversation(&mut self, model_name: &str) {
         self.messages.clear();
+        self.archived_messages.clear();
         self.tasks.clear();
         self.streaming_reply = None;
         self.total_session_prompt_tokens = 0;
@@ -1084,7 +1089,8 @@ Available tools:\n\
                     },
                     Ok(StreamEvent::ModelSwitched { from, to }) => {
                         active = true;
-                        let currently_auto = self.available_models
+                        let currently_auto = self
+                            .available_models
                             .get(self.selected_model)
                             .map(|m| m.id == "auto")
                             .unwrap_or(false);
@@ -1093,7 +1099,8 @@ Available tools:\n\
                             info!("[auto] Copilot routed to {to:?}");
                         } else {
                             // Unexpected switch = premium quota exceeded; update selection and warn.
-                            if let Some(idx) = self.available_models
+                            if let Some(idx) = self
+                                .available_models
                                 .iter()
                                 .position(|m| m.id == to || m.version == to)
                             {
@@ -1128,7 +1135,9 @@ Available tools:\n\
                                 .filter(|m| matches!(m.role, Role::Assistant))
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
-                            self.messages.clear();
+                            // Move live messages to the archive so the user
+                            // can still scroll up to them; don't discard.
+                            self.archived_messages.extend(std::mem::take(&mut self.messages));
                             self.total_session_prompt_tokens = 0;
                             self.total_session_completion_tokens = 0;
                             self.session_rounds = 0;
@@ -1187,7 +1196,10 @@ Available tools:\n\
                             }));
                         }
                         // ── Auto-Janitor threshold check ─────────────────────
+                        // Require at least 2 completed rounds before auto-triggering:
+                        // a single-round session has almost no history worth compressing.
                         if janitor_threshold > 0
+                            && self.session_rounds >= 2
                             && self.total_session_prompt_tokens >= janitor_threshold
                         {
                             self.pending_janitor = true;

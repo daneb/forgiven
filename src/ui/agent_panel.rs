@@ -77,23 +77,26 @@ impl UI {
         let inner_width = history_area.width.saturating_sub(2) as usize;
         let visible_height = history_area.height.saturating_sub(2) as usize;
 
-        let cur_msg_count = panel.messages.len();
+        let cur_msg_count = panel.archived_messages.len() + panel.messages.len();
         let cur_streaming_len = panel.streaming_reply.as_ref().map(|s| s.len()).unwrap_or(0);
 
         let (lines, total_display_rows) = PANEL_CACHE.with(|cell| {
             let mut cache = cell.borrow_mut();
 
-            // — Completed messages —
+            // — Completed messages (archived + live) —
             if cache.msg_count != cur_msg_count || cache.content_width != content_width {
                 let mut ml: Vec<Line<'static>> = Vec::new();
-                for msg in &panel.messages {
+
+                // Helper: render a single User/Assistant/System message into `ml`.
+                // `dimmed` applies DIM to all rendered spans (used for archived messages).
+                let render_msg = |ml: &mut Vec<Line<'static>>, msg: &ChatMessage, dimmed: bool| {
                     if matches!(msg.role, Role::System) {
                         ml.push(Line::from(vec![Span::styled(
                             format!("  {}  ", msg.content),
                             Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
                         )]));
                         ml.push(Line::from(""));
-                        continue;
+                        return;
                     }
                     let (label, color) = match msg.role {
                         Role::User => {
@@ -110,12 +113,30 @@ impl UI {
                         },
                         Role::System => unreachable!(),
                     };
-                    ml.push(Line::from(vec![Span::styled(
-                        format!("╔ {label} "),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    )]));
-                    ml.extend(render_message_content(&msg.content, content_width));
-                    // Render image attachment placeholders.
+                    let header_style = if dimmed {
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(Modifier::BOLD)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                    };
+                    ml.push(Line::from(vec![Span::styled(format!("╔ {label} "), header_style)]));
+                    let content_lines = render_message_content(&msg.content, content_width);
+                    if dimmed {
+                        for line in content_lines {
+                            ml.push(Line::from(
+                                line.spans
+                                    .into_iter()
+                                    .map(|s| {
+                                        s.patch_style(Style::default().add_modifier(Modifier::DIM))
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ));
+                        }
+                    } else {
+                        ml.extend(content_lines);
+                    }
                     if !msg.images.is_empty() {
                         let img_style =
                             Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM);
@@ -127,7 +148,15 @@ impl UI {
                         }
                     }
                     ml.push(Line::from(""));
+                };
+
+                for msg in &panel.archived_messages {
+                    render_msg(&mut ml, msg, true);
                 }
+                for msg in &panel.messages {
+                    render_msg(&mut ml, msg, false);
+                }
+
                 cache.msg_lines = ml;
                 cache.msg_count = cur_msg_count;
                 cache.content_width = content_width;
