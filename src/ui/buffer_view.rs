@@ -1,7 +1,12 @@
 use super::*;
 
 impl UI {
-    /// Render the buffer content
+    /// Render the buffer content.
+    ///
+    /// When `fold_data` is supplied, rows inside closed folds are skipped and
+    /// fold-start rows are annotated with a `··· N lines` stub.  When
+    /// `sticky_header` is supplied, a 1-line context header is rendered at the
+    /// top of `area` and the editor content is shifted down by one row.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_buffer(
         frame: &mut Frame,
@@ -14,6 +19,8 @@ impl UI {
         preview_lines: Option<&[Line<'static>]>,
         show_cursor: bool,
         startup_elapsed: Option<std::time::Duration>,
+        fold_data: Option<&FoldData>,
+        sticky_header: Option<&str>,
     ) {
         // ── Markdown preview mode — render pre-computed lines directly ─────────
         if let Some(md_lines) = preview_lines {
@@ -30,83 +37,124 @@ impl UI {
         }
 
         if let Some((_, _, cursor, scroll_row, scroll_col, lines, selection)) = buffer_data {
-            let viewport_height = area.height as usize;
-            let viewport_width = area.width as usize;
+            // ── Sticky scroll header (ADR 0107) ───────────────────────────────
+            // Render the enclosing scope name as a 1-line overlay at the top of
+            // the editor area when the viewport has scrolled past a scope boundary.
+            let header_rows: u16 = if let Some(header_text) = sticky_header {
+                let header_area = Rect { height: 1, ..area };
+                let header_span = Span::styled(
+                    format!("  {}", header_text.trim_end()),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                );
+                frame.render_widget(Paragraph::new(Line::from(header_span)), header_area);
+                1
+            } else {
+                0
+            };
 
-            // `lines` is a viewport-clipped slice: element 0 corresponds to `scroll_row`.
-            // Only as many entries as are visible were cloned — see editor/mod.rs buffer_data
-            // builder.  Use relative indexing (row - start_line) to address into the slice;
-            // `row` itself stays absolute so diagnostic/selection comparisons stay correct.
+            // Content area excludes the sticky header row.
+            let content_area = Rect {
+                y: area.y + header_rows,
+                height: area.height.saturating_sub(header_rows),
+                ..area
+            };
+            let viewport_height = content_area.height as usize;
+            let viewport_width = content_area.width as usize;
+
             let start_line = *scroll_row;
-            let end_line = start_line + lines.len().min(viewport_height);
+            let max_buf_line = start_line + lines.len();
 
-            // Build visible lines
-            let mut visible_lines = Vec::new();
-            for row in start_line..end_line {
-                if let Some(line_text) = lines.get(row - start_line) {
-                    // Check if this line has any diagnostics
-                    let has_diagnostic =
-                        diagnostics.iter().any(|d| d.range.start.line as usize == row);
-                    // Only inject ghost text on the row/col it was requested for.
-                    let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
-                        if row == ghost_row && cursor.col == ghost_col {
-                            Some(text.lines().next().unwrap_or(text))
-                        } else {
-                            None
-                        }
-                    });
-                    // Use pre-highlighted spans when available, fall back to plain text.
-                    let line_idx = row - start_line;
-                    let line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx))
-                    {
-                        Self::render_highlighted_line(
-                            spans,
-                            *scroll_col,
-                            viewport_width,
-                            has_diagnostic,
-                            row_ghost,
-                            selection,
-                            row,
-                        )
-                    } else {
-                        Self::render_line(
-                            line_text,
-                            *scroll_col,
-                            viewport_width,
-                            row,
-                            selection,
-                            *scroll_row,
-                            has_diagnostic,
-                            row_ghost,
-                        )
-                    };
-                    visible_lines.push(line);
-                } else {
-                    visible_lines.push(Line::from("~"));
+            // ── Build visible lines (ADR 0106 fold rendering) ─────────────────
+            // Iterate buffer rows from `start_line`, skipping hidden fold rows,
+            // until we have filled `viewport_height` visible rows.
+            let mut visible_lines: Vec<Line<'static>> = Vec::with_capacity(viewport_height);
+            let mut buf_row = start_line;
+
+            while buf_row < max_buf_line && visible_lines.len() < viewport_height {
+                // Skip rows hidden inside a closed fold.
+                if let Some(fd) = fold_data {
+                    if fd.hidden_rows.contains(&buf_row) {
+                        buf_row += 1;
+                        continue;
+                    }
                 }
+
+                let line_idx = buf_row - start_line;
+                let raw_line_text = lines.get(line_idx).map(String::as_str).unwrap_or("");
+
+                let has_diagnostic =
+                    diagnostics.iter().any(|d| d.range.start.line as usize == buf_row);
+
+                // Ghost text is only shown on the exact row/col it was requested for.
+                let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
+                    if buf_row == ghost_row && cursor.col == ghost_col {
+                        Some(text.lines().next().unwrap_or(text))
+                    } else {
+                        None
+                    }
+                });
+
+                // Use pre-highlighted spans when available (line_idx = buf_row - scroll_row
+                // correctly indexes the unfiltered highlighted_lines slice).
+                let mut line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx))
+                {
+                    Self::render_highlighted_line(
+                        spans,
+                        *scroll_col,
+                        viewport_width,
+                        has_diagnostic,
+                        row_ghost,
+                        selection,
+                        buf_row,
+                    )
+                } else {
+                    Self::render_line(
+                        raw_line_text,
+                        *scroll_col,
+                        viewport_width,
+                        buf_row,
+                        selection,
+                        *scroll_row,
+                        has_diagnostic,
+                        row_ghost,
+                    )
+                };
+
+                // Append fold stub indicator for closed fold start rows.
+                if let Some(fd) = fold_data {
+                    if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
+                        let n = end_row.saturating_sub(buf_row);
+                        let stub = format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
+                        line.spans.push(Span::styled(stub, Style::default().fg(Color::DarkGray)));
+                    }
+                }
+
+                visible_lines.push(line);
+                buf_row += 1;
             }
 
-            // Fill remaining lines with ~
-            for _ in visible_lines.len()..viewport_height {
+            // Fill remaining rows with tildes.
+            while visible_lines.len() < viewport_height {
                 visible_lines
                     .push(Line::from(Span::styled("~", Style::default().fg(Color::DarkGray))));
             }
 
-            let paragraph = Paragraph::new(visible_lines);
-            frame.render_widget(paragraph, area);
+            frame.render_widget(Paragraph::new(visible_lines), content_area);
 
             // Render cursor (only in Normal, Insert modes, and only for the focused pane).
             // GUTTER_WIDTH accounts for the 2-char diagnostic marker ("  " / "● ")
             // prepended to every rendered line — the cursor must be offset by the same amount.
             const GUTTER_WIDTH: u16 = 2;
             if mode != Mode::PickBuffer && show_cursor {
+                // `cursor.row` has been pre-adjusted by the editor to be the visual row
+                // (= buffer row minus hidden rows above it within the viewport).
                 let cursor_row = cursor.row.saturating_sub(*scroll_row);
                 let cursor_col = cursor.col.saturating_sub(*scroll_col);
 
                 if cursor_row < viewport_height && cursor_col < viewport_width {
                     frame.set_cursor_position((
-                        area.x + GUTTER_WIDTH + cursor_col as u16,
-                        area.y + cursor_row as u16,
+                        content_area.x + GUTTER_WIDTH + cursor_col as u16,
+                        content_area.y + cursor_row as u16,
                     ));
                 }
             }

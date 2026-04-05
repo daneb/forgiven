@@ -1192,6 +1192,70 @@ impl Buffer {
     }
 
     // -------------------------------------------------------------------------
+    // Surround operations (ADR 0110)
+    // -------------------------------------------------------------------------
+
+    /// Remove two characters at `open_col` and `close_col` on `row`.
+    /// `close_col` must be > `open_col`. The cursor column is adjusted if it
+    /// falls to the right of the removed positions.
+    pub fn surround_delete_chars(&mut self, row: usize, open_col: usize, close_col: usize) {
+        let mut chars: Vec<char> = self.lines[row].chars().collect();
+        // Remove higher index first to keep open_col valid.
+        chars.remove(close_col);
+        chars.remove(open_col);
+        self.lines[row] = chars.iter().collect();
+        // Adjust cursor column.
+        if self.cursor.row == row {
+            if self.cursor.col > close_col {
+                self.cursor.col = self.cursor.col.saturating_sub(2);
+            } else if self.cursor.col > open_col {
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+            }
+        }
+        self.mark_modified();
+    }
+
+    /// Replace the characters at `open_col` and `close_col` on `row` with
+    /// `new_open` and `new_close` respectively.
+    pub fn surround_replace_chars(
+        &mut self,
+        row: usize,
+        open_col: usize,
+        close_col: usize,
+        new_open: char,
+        new_close: char,
+    ) {
+        let mut chars: Vec<char> = self.lines[row].chars().collect();
+        chars[open_col] = new_open;
+        chars[close_col] = new_close;
+        self.lines[row] = chars.iter().collect();
+        self.mark_modified();
+    }
+
+    /// Insert `open` before `word_start` and `close` after `word_end - 1` on
+    /// `row`.  `word_end` is exclusive (one past the last char of the word).
+    /// The cursor column is shifted right by 1 when it falls at or after `word_start`.
+    pub fn surround_insert_chars(
+        &mut self,
+        row: usize,
+        word_start: usize,
+        word_end: usize,
+        open: char,
+        close: char,
+    ) {
+        let mut chars: Vec<char> = self.lines[row].chars().collect();
+        // Insert close first so that word_start index stays valid.
+        chars.insert(word_end, close);
+        chars.insert(word_start, open);
+        self.lines[row] = chars.iter().collect();
+        // Cursor was inside [word_start, word_end) — shift past the inserted open.
+        if self.cursor.row == row && self.cursor.col >= word_start {
+            self.cursor.col += 1;
+        }
+        self.mark_modified();
+    }
+
+    // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
 

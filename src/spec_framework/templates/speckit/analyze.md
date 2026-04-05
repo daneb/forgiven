@@ -28,7 +28,12 @@ folders under `docs/spec/features/`.
    - ✅ **Conformant** — areas that match the spec.
    - ⚠️  **Drift** — areas that deviate from the spec (with severity: minor / major).
    - ❌ **Missing** — specified work that has not been implemented yet.
-6. For each drift or missing item, suggest the minimal corrective action.
+   Use consistent item labelling within each section: **C-01**, **C-02** for
+   conformant items; **D-01**, **D-02** for drift; **M-01**, **M-02** for missing.
+   Wrap all file paths, function names, HTTP routes, header names, story IDs
+   (e.g. `US-004`), and decision-record IDs (e.g. `DR-104`) in backticks.
+6. For each drift or missing item, suggest the minimal corrective action and label it
+   with the same code (e.g. "Fix for D-01: …") so the user can reference items precisely.
 7. Ask the user whether to update the spec to reflect intentional deviations, or to
    implement the missing/drifted items.
 

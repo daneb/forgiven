@@ -21,8 +21,16 @@ under `docs/spec/features/` and clarify across all of them.
    - Conflicts between the Constitution's constraints and the Spec's user stories.
    - Missing error-handling or edge-case coverage.
    - Assumptions baked into the Plan that haven't been validated with the user.
-5. For each issue, propose one or more resolution options.
-6. Present the full list to the user and ask them to choose resolutions or provide
+5. For each issue, propose one or more resolution options. Follow these formatting rules:
+   - Label items with sequential letters (**A**, **B**, **C** …).
+   - Label resolution options within each item as **A1**, **A2**, **B1**, **B2**, etc.
+     (prefix with the parent letter) so they are never ambiguous alongside the closing
+     question numbers.
+   - Wrap all file paths, HTTP methods/routes, header names, error codes, story IDs
+     (e.g. `US-004`), and decision-record IDs (e.g. `DR-104`) in backticks.
+6. Present the full list to the user with a closing "Questions for Clarification"
+   section. Number each question to match its item letter (e.g. **Question A**, **Question B**).
+   Ask the user to choose a resolution option (by code, e.g. "A2") or provide free-form
    clarification for each item.
 7. Once the user responds, update the relevant spec documents accordingly and confirm
    which documents were changed.

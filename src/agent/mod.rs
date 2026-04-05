@@ -386,6 +386,16 @@ pub struct AgentPanel {
     /// exceeds the configured threshold.  The editor tick-loop reads this flag
     /// and triggers `Action::AgentJanitorCompress` automatically.
     pub pending_janitor: bool,
+    /// Cached project file-tree string (depth 2), rebuilt at most once every 30 s.
+    /// Avoids a full filesystem walk on every `submit()` call.
+    /// Cleared by `new_conversation()` to force a fresh tree on the next session.
+    pub cached_project_tree: Option<(String, std::time::Instant)>,
+    /// Original file contents captured before the agent first modifies each file in
+    /// the current session.  Used by `revert_session()` (`SPC a u`) to restore all
+    /// agent-touched files to their pre-session state.
+    /// Keys are project-relative paths; values are the file contents before the
+    /// agent's first edit.  Cleared by `new_conversation()`.
+    pub session_snapshots: std::collections::HashMap<String, String>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -449,6 +459,12 @@ pub enum StreamEvent {
     /// The path is project-relative (as passed to the tool).
     FileModified {
         path: String,
+    },
+    /// Sent BEFORE the first write/edit of a file in a session so the panel
+    /// can store the original content for session-level undo (`SPC a u`).
+    FileSnapshot {
+        path: String,
+        original: String,
     },
     /// A task was created by the agent via the create_task tool.
     TaskCreated {

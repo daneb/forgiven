@@ -484,6 +484,119 @@ impl UI {
         );
     }
 
+    // ── Inline assistant overlay (ADR 0111) ───────────────────────────────────
+
+    /// Render the inline AI assist overlay (Mode::InlineAssist).
+    ///
+    /// - Input phase:     shows a prompt bar at the bottom of the screen.
+    /// - Generating phase: shows the same bar with a "generating…" indicator
+    ///                     and the accumulating response.
+    /// - Preview phase:   shows the full response with accept/reject hints.
+    pub(super) fn render_inline_assist_overlay(
+        frame: &mut Frame,
+        view: &super::InlineAssistView<'_>,
+        area: Rect,
+    ) {
+        use crate::editor::InlineAssistPhase;
+
+        let popup_width = area.width.saturating_sub(4).max(20);
+
+        match view.phase {
+            InlineAssistPhase::Input => {
+                // Single-row prompt bar pinned to bottom of the buffer area.
+                let popup_height = 3u16;
+                let x = (area.width.saturating_sub(popup_width)) / 2;
+                let y = area.height.saturating_sub(popup_height + 1);
+                let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+                frame.render_widget(Clear, popup_area);
+
+                let display = format!(" > {}_", view.prompt);
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::LightCyan))
+                    .title(Span::styled(
+                        " Inline AI  Enter=submit  Esc=cancel ",
+                        Style::default().fg(Color::LightCyan),
+                    ));
+                frame.render_widget(Paragraph::new(display).block(block), popup_area);
+            },
+
+            InlineAssistPhase::Generating => {
+                let response_lines: Vec<&str> = view.response.lines().collect();
+                let visible_lines = response_lines.len().min(8);
+                let popup_height = (visible_lines as u16 + 4).min(area.height);
+                let x = (area.width.saturating_sub(popup_width)) / 2;
+                let y = area.height.saturating_sub(popup_height + 1);
+                let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+                frame.render_widget(Clear, popup_area);
+
+                let hint = Line::from(vec![
+                    Span::styled(" generating…  ", Style::default().fg(Color::Yellow)),
+                    Span::styled("Esc=cancel", Style::default().fg(Color::DarkGray)),
+                ]);
+
+                let start = response_lines.len().saturating_sub(visible_lines);
+                let mut body: Vec<Line<'static>> = response_lines[start..]
+                    .iter()
+                    .map(|l| {
+                        Line::from(Span::styled(
+                            format!(" {l}"),
+                            Style::default().fg(Color::DarkGray),
+                        ))
+                    })
+                    .collect();
+                body.insert(0, hint);
+
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(Span::styled(
+                        " Inline AI ",
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ));
+                frame.render_widget(Paragraph::new(body).block(block), popup_area);
+            },
+
+            InlineAssistPhase::Preview => {
+                let response_lines: Vec<&str> = view.response.lines().collect();
+                let visible_lines = response_lines.len().min(16);
+                let popup_height = (visible_lines as u16 + 4).min(area.height);
+                let x = (area.width.saturating_sub(popup_width)) / 2;
+                let y = area.height.saturating_sub(popup_height + 1);
+                let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+                frame.render_widget(Clear, popup_area);
+
+                let hint = Line::from(vec![
+                    Span::styled(" Enter", Style::default().fg(Color::Green)),
+                    Span::styled("=accept  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Esc", Style::default().fg(Color::Red)),
+                    Span::styled("=cancel ", Style::default().fg(Color::DarkGray)),
+                ]);
+
+                let start = response_lines.len().saturating_sub(visible_lines);
+                let mut body: Vec<Line<'static>> = response_lines[start..]
+                    .iter()
+                    .map(|l| {
+                        Line::from(Span::styled(format!(" {l}"), Style::default().fg(Color::White)))
+                    })
+                    .collect();
+                body.insert(0, hint);
+
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green))
+                    .title(Span::styled(
+                        " Inline AI  ready ",
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ));
+                frame.render_widget(Paragraph::new(body).block(block), popup_area);
+            },
+        }
+    }
+
     // ── File-info popup helpers ───────────────────────────────────────────────
 
     /// Format a byte count as a human-readable string with the raw count in parens.

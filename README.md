@@ -28,6 +28,49 @@ by Emacs / Spacemacs key philosophy and Vim modal editing.
 
 ---
 
+## Design Philosophy
+
+Forgiven is built around a small set of deliberate choices. Every feature decision —
+including what **not** to implement — flows from these principles.
+
+### 1. AI-first, not AI-assisted
+
+The agent is the primary editing surface. The goal is not to make manual editing
+faster; it is to make manual editing rarely necessary. You describe intent; forgiven
+and the agent act on it.
+
+### 2. Code as a black box
+
+You read code when there is a specific, concrete problem that cannot be resolved
+otherwise. You do not browse, navigate, or refactor it habitually. This means features
+optimised purely for manual code manipulation (multi-cursor, complex refactor motions,
+structural navigation for navigation's sake) are low value and add weight the editor
+does not need to carry.
+
+### 3. Terminal-native, not a GUI in a terminal
+
+Forgiven runs inside your shell. It does not replicate features the shell already
+provides. An embedded terminal pane, for example, would recreate a problem that
+terminal multiplexers (`tmux`, `zellij`) already solve better — and the agent panel
+already streams tool output inline. The TUI is a first-class citizen of the terminal
+ecosystem, not an island within it.
+
+### 4. Lightweight by design
+
+Feature parity with VS Code or Zed is not the goal. Each addition is weighed against
+the complexity it introduces. Forgiven should remain fast, auditable, and hackable by a
+single developer. Deliberate exclusions are documented as ADRs so the reasoning is
+preserved.
+
+### 5. Security-first posture
+
+Zero telemetry. No background network calls outside of explicitly user-initiated
+agent requests. The agent is sandboxed to the project root. `unsafe` code is
+forbidden project-wide. Dependencies are audited with `cargo-audit` and `cargo-deny`
+in CI.
+
+---
+
 ## Features
 
 ### Modal editing (Vim-style)
@@ -50,6 +93,27 @@ by Emacs / Spacemacs key philosophy and Vim modal editing.
 - `yy/yw/y$` yank; `p/P` paste; multi-line block yank/paste
 - `u` undo, `Ctrl+R` redo (snapshot-based history)
 - Numeric count prefix: `3dd`, `5j`, etc.
+
+### Tree-sitter text objects
+AST-aware text objects powered by [Tree-sitter](https://tree-sitter.github.io/). Works in
+Normal mode (operate immediately) and Visual mode (select first, then operate).
+
+| Sequence | Meaning |
+|----------|---------|
+| `vif` / `vaf` | Visual-select function **body** / **entire** function (incl. signature) |
+| `vic` / `vac` | Visual-select class/struct/impl **body** / **entire** node |
+| `vib` / `vab` | Visual-select **inner** / **outer** `{}` block |
+| `dif` / `daf` | Delete inner / outer function |
+| `yif` / `yaf` | Yank inner / outer function |
+| `cif` / `caf` | Change inner / outer function (delete + enter Insert) |
+| `dic` / `dac` | Delete inner / outer class/struct/impl |
+| `dib` / `dab` | Delete inner / outer block |
+
+The same `i`/`a` + `f`/`c`/`b` suffix applies to `y`, `d`, and `c` operators uniformly.
+In Visual mode, pressing `i` or `a` followed by a kind character replaces the current selection.
+
+Supported languages: **Rust**, **Python**, **JavaScript**, **TypeScript**, **TypeScript TSX**,
+**Go**, **JSON**, **Bash**. Falls back gracefully (status message) for unsupported file types.
 
 ### Spacemacs-style leader key (`SPC`)
 Which-key popup shows available bindings after a 500 ms pause.
@@ -78,9 +142,11 @@ Which-key popup shows available bindings after a 500 ms pause.
 - **Diff+apply** (`Ctrl+A` in Agent mode) — full-screen LCS diff overlay targeting the correct
   file; `y`/`Enter` to apply, `n`/`Esc` to discard
 
-### Syntax highlighting
+### Syntax highlighting & AST
 - `syntect` with Base16 Ocean Dark theme; highlights the visible viewport only
 - Incremental cache keyed on buffer version — no re-highlight on cursor movement
+- **Tree-sitter** AST parsed lazily per buffer; cache invalidated on each edit
+  — powers text objects and (upcoming) code folding and sticky scroll
 
 ### File explorer
 - Left-sidebar tree (`SPC e e`); lazy directory loading
@@ -282,6 +348,10 @@ Common sources of context bloat and their mitigations:
 | `ct{c}` / `cf{c}` | Change till / find next occurrence of `{c}` (delete + Insert) |
 | `f{c}` / `t{c}` | Move cursor to / before next occurrence of `{c}` on line |
 | `F{c}` / `T{c}` | Move cursor to / after previous occurrence of `{c}` on line |
+| `v` + `i/a` + `f/c/b` | Visual-select text object (inner/outer function/class/block) |
+| `d` + `i/a` + `f/c/b` | Delete text object (e.g. `daf` = delete outer function) |
+| `y` + `i/a` + `f/c/b` | Yank text object |
+| `c` + `i/a` + `f/c/b` | Change text object (delete + Insert) |
 | `p/P` | Paste after / before cursor |
 | `u/Ctrl+R` | Undo / redo |
 | `v/V` | Visual / Visual-line selection |
@@ -304,8 +374,15 @@ Common sources of context bloat and their mitigations:
 | Key | Action |
 |-----|--------|
 | `h/j/k/l` / arrows | Extend selection |
+| `w/b` | Extend selection by word |
+| `0/^/$` | Extend selection to line start / first non-blank / line end |
+| `G` | Extend selection to file bottom |
+| `i` + `f/c/b` | Replace selection with inner text object (function/class/block) |
+| `a` + `f/c/b` | Replace selection with outer text object |
 | `y` | Yank selection |
 | `d/x` | Delete selection |
+| `c` | Delete selection and enter Insert mode |
+| `Tab` / `Shift+Tab` | Indent / dedent selected lines |
 | `Esc` | Cancel |
 
 ### File explorer (`Mode::Explorer`)
@@ -423,8 +500,11 @@ forgiven/
 │   │   └── mod.rs
 │   ├── explorer/            # File explorer tree sidebar
 │   │   └── mod.rs
-│   ├── highlight/           # Syntax highlighting (syntect)
+│   ├── highlight/           # Syntax highlighting (syntect, Base16 Ocean Dark)
 │   │   └── mod.rs
+│   ├── treesitter/          # Tree-sitter AST engine (text objects, folding)
+│   │   ├── mod.rs           # TsEngine, TsLang, TsSnapshot
+│   │   └── query.rs         # Node-finding helpers, text_object_range()
 │   ├── keymap/              # Modal keybinding system + which-key
 │   │   └── mod.rs
 │   ├── lsp/                 # LSP client (rust-analyzer, copilot-language-server)
@@ -468,6 +548,14 @@ forgiven/
 | `reqwest` | 0.12 | HTTP client for Copilot API (JSON + streaming) |
 | `futures-util` | 0.3 | Async stream utilities (SSE response streaming) |
 | `syntect` | 5 | Syntax highlighting engine (Base16 Ocean Dark) |
+| `tree-sitter` | 0.22 | Incremental AST parser — foundation for text objects, folding, sticky scroll |
+| `tree-sitter-rust` | 0.21 | Rust grammar for Tree-sitter |
+| `tree-sitter-python` | 0.21 | Python grammar |
+| `tree-sitter-javascript` | 0.21 | JavaScript grammar |
+| `tree-sitter-typescript` | 0.21 | TypeScript and TSX grammars |
+| `tree-sitter-go` | 0.21 | Go grammar |
+| `tree-sitter-json` | 0.21 | JSON grammar |
+| `tree-sitter-bash` | 0.21 | Bash/shell grammar |
 | `arboard` | 3 | System clipboard read/write |
 | `pulldown-cmark` | 0.12 | CommonMark parser for markdown rendering |
 | `tiktoken-rs` | 0.5 | GPT-4 tokeniser (cl100k_base) for accurate per-segment token counts |
@@ -582,6 +670,8 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0097](docs/adr/0097-speckit-auto-clear-context-per-phase.md) | SpecKit Auto-Clear Context per Phase |
 | [0098](docs/adr/0098-ollama-local-provider.md) | Ollama Local Provider |
 | [0099](docs/adr/0099-context-breakdown-token-awareness.md) | Context Breakdown: Per-Segment Token Awareness (Phase 1) |
+| [0104](docs/adr/0104-tree-sitter-core-integration.md) | Tree-sitter Core Integration (AST engine foundation) |
+| [0105](docs/adr/0105-tree-sitter-text-objects.md) | Tree-sitter Text Objects (`vif`, `daf`, `yic`, etc.) |
 
 ---
 

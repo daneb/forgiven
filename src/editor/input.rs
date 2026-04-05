@@ -85,6 +85,7 @@ impl Editor {
                     | Mode::CommitMsg
                     | Mode::Diagnostics
                     | Mode::LspRename
+                    | Mode::InlineAssist
             )
         {
             self.cycle_panel_focus();
@@ -117,6 +118,7 @@ impl Editor {
             Mode::LocationList => self.handle_location_list_mode(key)?,
             Mode::LspHover => self.handle_lsp_hover_mode(key)?,
             Mode::LspRename => self.handle_lsp_rename_mode(key)?,
+            Mode::InlineAssist => self.handle_inline_assist_mode(key)?,
         }
 
         Ok(())
@@ -124,12 +126,46 @@ impl Editor {
 
     /// Handle keys in Normal mode
     pub(super) fn handle_normal_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // ── Surround change: awaiting the `to` char after `cs{from}` ──────────
+        if let Some(from) = self.surround_change_from.take() {
+            if let KeyCode::Char(to) = key.code {
+                return self.execute_action(crate::keymap::Action::SurroundChange { from, to });
+            }
+            // Non-char key — cancel silently.
+            return Ok(());
+        }
+
         let action = self.key_handler.handle_normal(key);
         self.execute_action(action)?;
         Ok(())
     }
 
     pub(super) fn handle_visual_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // ── Leader key sequences (e.g. SPC a i) from Visual mode ─────────────
+        // Forward Space and any in-progress leader sequence to the normal-mode
+        // handler so the visual selection is preserved when triggering actions
+        // like InlineAssistStart.
+        if key.code == KeyCode::Char(' ') || self.key_handler.leader_active() {
+            let action = self.key_handler.handle_normal(key);
+            if !matches!(action, Action::Noop) {
+                return self.execute_action(action);
+            }
+            return Ok(());
+        }
+
+        // ── Text object prefix (`i` / `a` + kind char) ────────────────────────
+        // When `i` or `a` was pressed last frame, the next char selects a
+        // tree-sitter text object (f = function, c = class, b = block).
+        if let Some(prefix) = self.visual_text_obj_prefix.take() {
+            if let KeyCode::Char(ch) = key.code {
+                if let Some(kind) = crate::keymap::TextObjectKind::from_char(ch) {
+                    let inner = prefix == 'i';
+                    return self.execute_action(Action::SelectTextObject { inner, kind });
+                }
+            }
+            // Unrecognised key after prefix — fall through to normal handling
+        }
+
         match key.code {
             // ── Exit / cancel ─────────────────────────────────────────────────
             KeyCode::Esc => {
@@ -220,6 +256,14 @@ impl Editor {
                 });
             },
 
+            // ── Tree-sitter text object prefix ────────────────────────────��───
+            // `i` or `a` stores the prefix; the NEXT keypress resolves the kind.
+            KeyCode::Char('i') | KeyCode::Char('a') => {
+                if let KeyCode::Char(ch) = key.code {
+                    self.visual_text_obj_prefix = Some(ch);
+                }
+            },
+
             // ── Indent / dedent selection ─────────────────────────────────────
             KeyCode::Tab => {
                 let use_spaces = self.config.use_spaces;
@@ -249,6 +293,15 @@ impl Editor {
     /// The selection always covers whole lines. `j`/`k` move the cursor and
     /// re-anchor the selection; `y`/`d`/`x` operate on the selected line span.
     pub(super) fn handle_visual_line_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // ── Leader key sequences (e.g. SPC a i) from Visual Line mode ────────
+        if key.code == KeyCode::Char(' ') || self.key_handler.leader_active() {
+            let action = self.key_handler.handle_normal(key);
+            if !matches!(action, Action::Noop) {
+                return self.execute_action(action);
+            }
+            return Ok(());
+        }
+
         match key.code {
             // ── Exit ──────────────────────────────────────────────────────────
             KeyCode::Esc | KeyCode::Char('V') => {
@@ -963,6 +1016,120 @@ impl Editor {
             },
             _ => {
                 self.set_status(format!("Unknown command: {}", cmd));
+            },
+        }
+
+        Ok(())
+    }
+
+    // ── Inline assistant (ADR 0111) ───────────────────────────────────────────
+
+    /// Handle key events while `Mode::InlineAssist` is active.
+    ///
+    /// - `Phase::Input`     — accumulate the user's prompt; Enter submits, Esc cancels.
+    /// - `Phase::Generating` — Esc aborts the in-flight request.
+    /// - `Phase::Preview`   — Enter accepts the replacement, Esc/q discards it.
+    pub(super) fn handle_inline_assist_mode(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::editor::{InlineAssistPhase, InlineAssistState};
+
+        let phase = match self.inline_assist.as_ref() {
+            Some(s) => s.phase,
+            None => {
+                self.mode = Mode::Normal;
+                return Ok(());
+            },
+        };
+
+        match phase {
+            InlineAssistPhase::Input => match key.code {
+                KeyCode::Esc => {
+                    self.inline_assist = None;
+                    self.mode = Mode::Normal;
+                },
+                KeyCode::Enter => {
+                    // Capture all needed values before any async work.
+                    let (prompt, selection_text, target_buffer_idx, original_selection, language) =
+                        match self.inline_assist.as_ref() {
+                            Some(s) => (
+                                s.prompt.clone(),
+                                s.original_text.clone(),
+                                s.target_buffer_idx,
+                                s.original_selection.clone(),
+                                s.language.clone(),
+                            ),
+                            None => return Ok(()),
+                        };
+
+                    if prompt.trim().is_empty() {
+                        self.set_status("Inline assist: prompt cannot be empty".to_string());
+                        return Ok(());
+                    }
+
+                    let project_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+                    // Build the future while agent_panel is mutably borrowed,
+                    // then await it inside block_in_place (same pattern as submit()).
+                    let fut = self.agent_panel.start_inline_assist(
+                        selection_text.clone(),
+                        prompt.clone(),
+                        project_root,
+                        language.clone(),
+                    );
+                    let result = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(fut)
+                    });
+
+                    match result {
+                        Ok((rx, abort_tx)) => {
+                            self.inline_assist = Some(InlineAssistState {
+                                prompt,
+                                original_text: selection_text,
+                                original_selection,
+                                target_buffer_idx,
+                                language,
+                                response: String::new(),
+                                phase: InlineAssistPhase::Generating,
+                                stream_rx: Some(rx),
+                                abort_tx: Some(abort_tx),
+                            });
+                        },
+                        Err(e) => {
+                            self.set_status(format!("Inline assist error: {e}"));
+                            self.inline_assist = None;
+                            self.mode = Mode::Normal;
+                        },
+                    }
+                },
+                KeyCode::Backspace => {
+                    if let Some(s) = self.inline_assist.as_mut() {
+                        s.prompt.pop();
+                    }
+                },
+                KeyCode::Char(c) => {
+                    if let Some(s) = self.inline_assist.as_mut() {
+                        s.prompt.push(c);
+                    }
+                },
+                _ => {},
+            },
+
+            InlineAssistPhase::Generating => match key.code {
+                KeyCode::Esc => {
+                    self.inline_assist = None;
+                    self.mode = Mode::Normal;
+                },
+                _ => {},
+            },
+
+            InlineAssistPhase::Preview => match key.code {
+                KeyCode::Enter => {
+                    self.execute_action(Action::InlineAssistAccept)?;
+                },
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.execute_action(Action::InlineAssistCancel)?;
+                },
+                _ => {},
             },
         }
 

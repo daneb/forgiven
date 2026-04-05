@@ -94,6 +94,44 @@ pub struct LocationListState {
     pub selected: usize,
 }
 
+// ── Inline assistant (ADR 0111) ───────────────────────────────────────────────
+
+/// Lifecycle phase of the inline assist overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineAssistPhase {
+    /// User is typing their transformation directive.
+    Input,
+    /// LLM request is in-flight; tokens are accumulating.
+    Generating,
+    /// Response complete; waiting for user to accept or reject.
+    Preview,
+}
+
+/// All state owned by `Editor` while `Mode::InlineAssist` is active.
+/// Dropped when the user accepts or cancels.
+pub struct InlineAssistState {
+    /// Directive typed by the user during `Phase::Input`.
+    pub prompt: String,
+    /// Original selected text (empty when invoked without a selection).
+    pub original_text: String,
+    /// Buffer selection at the moment `InlineAssistStart` was fired.
+    /// Used to locate and replace the text on accept.
+    pub original_selection: Option<crate::buffer::Selection>,
+    /// Buffer index the assist is targeting.
+    pub target_buffer_idx: usize,
+    /// File language hint derived from the buffer's extension (e.g. "Rust", "Python").
+    /// Injected into the system prompt so the model knows what language to produce.
+    pub language: Option<String>,
+    /// LLM response accumulator.
+    pub response: String,
+    pub phase: InlineAssistPhase,
+    /// Populated when the LLM request is launched (Input → Generating).
+    pub stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::agent::StreamEvent>>,
+    /// Kept alive to abort on cancel; dropped (fires abort) when `inline_assist` is set to None.
+    #[allow(dead_code)]
+    pub abort_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 /// State for Mode::LspHover — a scrollable popup showing hover documentation.
 pub struct HoverPopupState {
     /// Hover text (plain text or Markdown).
@@ -225,6 +263,35 @@ pub struct Editor {
 
     /// Per-viewport highlight cache — invalidated on content change or scroll.
     highlight_cache: Option<HighlightCache>,
+
+    // ── Visual mode text object state ─────────────────────────────────────────
+    /// Pending `i`/`a` prefix for tree-sitter text object selection in Visual mode.
+    /// Set when `i` or `a` is pressed in Visual mode; consumed on the next key.
+    visual_text_obj_prefix: Option<char>,
+
+    // ── Surround operations (ADR 0110) ────────────────────────────────────────
+    /// The `from` char stored between `cs{from}` and `{to}` keypresses.
+    surround_change_from: Option<char>,
+
+    // ── Inline assistant (ADR 0111) ───────────────────────────────────────────
+    /// Active only while `mode == Mode::InlineAssist`.
+    inline_assist: Option<InlineAssistState>,
+
+    // ── Tree-sitter AST cache ─────────────────────────────────────────────────
+    /// Wraps the Tree-sitter `Parser`; shared across all buffers (language is
+    /// reset before each parse).
+    ts_engine: crate::treesitter::TsEngine,
+    /// Most recent parse result per buffer index.  Keyed by `buffer_idx`.
+    ts_cache: std::collections::HashMap<usize, crate::treesitter::TsSnapshot>,
+    /// `lsp_version` at the time each cached tree was last parsed.
+    /// When `buffer.lsp_version != ts_versions[idx]` the tree is stale.
+    ts_versions: std::collections::HashMap<usize, i32>,
+
+    // ── Code folding (ADR 0106) ───────────────────────────────────────────────
+    /// Per-buffer set of fold start rows that are currently closed.
+    /// Keyed by buffer index; the value is the set of fold-region start rows
+    /// for which the fold is collapsed.
+    fold_closed: std::collections::HashMap<usize, std::collections::HashSet<usize>>,
 
     // ── File explorer ─────────────────────────────────────────────────────────
     file_explorer: FileExplorer,
@@ -379,6 +446,13 @@ impl Editor {
             clipboard: None::<(String, ClipboardType)>,
             highlighter: Highlighter::new(),
             highlight_cache: None,
+            visual_text_obj_prefix: None,
+            surround_change_from: None,
+            inline_assist: None,
+            ts_engine: crate::treesitter::TsEngine::new(),
+            ts_cache: std::collections::HashMap::new(),
+            ts_versions: std::collections::HashMap::new(),
+            fold_closed: std::collections::HashMap::new(),
             file_explorer: FileExplorer::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
@@ -662,6 +736,234 @@ impl Editor {
         self.buffers.get_mut(self.current_buffer_idx)
     }
 
+    /// Return the Tree-sitter parse snapshot for the current buffer, parsing or
+    /// re-parsing lazily if the cached version is stale.
+    ///
+    /// Returns `None` when no buffer is open, the file has an unknown extension,
+    /// or Tree-sitter parsing fails (grammar ABI mismatch). All callers must
+    /// handle `None` — Tree-sitter features degrade gracefully for unsupported files.
+    pub(crate) fn ts_tree_for_current_buffer(&mut self) -> Option<&crate::treesitter::TsSnapshot> {
+        let idx = self.current_buffer_idx;
+        let buf = self.buffers.get(idx)?;
+        let path = buf.file_path.as_deref()?;
+        let lang = crate::treesitter::TsEngine::detect(path)?;
+        let current_version = buf.lsp_version;
+
+        // Cache hit: the stored version matches the buffer's current version.
+        if self.ts_versions.get(&idx) == Some(&current_version) {
+            return self.ts_cache.get(&idx);
+        }
+
+        // Cache miss: re-parse from the buffer's current content.
+        let source = buf.lines().join("\n");
+        let snap = self.ts_engine.parse(&source, lang)?;
+        self.ts_cache.insert(idx, snap);
+        self.ts_versions.insert(idx, current_version);
+        self.ts_cache.get(&idx)
+    }
+
+    // ── Code folding helpers (ADR 0106) ──────────────────────────────────────
+
+    /// Toggle the fold at the cursor position.
+    ///
+    /// Finds the innermost foldable region (function or class node) that
+    /// contains the cursor row and toggles its collapsed state.  When the
+    /// cursor is inside a fold body (not on the start row), it is moved to the
+    /// fold start row so it remains visible.
+    pub(crate) fn fold_toggle(&mut self) {
+        let buf_idx = self.current_buffer_idx;
+        // Ensure tree is parsed.
+        let _ = self.ts_tree_for_current_buffer();
+
+        let cursor_row = match self.current_buffer() {
+            Some(b) => b.cursor.row,
+            None => return,
+        };
+
+        let fold_ranges = self
+            .ts_cache
+            .get(&buf_idx)
+            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .unwrap_or_default();
+
+        if fold_ranges.is_empty() {
+            self.set_status(
+                "No foldable region (tree-sitter not available for this file type)".to_string(),
+            );
+            return;
+        }
+
+        // Find the innermost range whose [start, end] spans the cursor row.
+        let target = fold_ranges
+            .iter()
+            .filter(|&&(s, e)| cursor_row >= s && cursor_row <= e)
+            .min_by_key(|&&(s, e)| e - s); // innermost = smallest span
+
+        if let Some(&(start, _)) = target {
+            let closed = self.fold_closed.entry(buf_idx).or_default();
+            if closed.contains(&start) {
+                closed.remove(&start);
+            } else {
+                closed.insert(start);
+                // Move cursor to fold start if it was inside the fold body.
+                if cursor_row != start {
+                    if let Some(buf) = self.current_buffer_mut() {
+                        buf.cursor.row = start;
+                        let col = buf.cursor.col;
+                        buf.move_to_col(col);
+                    }
+                }
+            }
+        } else {
+            self.set_status("No foldable region at cursor".to_string());
+        }
+    }
+
+    /// Close all folds in the current buffer.
+    pub(crate) fn fold_close_all(&mut self) {
+        let buf_idx = self.current_buffer_idx;
+        let _ = self.ts_tree_for_current_buffer();
+
+        let fold_ranges = self
+            .ts_cache
+            .get(&buf_idx)
+            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .unwrap_or_default();
+
+        if fold_ranges.is_empty() {
+            self.set_status("No foldable regions found".to_string());
+            return;
+        }
+
+        let count = fold_ranges.len();
+        let closed = self.fold_closed.entry(buf_idx).or_default();
+        for (start, _) in fold_ranges {
+            closed.insert(start);
+        }
+        // Move cursor to the start of its fold if it ended up hidden.
+        let cursor_row = self.current_buffer().map(|b| b.cursor.row).unwrap_or(0);
+        let buf_idx = self.current_buffer_idx;
+        let hidden = {
+            let closed = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();
+            let ranges = self
+                .ts_cache
+                .get(&buf_idx)
+                .map(|s| crate::treesitter::query::fold_ranges(s))
+                .unwrap_or_default();
+            let mut h = std::collections::HashSet::new();
+            for (s, e) in &ranges {
+                if closed.contains(s) {
+                    for r in (s + 1)..=*e {
+                        h.insert(r);
+                    }
+                }
+            }
+            h
+        };
+        if hidden.contains(&cursor_row) {
+            // Find the enclosing fold start and move cursor there.
+            let closed = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();
+            let ranges = self
+                .ts_cache
+                .get(&buf_idx)
+                .map(|s| crate::treesitter::query::fold_ranges(s))
+                .unwrap_or_default();
+            if let Some(&(start, _)) = ranges
+                .iter()
+                .filter(|&&(s, e)| closed.contains(&s) && cursor_row > s && cursor_row <= e)
+                .min_by_key(|&&(s, e)| e - s)
+            {
+                if let Some(buf) = self.current_buffer_mut() {
+                    buf.cursor.row = start;
+                    let col = buf.cursor.col;
+                    buf.move_to_col(col);
+                }
+            }
+        }
+        self.set_status(format!("{count} fold{} closed", if count == 1 { "" } else { "s" }));
+    }
+
+    /// Open all folds in the current buffer.
+    pub(crate) fn fold_open_all(&mut self) {
+        let buf_idx = self.current_buffer_idx;
+        let count = self.fold_closed.get(&buf_idx).map(|s| s.len()).unwrap_or(0);
+        self.fold_closed.remove(&buf_idx);
+        if count > 0 {
+            self.set_status(format!("{count} fold{} opened", if count == 1 { "" } else { "s" }));
+        }
+    }
+
+    // ── Inline assistant (ADR 0111) ───────────────────────────────────────────
+
+    /// Poll the inline assist stream for new tokens.
+    /// Called once per frame from the run loop, alongside `agent_panel.poll_stream()`.
+    /// Returns `true` when the frame should be re-rendered.
+    pub(super) fn poll_inline_assist(&mut self) -> bool {
+        use crate::agent::StreamEvent;
+        const MAX_TOKENS_PER_FRAME: usize = 64;
+
+        // Only active during the Generating phase.
+        if !matches!(
+            self.inline_assist.as_ref().map(|s| s.phase),
+            Some(InlineAssistPhase::Generating)
+        ) {
+            return false;
+        }
+
+        let mut active = false;
+        let mut token_count = 0usize;
+        let mut error: Option<String> = None;
+
+        if let Some(state) = self.inline_assist.as_mut() {
+            if let Some(rx) = state.stream_rx.as_mut() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(StreamEvent::Token(t)) => {
+                            active = true;
+                            state.response.push_str(&t);
+                            token_count += 1;
+                            if token_count >= MAX_TOKENS_PER_FRAME {
+                                break;
+                            }
+                        },
+                        Ok(StreamEvent::Done) => {
+                            active = true;
+                            // Strip any wrapping code fence the LLM may have added.
+                            state.response = strip_assist_fence(&state.response);
+                            state.phase = InlineAssistPhase::Preview;
+                            break;
+                        },
+                        Ok(StreamEvent::Error(e)) => {
+                            active = true;
+                            error = Some(e);
+                            break;
+                        },
+                        // Ignore tool / file / task events — inline assist has no tools.
+                        Ok(_) => {
+                            active = true;
+                        },
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            // Stream ended without explicit Done.
+                            active = true;
+                            state.response = strip_assist_fence(&state.response);
+                            state.phase = InlineAssistPhase::Preview;
+                            break;
+                        },
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = error {
+            self.set_status(format!("Inline assist error: {e}"));
+            self.inline_assist = None;
+            self.mode = Mode::Normal;
+        }
+
+        active
+    }
+
     /// Apply a mutating closure to the current buffer, returning `Some(T)` on
     /// success or `None` when no buffer is open. Prefer this over the raw
     /// `if let Some(buf) = self.current_buffer_mut()` pattern so that future
@@ -784,6 +1086,11 @@ impl Editor {
                 self.set_status(format!("Agent error: {err}"));
             }
             if agent_active {
+                needs_render = true;
+            }
+
+            // ── Inline assist stream polling (ADR 0111) ───────────────────────
+            if self.poll_inline_assist() {
                 needs_render = true;
             }
             // ── Auto-Janitor trigger ───────────────────────────────────────────
@@ -1195,16 +1502,77 @@ impl Editor {
 
         self.with_buffer(|buf| buf.scroll_to_cursor(viewport_height, viewport_width));
 
+        // ── Fold data (ADR 0106) ──────────────────────────────────────────────
+        // Populate the tree-sitter cache for the current buffer (no-op if already
+        // current), then compute which rows are hidden and which are fold stubs.
+        let buf_idx = self.current_buffer_idx;
+        let _ = self.ts_tree_for_current_buffer(); // ensures ts_cache[buf_idx] is fresh
+
+        let fold_ranges: Vec<(usize, usize)> = self
+            .ts_cache
+            .get(&buf_idx)
+            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .unwrap_or_default();
+
+        let fold_closed_set = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();
+
+        let mut fold_hidden_rows: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut fold_stub_map: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for &(start, end) in &fold_ranges {
+            if fold_closed_set.contains(&start) {
+                for row in (start + 1)..=end {
+                    fold_hidden_rows.insert(row);
+                }
+                fold_stub_map.insert(start, end);
+            }
+        }
+
+        // The fold_data passed to the renderer (None when no folds are active).
+        let fold_data_owned: Option<crate::ui::FoldData> = if !fold_stub_map.is_empty() {
+            Some(crate::ui::FoldData {
+                hidden_rows: fold_hidden_rows.clone(),
+                fold_starts: fold_stub_map,
+            })
+        } else {
+            None
+        };
+        let fold_data_ref: Option<&crate::ui::FoldData> = fold_data_owned.as_ref();
+
+        // ── Sticky scroll header (ADR 0107) ───────────────────────────────────
+        let scroll_row_for_sticky = self.current_buffer().map(|b| b.scroll_row).unwrap_or(0);
+        let sticky_header_owned: Option<String> = self
+            .ts_cache
+            .get(&buf_idx)
+            .and_then(|s| crate::treesitter::query::sticky_scroll_header(s, scroll_row_for_sticky));
+        let sticky_header_ref: Option<&str> = sticky_header_owned.as_deref();
+
+        // ── Account for sticky header in viewport height ───────────────────────
+        // When a sticky header is present it occupies 1 row; reduce the content
+        // height used for scroll calculations and line-range clipping accordingly.
+        let sticky_height: usize = if sticky_header_owned.is_some() { 1 } else { 0 };
+        let content_viewport_height = viewport_height.saturating_sub(sticky_height);
+
         // Get buffer data before drawing to avoid borrow issues.
-        // Only clone the lines that are actually visible in the viewport — for a
-        // 10 000-line file this reduces the per-frame allocation from O(N_total)
-        // to O(viewport_height) (typically ~50 lines).
+        // Extend the visible range by the number of hidden rows so that after
+        // fold-skipping the renderer still has enough lines to fill the viewport.
         let buffer_data = self.current_buffer().map(|buf| {
-            let vis_end = (buf.scroll_row + viewport_height).min(buf.lines().len());
+            let extra = fold_hidden_rows.len();
+            let vis_end = (buf.scroll_row + content_viewport_height + extra).min(buf.lines().len());
+
+            // Adjust cursor.row to the visual row: subtract the number of hidden
+            // rows that fall between scroll_row and the cursor row so that the
+            // renderer positions the terminal cursor at the correct screen row.
+            let hidden_before_cursor =
+                (buf.scroll_row..buf.cursor.row).filter(|r| fold_hidden_rows.contains(r)).count();
+            let mut visual_cursor = buf.cursor.clone();
+            visual_cursor.row = buf.cursor.row.saturating_sub(hidden_before_cursor);
+
             (
                 buf.name.clone(),
                 buf.is_modified,
-                buf.cursor.clone(),
+                visual_cursor,
                 buf.scroll_row,
                 buf.scroll_col,
                 buf.lines()[buf.scroll_row..vis_end].to_vec(),
@@ -1217,7 +1585,6 @@ impl Editor {
         // scroll position, and active buffer are all unchanged.  This eliminates the
         // ~3–8 ms syntect cost on every frame where the user is just moving the cursor.
         let term_height = viewport_height;
-        let buf_idx = self.current_buffer_idx;
 
         // Collect the cache key from an immutable borrow (borrow ends before mut access).
         let cache_key = self.current_buffer().map(|buf| {
@@ -1228,10 +1595,16 @@ impl Editor {
 
         let highlighted_lines: Option<Arc<Vec<Vec<Span<'static>>>>> =
             if let Some((scroll_row, lsp_ver, ext, name)) = cache_key {
+                // Cache hit only when: same buffer, same scroll position, same content version,
+                // AND the cached range covers at least as many rows as we now need
+                // (the range grows when folds are active to cover hidden rows).
+                let hl_extra = fold_hidden_rows.len();
+                let required_end = (scroll_row + term_height + hl_extra).min(usize::MAX);
                 let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
                     c.buffer_idx == buf_idx
                         && c.scroll_row == scroll_row
                         && c.lsp_version == lsp_ver
+                        && c.spans.len() >= required_end.saturating_sub(scroll_row)
                 });
 
                 if cache_hit {
@@ -1239,8 +1612,12 @@ impl Editor {
                     self.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
                 } else {
                     // Cache miss: run syntect for the visible window and store result.
+                    // Extend the range by the number of hidden (fold-skipped) rows so
+                    // that the renderer can look up highlights for all visible buffer rows
+                    // using `line_idx = buf_row - scroll_row` even when folds are active.
                     let spans = if let Some(buf) = self.current_buffer() {
-                        let end = (scroll_row + term_height).min(buf.lines().len());
+                        let hl_extra = fold_hidden_rows.len();
+                        let end = (scroll_row + term_height + hl_extra).min(buf.lines().len());
                         buf.lines()[scroll_row..end]
                             .iter()
                             .map(|line| self.highlighter.highlight_line(line, &ext, &name))
@@ -1557,6 +1934,13 @@ impl Editor {
                 } else {
                     None
                 },
+                fold_data: fold_data_ref,
+                sticky_header: sticky_header_ref,
+                inline_assist: self.inline_assist.as_ref().map(|s| crate::ui::InlineAssistView {
+                    prompt: &s.prompt,
+                    response: &s.response,
+                    phase: s.phase,
+                }),
             };
             UI::render(frame, &ctx);
         })?;
@@ -1619,4 +2003,21 @@ impl Drop for Editor {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
+}
+
+/// Strip a wrapping code fence from an inline assist response.
+///
+/// Many models wrap their output in ` ```lang\n…\n``` ` despite being told not
+/// to.  This strips the opening fence (including any language tag) and the
+/// closing fence, returning only the code body.
+fn strip_assist_fence(s: &str) -> String {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Skip optional language tag up to the first newline.
+        let body = if let Some(nl) = rest.find('\n') { &rest[nl + 1..] } else { rest };
+        // Strip closing fence.
+        let body = body.strip_suffix("```").unwrap_or(body).trim_end();
+        return body.to_string();
+    }
+    trimmed.to_string()
 }

@@ -44,20 +44,28 @@ fn tree_recursive(
         let is_file = e.path().is_file();
         (is_file, e.file_name().to_string_lossy().to_lowercase())
     });
+    // Pre-build indent once per level (depth ≤ max_depth, typically ≤ 2).
+    let indent = "  ".repeat(depth);
     for entry in items {
-        let name = entry.file_name().to_string_lossy().to_string();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
         if name.starts_with('.') {
             continue; // skip hidden
         }
-        if matches!(name.as_str(), "target" | "node_modules" | "dist" | "build" | ".git") {
+        if matches!(name.as_ref(), "target" | "node_modules" | "dist" | "build" | ".git") {
             continue;
         }
-        let indent = "  ".repeat(depth);
         if entry.path().is_dir() {
-            out.push_str(&format!("{indent}{name}/\n"));
+            // Push directly onto `out` — avoids the intermediate String that
+            // `format!("{indent}{name}/\n")` would allocate.
+            out.push_str(&indent);
+            out.push_str(&name);
+            out.push_str("/\n");
             tree_recursive(root, &entry.path(), depth + 1, max_depth, out);
         } else {
-            out.push_str(&format!("{indent}{name}\n"));
+            out.push_str(&indent);
+            out.push_str(&name);
+            out.push('\n');
         }
     }
 }
@@ -115,6 +123,8 @@ impl AgentPanel {
             at_picker: None,
             janitor_compressing: false,
             pending_janitor: false,
+            cached_project_tree: None,
+            session_snapshots: std::collections::HashMap::new(),
         }
     }
 
@@ -256,20 +266,10 @@ impl AgentPanel {
     /// Matches `preferred_model` against `id` first, then `version` (so configs that stored
     /// a versioned ID like "gpt-4o-2024-11-20" still resolve correctly).
     fn set_models(&mut self, models: Vec<ModelVersion>, preferred_model: &str) {
-        let mut models = models;
-        // For Copilot, prepend a synthetic "Auto" entry — GitHub routes server-side
-        // when model: "auto" is sent.  VS Code does the same; it's not in /models.
-        if self.provider == super::provider::ProviderKind::Copilot {
-            models.insert(
-                0,
-                ModelVersion {
-                    id: "auto".to_string(),
-                    version: "auto".to_string(),
-                    name: "Auto".to_string(),
-                    context_window: 128_000,
-                },
-            );
-        }
+        // NOTE: "auto" was previously prepended here as a synthetic Copilot entry under
+        // the assumption that sending model:"auto" triggers server-side routing like VS Code.
+        // Testing confirmed the Copilot API returns 400 model_not_supported for that value —
+        // the routing is a VS Code-side abstraction, not an API feature.
         let found =
             models.iter().position(|m| m.id == preferred_model || m.version == preferred_model);
         if found.is_none() && !preferred_model.is_empty() {
@@ -437,6 +437,8 @@ impl AgentPanel {
         self.total_session_prompt_tokens = 0;
         self.total_session_completion_tokens = 0;
         self.session_rounds = 0;
+        self.cached_project_tree = None;
+        self.session_snapshots.clear();
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -685,7 +687,17 @@ impl AgentPanel {
 
         // Build a shallow file tree so the model knows the project layout upfront
         // and never needs to burn rounds on list_directory exploration.
-        let project_tree = build_project_tree(&project_root, 2);
+        // The tree is cached for up to 30 s to avoid a full filesystem walk on
+        // every submit (the tree rarely changes within a single session).
+        const TREE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+        let project_tree = match self.cached_project_tree.as_ref() {
+            Some((tree, ts)) if ts.elapsed() < TREE_TTL => tree.clone(),
+            _ => {
+                let tree = build_project_tree(&project_root, 2);
+                self.cached_project_tree = Some((tree.clone(), std::time::Instant::now()));
+                tree
+            },
+        };
 
         let tool_rules = "\
 MANDATORY PROTOCOL — follow these rules without exception:\n\
@@ -903,14 +915,19 @@ Available tools:\n\
         // ── Context breakdown for diagnostics / fuel gauge (Phase 1) ─────────
         // Compute per-segment token counts now that send_messages is fully assembled.
         // history = send_messages[1..n-1] (everything except system[0] and user[-1]).
+        //
+        // Uses the same len/4 approximation as history truncation (above) rather
+        // than calling tiktoken here.  This keeps the breakdown numbers consistent
+        // with the budget the truncation algorithm actually used, and avoids
+        // O(N × tokeniser) cost on every submit for display-only numbers.
         let history_t: u32 = send_messages[1..send_messages.len().saturating_sub(1)]
             .iter()
-            .map(|v| super::token_count::count(v["content"].as_str().unwrap_or("")))
+            .map(|v| (v["content"].as_str().unwrap_or("").len() / 4) as u32)
             .sum();
-        let ctx_file_t =
-            context_snippet.as_ref().map(|c| super::token_count::count(c)).unwrap_or(0);
-        let system_t = super::token_count::count(&system);
-        let user_msg_t = super::token_count::count(&user_text);
+        let ctx_file_t = context_snippet.as_ref().map(|c| (c.len() / 4) as u32).unwrap_or(0);
+        // system_t is already computed via len/4 above (system_tokens); reuse it.
+        let system_t = system_tokens;
+        let user_msg_t = (user_text.len() / 4) as u32;
         self.last_breakdown = Some(super::ContextBreakdown {
             sys_rules_t: system_t.saturating_sub(ctx_file_t),
             ctx_file_t,
@@ -959,6 +976,86 @@ Available tools:\n\
             auto_compress,
         ));
         Ok(())
+    }
+
+    /// Launch a single-round, no-tool LLM request for the inline assistant (ADR 0111).
+    ///
+    /// Builds a minimal 2-message conversation (system + user), spawns `agentic_loop`
+    /// with `max_rounds = 1` and tool calling disabled, and returns the streaming channel
+    /// pair.  The caller (Editor) wraps these in an `InlineAssistState`.
+    pub async fn start_inline_assist(
+        &mut self,
+        selection_text: String,
+        prompt: String,
+        project_root: PathBuf,
+        language: Option<String>,
+    ) -> Result<(mpsc::UnboundedReceiver<StreamEvent>, oneshot::Sender<()>)> {
+        let api_token = self.ensure_token().await?;
+        let model_id = self.selected_model_id().to_string();
+
+        let chat_endpoint = match self.provider {
+            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
+            ProviderKind::Ollama => {
+                format!("{}/v1/chat/completions", self.ollama_base_url)
+            },
+        };
+
+        // Disable tool calling — inline assist is pure text generation.
+        let provider_settings = super::provider::ProviderSettings {
+            kind: self.provider.clone(),
+            api_token,
+            chat_endpoint,
+            num_ctx: if self.provider == ProviderKind::Ollama {
+                self.ollama_context_length
+            } else {
+                None
+            },
+            supports_tool_calls: false,
+        };
+
+        let lang_str = language.as_deref().unwrap_or("code");
+        let system_prompt = format!(
+            "You are a {lang_str} code transformation engine. \
+            You receive a CODE block and a DIRECTIVE. \
+            You output ONLY the transformed {lang_str} code — \
+            no conversation, no explanation, no markdown fences, no preamble. \
+            If the code is empty, output only what was asked for. \
+            Preserve the original indentation."
+        );
+
+        let user_content = if selection_text.is_empty() {
+            format!("CODE:\n(none)\n\nDIRECTIVE: {prompt}")
+        } else {
+            format!("CODE:\n{selection_text}\n\nDIRECTIVE: {prompt}")
+        };
+
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": system_prompt }),
+            serde_json::json!({ "role": "user", "content": user_content }),
+        ];
+
+        let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let (abort_tx, abort_rx) = oneshot::channel::<()>();
+        // Dummy continuation + question channels — inline assist never uses them.
+        let (_cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
+        let (_question_tx, question_rx) = mpsc::unbounded_channel::<String>();
+
+        tokio::spawn(agentic_loop(
+            provider_settings,
+            messages,
+            project_root,
+            tx,
+            model_id,
+            1, // max_rounds
+            0, // warning_threshold
+            cont_rx,
+            question_rx,
+            abort_rx,
+            None,  // no MCP manager
+            false, // auto_compress
+        ));
+
+        Ok((rx, abort_tx))
     }
 
     pub fn poll_stream(&mut self, janitor_threshold: u32) -> bool {
@@ -1010,6 +1107,11 @@ Available tools:\n\
                     Ok(StreamEvent::FileModified { path }) => {
                         active = true;
                         self.pending_reloads.push(path);
+                    },
+                    Ok(StreamEvent::FileSnapshot { path, original }) => {
+                        active = true;
+                        // Only store the first snapshot per path per session.
+                        self.session_snapshots.entry(path).or_insert(original);
                     },
                     Ok(StreamEvent::TaskCreated { title }) => {
                         active = true;
@@ -1089,30 +1191,18 @@ Available tools:\n\
                     },
                     Ok(StreamEvent::ModelSwitched { from, to }) => {
                         active = true;
-                        let currently_auto = self
-                            .available_models
-                            .get(self.selected_model)
-                            .map(|m| m.id == "auto")
-                            .unwrap_or(false);
-                        if currently_auto {
-                            // Auto-routing to a specific model is expected; just log it.
-                            info!("[auto] Copilot routed to {to:?}");
-                        } else {
-                            // Unexpected switch = premium quota exceeded; update selection and warn.
-                            if let Some(idx) = self
-                                .available_models
-                                .iter()
-                                .position(|m| m.id == to || m.version == to)
-                            {
-                                self.selected_model = idx;
-                            }
-                            let notice = format!(
-                                "\n\n> ⚠  Copilot switched model: **{from}** → **{to}** (premium quota exceeded)\n\n"
-                            );
-                            match self.streaming_reply.as_mut() {
-                                Some(r) => r.push_str(&notice),
-                                None => self.streaming_reply = Some(notice),
-                            }
+                        // Unexpected switch = premium quota exceeded; update selection and warn.
+                        if let Some(idx) =
+                            self.available_models.iter().position(|m| m.id == to || m.version == to)
+                        {
+                            self.selected_model = idx;
+                        }
+                        let notice = format!(
+                            "\n\n> ⚠  Copilot switched model: **{from}** → **{to}** (premium quota exceeded)\n\n"
+                        );
+                        match self.streaming_reply.as_mut() {
+                            Some(r) => r.push_str(&notice),
+                            None => self.streaming_reply = Some(notice),
                         }
                     },
                     Ok(StreamEvent::Done) => {

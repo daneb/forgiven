@@ -135,6 +135,12 @@ pub(super) async fn agentic_loop(
     let mut effective_max = max_rounds;
     let mut warned = false; // emit the MaxRoundsWarning only once
 
+    // Tracks which project-relative paths have already been snapshotted this
+    // session.  Before the first write_file / edit_file for each path, we read
+    // the existing content and emit FileSnapshot so the panel can restore it
+    // on `SPC a u`.
+    let mut snapshotted: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     loop {
         if round >= effective_max {
             // Only reached if we exhausted all rounds without the model stopping.
@@ -472,6 +478,23 @@ pub(super) async fn agentic_loop(
                 name: call.name.clone(),
                 args_summary: call.args_summary(),
             });
+
+            // ── Pre-snapshot: capture original content before first mutating edit ──
+            if matches!(call.name.as_str(), "write_file" | "edit_file") {
+                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    if let Some(path_str) = args.get("path").and_then(|v| v.as_str()) {
+                        if snapshotted.insert(path_str.to_string()) {
+                            // First edit of this file this session — send the original.
+                            let abs = project_root.join(path_str);
+                            let original = std::fs::read_to_string(&abs).unwrap_or_default();
+                            let _ = tx.send(StreamEvent::FileSnapshot {
+                                path: path_str.to_string(),
+                                original,
+                            });
+                        }
+                    }
+                }
+            }
 
             let result = if call.name == "ask_user" {
                 // Parse question + options, emit an AskingUser event, and block until

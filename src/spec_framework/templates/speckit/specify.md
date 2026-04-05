@@ -31,8 +31,12 @@ If no feature name is provided, ask the user for one before proceeding.
 5. Produce `FEATURE_DIR/SPEC.md` containing:
    - **Overview** — 2–3 sentence summary.
    - **User stories** — ranked by priority (P0 = must-have, P1 = important, P2 = nice-to-have).
-   - **Acceptance criteria** — testable conditions per story.
+     Label each story with a sequential ID: `US-001`, `US-002`, etc.
+   - **Acceptance criteria** — testable conditions per story, each referencing its
+     story ID (e.g. `US-001-AC1`).
    - **Out of scope** — anything explicitly excluded from this spec.
+   Wrap all file paths, HTTP routes, header names, config keys, CLI commands,
+   and story IDs in backticks throughout the document.
 6. Save the document to `FEATURE_DIR/SPEC.md` (create the directory if needed).
    Confirm with the user before finalising (they may want to adjust priorities or add
    missing stories).

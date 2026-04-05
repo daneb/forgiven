@@ -13,7 +13,7 @@ use crate::agent::{
     ContentSegment, ProviderKind, Role, SlashMenuState,
 };
 use crate::buffer::{Cursor, Selection};
-use crate::editor::{HoverPopupState, LocationListState};
+use crate::editor::{HoverPopupState, InlineAssistPhase, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
@@ -134,8 +134,27 @@ pub struct FileInfoData {
     pub permissions: Option<String>,
 }
 
+/// View data for the inline assist overlay (Mode::InlineAssist, ADR 0111).
+pub struct InlineAssistView<'a> {
+    pub prompt: &'a str,
+    pub response: &'a str,
+    pub phase: InlineAssistPhase,
+}
+
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
 type BufferData = (String, bool, Cursor, usize, usize, Vec<String>, Option<Selection>);
+
+/// Fold rendering data passed to `render_buffer` (ADR 0106).
+///
+/// Contains which buffer rows are hidden (inside a closed fold) and which rows
+/// are the start of a closed fold (displayed as a `··· N lines` stub).
+pub struct FoldData {
+    /// Buffer rows that must not be rendered (they are inside a closed fold).
+    pub hidden_rows: std::collections::HashSet<usize>,
+    /// Mapping from fold-start row → fold-end row for currently closed folds.
+    /// Used to render the `··· N lines` stub on the fold-start line.
+    pub fold_starts: std::collections::HashMap<usize, usize>,
+}
 // Buffer list tuple: (buffer names with modified flags, selected index)
 type BufferList = (Vec<(String, bool)>, usize);
 // File list tuple: (fuzzy-filtered entries with match indices, selected index, query)
@@ -202,6 +221,14 @@ pub struct RenderContext<'a> {
     pub hover_popup: Option<&'a HoverPopupState>,
     /// Text in the LSP rename input (Mode::LspRename only).
     pub lsp_rename_buffer: Option<&'a str>,
+    /// Code fold data for the primary buffer: hidden rows + fold stubs (ADR 0106).
+    /// `None` when no folds are active for the current buffer.
+    pub fold_data: Option<&'a FoldData>,
+    /// Sticky scroll context header text (ADR 0107).
+    /// First line of the innermost enclosing scope that started above `scroll_row`.
+    pub sticky_header: Option<&'a str>,
+    /// Inline assist overlay data (Mode::InlineAssist, ADR 0111).
+    pub inline_assist: Option<InlineAssistView<'a>>,
 }
 
 /// UI rendering for the editor
@@ -242,6 +269,8 @@ impl UI {
         let in_file_search_query = ctx.in_file_search_query;
         let hover_popup = ctx.hover_popup;
         let lsp_rename_buffer = ctx.lsp_rename_buffer;
+        let fold_data = ctx.fold_data;
+        let sticky_header = ctx.sticky_header;
 
         let size = frame.area();
 
@@ -371,6 +400,8 @@ impl UI {
                 left_preview,
                 !split_right_focused,
                 startup_elapsed,
+                None,
+                None,
             );
 
             // Draw vertical separator
@@ -390,6 +421,8 @@ impl UI {
                 None,
                 split_right_focused,
                 startup_elapsed,
+                None,
+                None,
             );
         } else {
             Self::render_buffer(
@@ -403,6 +436,8 @@ impl UI {
                 preview_lines,
                 true,
                 startup_elapsed,
+                fold_data,
+                sticky_header,
             );
         }
 
@@ -489,6 +524,11 @@ impl UI {
         if let Some(info) = file_info {
             let explorer_right_edge = if explorer_visible { 25u16 } else { 0 };
             Self::render_file_info_popup(frame, info, size, explorer_right_edge);
+        }
+
+        // Render inline assist overlay (Mode::InlineAssist, ADR 0111)
+        if let Some(view) = &ctx.inline_assist {
+            Self::render_inline_assist_overlay(frame, view, size);
         }
     }
 }

@@ -27,6 +27,33 @@ pub enum Mode {
     LocationList,    // LSP location list overlay (goto-definition / references / symbols)
     LspHover,        // Read-only hover info popup (K / SPC l h)
     LspRename,       // LSP rename input popup (SPC l r)
+    InlineAssist,    // Inline AI transform overlay (SPC a i)
+}
+
+/// The semantic kind of a tree-sitter text object.
+///
+/// Used in `Action::SelectTextObject`, `Action::DeleteTextObject`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextObjectKind {
+    /// `f` — function or method (`fn foo()`, `def foo():`, `function foo() {}`, …)
+    Function,
+    /// `c` — class, struct, impl, or trait (`struct Foo`, `class Foo`, …)
+    Class,
+    /// `b` — brace-delimited block (`{}`, `compound_statement`, …)
+    Block,
+}
+
+impl TextObjectKind {
+    /// Map a single character to a `TextObjectKind`.  Returns `None` for
+    /// characters that are not text object kind specifiers.
+    pub fn from_char(ch: char) -> Option<Self> {
+        Some(match ch {
+            'f' => TextObjectKind::Function,
+            'c' => TextObjectKind::Class,
+            'b' => TextObjectKind::Block,
+            _ => return None,
+        })
+    }
 }
 
 /// An editor action to be executed
@@ -148,6 +175,59 @@ pub enum Action {
     // Diagnostics
     DiagnosticsOpen,    // SPC d d — open diagnostics overlay
     DiagnosticsOpenLog, // SPC d l — open /tmp/forgiven.log in editor
+    // Tree-sitter text objects (ADR 0105)
+    /// `v` + `i`/`a` + `f`/`c`/`b` — enter Visual and select the text object
+    SelectTextObject {
+        inner: bool,
+        kind: TextObjectKind,
+    },
+    /// `d` + `i`/`a` + `f`/`c`/`b` — delete the text object into the clipboard
+    DeleteTextObject {
+        inner: bool,
+        kind: TextObjectKind,
+    },
+    /// `y` + `i`/`a` + `f`/`c`/`b` — yank the text object into the clipboard
+    YankTextObject {
+        inner: bool,
+        kind: TextObjectKind,
+    },
+    /// `c` + `i`/`a` + `f`/`c`/`b` — delete the text object + enter Insert mode
+    ChangeTextObject {
+        inner: bool,
+        kind: TextObjectKind,
+    },
+    // Code folding (ADR 0106)
+    /// `za` — toggle the fold at the cursor row
+    FoldToggle,
+    /// `zM` — close all folds in the current buffer
+    FoldCloseAll,
+    /// `zR` — open all folds in the current buffer
+    FoldOpenAll,
+    // Surround operations (ADR 0110)
+    /// `ds{ch}` — delete the surrounding delimiter `ch` on the current line
+    SurroundDelete {
+        ch: char,
+    },
+    /// `cs{from}` — first half of change-surround; stores `from`, awaits `to`
+    SurroundChangePrepare {
+        from: char,
+    },
+    /// emitted internally after `cs{from}{to}` is fully resolved
+    SurroundChange {
+        from: char,
+        to: char,
+    },
+    /// `ys{ch}` — surround the word under the cursor with `ch`
+    SurroundAddWord {
+        ch: char,
+    },
+    // Inline assistant (ADR 0111)
+    /// `SPC a i` — open the inline AI assist overlay on the current selection (or cursor)
+    InlineAssistStart,
+    /// Accept the streamed replacement (Enter in Preview phase)
+    InlineAssistAccept,
+    /// Cancel and discard (Esc at any phase)
+    InlineAssistCancel,
 }
 
 /// Represents a keybinding tree node
@@ -256,6 +336,9 @@ impl KeyHandler {
         agent_node
             .children
             .insert('j', KeyNode::leaf("compress history (janitor)", Action::AgentJanitorCompress));
+        agent_node
+            .children
+            .insert('i', KeyNode::leaf("inline AI assist", Action::InlineAssistStart));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree
@@ -393,6 +476,12 @@ impl KeyHandler {
         }
     }
 
+    /// Returns true when a leader sequence is currently being built (SPC already pressed).
+    /// Used by visual-mode handlers to forward leader keys without dropping the selection.
+    pub fn leader_active(&self) -> bool {
+        self.sequence_start.is_some()
+    }
+
     /// Clear the current sequence and any accumulated count.
     pub fn clear_sequence(&mut self) {
         self.sequence.clear();
@@ -413,11 +502,24 @@ impl KeyHandler {
             }
         }
 
-        // ── Resolve three-key sequences (dt/df + char, yt/yf, ct/cf) ─────────
+        // ── Resolve three-key sequences (dt/df + char, yt/yf, ct/cf, di/da/…) ─
         if self.pending_second_key.is_some() {
             let pk = self.pending_key.take().unwrap_or(' ');
             let sk = self.pending_second_key.take().unwrap_or(' ');
             if let KeyCode::Char(ch) = key.code {
+                // Text object sequences: d/y/c + i/a + f/c/b
+                if matches!(sk, 'i' | 'a') {
+                    if let Some(kind) = TextObjectKind::from_char(ch) {
+                        let inner = sk == 'i';
+                        return match pk {
+                            'd' => Action::DeleteTextObject { inner, kind },
+                            'y' => Action::YankTextObject { inner, kind },
+                            'c' => Action::ChangeTextObject { inner, kind },
+                            _ => Action::Noop,
+                        };
+                    }
+                    return Action::Noop; // unrecognised kind char — cancel
+                }
                 return match (pk, sk) {
                     ('d', 't') => Action::DeleteToChar { ch, inclusive: false },
                     ('d', 'f') => Action::DeleteToChar { ch, inclusive: true },
@@ -425,6 +527,10 @@ impl KeyHandler {
                     ('y', 'f') => Action::YankToChar { ch, inclusive: true },
                     ('c', 't') => Action::ChangeToChar { ch, inclusive: false },
                     ('c', 'f') => Action::ChangeToChar { ch, inclusive: true },
+                    // Surround operations (ADR 0110)
+                    ('d', 's') => Action::SurroundDelete { ch },
+                    ('c', 's') => Action::SurroundChangePrepare { from: ch },
+                    ('y', 's') => Action::SurroundAddWord { ch },
                     _ => Action::Noop,
                 };
             }
@@ -434,8 +540,9 @@ impl KeyHandler {
         // ── Resolve pending double-key prefixes (dd, gg, yy, ft, …) ──────────
         if let Some(pk) = self.pending_key.take() {
             if let KeyCode::Char(ch) = key.code {
-                // Check if this needs a third key (char argument)
-                if matches!((pk, ch), ('d' | 'y' | 'c', 'f' | 't')) {
+                // Check if this needs a third key (char argument):
+                // dt/df/yt/yf/ct/cf + char, text objects di/da/yi/ya/ci/ca, and ds/cs/ys surround
+                if matches!((pk, ch), ('d' | 'y' | 'c', 'f' | 't' | 'i' | 'a' | 's')) {
                     self.pending_key = Some(pk);
                     self.pending_second_key = Some(ch);
                     return Action::Noop;
@@ -460,6 +567,10 @@ impl KeyHandler {
                     ('t', _) => Action::FindCharForward { ch, inclusive: false },
                     ('F', _) => Action::FindCharBackward { ch, inclusive: true },
                     ('T', _) => Action::FindCharBackward { ch, inclusive: false },
+                    // z — fold operations (ADR 0106)
+                    ('z', 'a') => Action::FoldToggle,
+                    ('z', 'M') => Action::FoldCloseAll,
+                    ('z', 'R') => Action::FoldOpenAll,
                     _ => Action::Noop, // unknown combo — discard
                 };
             }
@@ -523,7 +634,7 @@ impl KeyHandler {
             KeyCode::Char('P') => Action::PasteBefore,
 
             // Double-key prefixes: store first key, resolve on next keypress
-            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)  f/t/F/T(char)
+            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)  f/t/F/T(char)  z(a/M/R)
             KeyCode::Char('d')
             | KeyCode::Char('g')
             | KeyCode::Char('y')
@@ -531,7 +642,8 @@ impl KeyHandler {
             | KeyCode::Char('f')
             | KeyCode::Char('t')
             | KeyCode::Char('F')
-            | KeyCode::Char('T') => {
+            | KeyCode::Char('T')
+            | KeyCode::Char('z') => {
                 if let KeyCode::Char(ch) = key.code {
                     self.pending_key = Some(ch);
                 }

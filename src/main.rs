@@ -67,6 +67,7 @@ mod markdown;
 mod mcp;
 mod search;
 mod spec_framework;
+mod treesitter;
 mod ui;
 
 use crate::config::Config;

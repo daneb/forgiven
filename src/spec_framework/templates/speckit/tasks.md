@@ -23,11 +23,15 @@ If no feature name is provided, ask the user for one before proceeding.
    - State its **inputs** (files to read/create) and **outputs** (files to write/modify).
    - List any **dependencies** (task numbers that must complete first).
    - Include a one-sentence **acceptance condition** (how to verify it's done).
+   - Wrap all file paths, module names, function names, CLI commands, and HTTP
+     routes in backticks (e.g. `src/auth/mod.rs`, `POST /mcp`, `cargo test`).
 5. Rules for the task list:
    - Tasks must be atomic — each changes or creates exactly one logical unit of work.
    - Order tasks so each one builds on what's already there (no forward dependencies).
    - Reading a file before editing it does NOT count as a separate task.
-   - Group related tasks with a `## Phase` heading (e.g. "## Phase 1 — Scaffolding").
+   - Group related tasks with a `## Phase` heading (e.g. `## Phase 1 — Scaffolding`).
+   - Number tasks globally and continuously across phases (T-01, T-02 …) so
+     dependency references are unambiguous regardless of phase boundaries.
 6. Save the document to `FEATURE_DIR/TASKS.md`. Present the full task list to the
    user and confirm they agree with the ordering and scope before proceeding.
 7. End your reply noting readiness for Phase 5 (`/speckit.implement <FEATURE>`).

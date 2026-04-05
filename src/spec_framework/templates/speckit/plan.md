@@ -29,6 +29,8 @@ If no feature name is provided, ask the user for one before proceeding.
    - **External integrations** — APIs, services, auth flows.
    - **Security considerations** — how the design addresses threat surfaces.
    - **Open questions / risks** — unknowns that could affect the plan.
+   Wrap all file paths, module names, function names, HTTP routes, header names,
+   config keys, and story/decision-record IDs in backticks throughout the document.
 5. For each architectural decision that deviates from the obvious default, write a
    one-sentence "Decision Record" explaining why.
 6. Save the document to `FEATURE_DIR/PLAN.md`. Ask the user to review before

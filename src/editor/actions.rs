@@ -769,7 +769,338 @@ Skip anything already obvious from reading the code.";
             Action::InFileSearchPrev => {
                 self.with_buffer(|buf| buf.search_prev());
             },
+
+            // ── Tree-sitter text objects (ADR 0105) ───────────────────────────
+            Action::SelectTextObject { inner, kind } => {
+                self.apply_text_object_select(inner, kind);
+            },
+            Action::DeleteTextObject { inner, kind } => {
+                self.apply_text_object_delete(inner, kind);
+            },
+            Action::YankTextObject { inner, kind } => {
+                self.apply_text_object_yank(inner, kind);
+            },
+            Action::ChangeTextObject { inner, kind } => {
+                self.apply_text_object_change(inner, kind);
+            },
+
+            // ── Code folding (ADR 0106) ───────────────────────────────────────
+            Action::FoldToggle => {
+                self.fold_toggle();
+            },
+            Action::FoldCloseAll => {
+                self.fold_close_all();
+            },
+            Action::FoldOpenAll => {
+                self.fold_open_all();
+            },
+
+            // ── Surround operations (ADR 0110) ────────────────────────────────
+            Action::SurroundDelete { ch } => {
+                self.with_buffer(|buf| buf.save_undo_snapshot());
+                self.apply_surround_delete(ch);
+                self.notify_lsp_change();
+            },
+            Action::SurroundChangePrepare { from } => {
+                self.surround_change_from = Some(from);
+                self.set_status(format!("cs{from} — enter target char"));
+            },
+            Action::SurroundChange { from, to } => {
+                self.with_buffer(|buf| buf.save_undo_snapshot());
+                self.apply_surround_change(from, to);
+                self.notify_lsp_change();
+            },
+            Action::SurroundAddWord { ch } => {
+                self.with_buffer(|buf| buf.save_undo_snapshot());
+                self.apply_surround_add_word(ch);
+                self.notify_lsp_change();
+            },
+
+            // ── Inline assistant (ADR 0111) ───────────────────────────────────
+            Action::InlineAssistStart => {
+                if self.current_buffer().is_none() {
+                    return Ok(());
+                }
+                // Capture the current selection (if any) and the selected text.
+                // When there is no visual selection (Normal mode), synthesise a
+                // line-covering selection so accept replaces the line rather than
+                // inserting alongside it.
+                let has_visual_selection =
+                    self.current_buffer().and_then(|buf| buf.selection.as_ref()).is_some();
+
+                let (original_selection, original_text) = if has_visual_selection {
+                    let sel = self.current_buffer().and_then(|buf| buf.selection.clone());
+                    let text = self
+                        .current_buffer()
+                        .and_then(|buf| buf.yank_selection())
+                        .unwrap_or_default();
+                    (sel, text)
+                } else {
+                    // No visual selection — treat the current line as the target.
+                    let (row, line_len, line_text) = self
+                        .current_buffer()
+                        .map(|buf| {
+                            let row = buf.cursor.row;
+                            let text = buf.lines().get(row).cloned().unwrap_or_default();
+                            let len = text.chars().count();
+                            (row, len, text)
+                        })
+                        .unwrap_or((0, 0, String::new()));
+
+                    let sel = crate::buffer::Selection::new(
+                        crate::buffer::Cursor { row, col: 0 },
+                        crate::buffer::Cursor { row, col: line_len },
+                    );
+                    (Some(sel), line_text)
+                };
+                let target_buffer_idx = self.current_buffer_idx;
+                let language = self
+                    .current_buffer()
+                    .and_then(|buf| buf.file_path.as_deref())
+                    .and_then(|p| p.extension())
+                    .and_then(|e| e.to_str())
+                    .map(|ext| match ext.to_ascii_lowercase().as_str() {
+                        "rs" => "Rust".to_string(),
+                        "py" => "Python".to_string(),
+                        "js" => "JavaScript".to_string(),
+                        "ts" => "TypeScript".to_string(),
+                        "tsx" => "TypeScript TSX".to_string(),
+                        "go" => "Go".to_string(),
+                        "c" | "h" => "C".to_string(),
+                        "cpp" | "cc" | "cxx" | "hpp" => "C++".to_string(),
+                        "java" => "Java".to_string(),
+                        "kt" => "Kotlin".to_string(),
+                        "swift" => "Swift".to_string(),
+                        "rb" => "Ruby".to_string(),
+                        "sh" | "bash" | "zsh" => "Shell".to_string(),
+                        "toml" => "TOML".to_string(),
+                        "json" => "JSON".to_string(),
+                        "yaml" | "yml" => "YAML".to_string(),
+                        "md" => "Markdown".to_string(),
+                        "html" => "HTML".to_string(),
+                        "css" => "CSS".to_string(),
+                        "sql" => "SQL".to_string(),
+                        other => other.to_string(),
+                    });
+
+                self.inline_assist = Some(crate::editor::InlineAssistState {
+                    prompt: String::new(),
+                    original_text,
+                    original_selection,
+                    target_buffer_idx,
+                    language,
+                    response: String::new(),
+                    phase: crate::editor::InlineAssistPhase::Input,
+                    stream_rx: None,
+                    abort_tx: None,
+                });
+                self.mode = Mode::InlineAssist;
+            },
+
+            Action::InlineAssistAccept => {
+                if let Some(state) = self.inline_assist.take() {
+                    let response = state.response.clone();
+                    let buf_idx = state.target_buffer_idx;
+                    if let Some(buf) = self.buffers.get_mut(buf_idx) {
+                        buf.save_undo_snapshot();
+                        // Restore and delete the original selection, then insert response.
+                        if let Some(sel) = state.original_selection {
+                            buf.selection = Some(sel);
+                            buf.delete_selection();
+                        }
+                        if !response.is_empty() {
+                            buf.insert_text_block(&response);
+                        }
+                        // mark_modified() is called internally by delete_selection() and
+                        // insert_text_block(), so no explicit call needed.
+                    }
+                    self.notify_lsp_change();
+                }
+                self.mode = Mode::Normal;
+            },
+
+            Action::InlineAssistCancel => {
+                // Dropping inline_assist fires abort_tx (oneshot sender drops = sends).
+                self.inline_assist = None;
+                self.mode = Mode::Normal;
+            },
         }
         Ok(())
+    }
+
+    // ── Surround helpers ──────────────────────────────────────────────────────
+
+    /// Map a delimiter character to its (open, close) pair.
+    fn surround_pair(ch: char) -> (char, char) {
+        match ch {
+            '(' | ')' => ('(', ')'),
+            '[' | ']' => ('[', ']'),
+            '{' | '}' => ('{', '}'),
+            '<' | '>' => ('<', '>'),
+            _ => (ch, ch),
+        }
+    }
+
+    /// On `row`, find the innermost enclosing `(open, close)` pair relative to
+    /// `cursor_col`.  Returns `(open_col, close_col)` or `None`.
+    fn find_surround_on_line(
+        chars: &[char],
+        cursor_col: usize,
+        open: char,
+        close: char,
+    ) -> Option<(usize, usize)> {
+        let at = cursor_col.min(chars.len().saturating_sub(1));
+        // Search backwards for the open char.
+        let open_pos = (0..=at).rev().find(|&i| chars[i] == open)?;
+        // Search forwards for the close char after the open.
+        let close_pos = (open_pos + 1..chars.len()).find(|&i| chars[i] == close)?;
+        Some((open_pos, close_pos))
+    }
+
+    fn apply_surround_delete(&mut self, ch: char) {
+        let (open, close) = Self::surround_pair(ch);
+        let result = self.current_buffer().and_then(|buf| {
+            let row = buf.cursor.row;
+            let col = buf.cursor.col;
+            let chars: Vec<char> = buf.lines()[row].chars().collect();
+            Self::find_surround_on_line(&chars, col, open, close).map(|pair| (row, pair))
+        });
+        match result {
+            Some((row, (op, cp))) => {
+                self.with_buffer(|buf| buf.surround_delete_chars(row, op, cp));
+            },
+            None => {
+                self.set_status(format!("No surrounding '{ch}' found on current line"));
+            },
+        }
+    }
+
+    fn apply_surround_change(&mut self, from: char, to: char) {
+        let (open_from, close_from) = Self::surround_pair(from);
+        let (open_to, close_to) = Self::surround_pair(to);
+        let result = self.current_buffer().and_then(|buf| {
+            let row = buf.cursor.row;
+            let col = buf.cursor.col;
+            let chars: Vec<char> = buf.lines()[row].chars().collect();
+            Self::find_surround_on_line(&chars, col, open_from, close_from).map(|pair| (row, pair))
+        });
+        match result {
+            Some((row, (op, cp))) => {
+                self.with_buffer(|buf| buf.surround_replace_chars(row, op, cp, open_to, close_to));
+            },
+            None => {
+                self.set_status(format!("No surrounding '{from}' found on current line"));
+            },
+        }
+    }
+
+    fn apply_surround_add_word(&mut self, ch: char) {
+        let (open, close) = Self::surround_pair(ch);
+        if let Some(buf) = self.current_buffer() {
+            let row = buf.cursor.row;
+            let col = buf.cursor.col;
+            let chars: Vec<char> = buf.lines()[row].chars().collect();
+            if chars.is_empty() {
+                return;
+            }
+            let at = col.min(chars.len().saturating_sub(1));
+            // Find word start (non-whitespace run containing `at`).
+            let word_start =
+                (0..=at).rev().find(|&i| chars[i].is_whitespace()).map(|i| i + 1).unwrap_or(0);
+            // Find word end (exclusive).
+            let word_end =
+                (at..chars.len()).find(|&i| chars[i].is_whitespace()).unwrap_or(chars.len());
+            let row_copy = row;
+            let ws = word_start;
+            let we = word_end;
+            self.with_buffer(move |buf| buf.surround_insert_chars(row_copy, ws, we, open, close));
+        }
+    }
+
+    // ── Text object helpers ───────────────────────────────────────────────────
+
+    /// Resolve the tree-sitter range for a text object at the cursor.
+    ///
+    /// Returns `Some((sr, sc, er, ec))` in inclusive char-index coordinates,
+    /// or `None` (and sets a status message) when no node is found.
+    fn text_object_range(
+        &mut self,
+        inner: bool,
+        kind: crate::keymap::TextObjectKind,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let cursor = self.current_buffer().map(|b| (b.cursor.row, b.cursor.col))?;
+        let range = self.ts_tree_for_current_buffer().and_then(|snap| {
+            crate::treesitter::query::text_object_range(snap, cursor.0, cursor.1, inner, kind)
+        });
+        if range.is_none() {
+            self.set_status("No tree-sitter node at cursor".to_string());
+        }
+        range
+    }
+
+    /// Set the buffer selection to cover `(sr, sc) … (er, ec)`.
+    fn set_selection_range(&mut self, sr: usize, sc: usize, er: usize, ec: usize) {
+        if let Some(buf) = self.current_buffer_mut() {
+            buf.cursor.row = sr;
+            buf.cursor.col = sc;
+            buf.start_selection();
+            buf.cursor.row = er;
+            buf.cursor.col = ec;
+            buf.update_selection();
+        }
+    }
+
+    /// `SelectTextObject` — enter Visual mode and select the text object.
+    fn apply_text_object_select(&mut self, inner: bool, kind: crate::keymap::TextObjectKind) {
+        if let Some((sr, sc, er, ec)) = self.text_object_range(inner, kind) {
+            self.mode = Mode::Visual;
+            self.set_selection_range(sr, sc, er, ec);
+        }
+    }
+
+    /// `DeleteTextObject` — delete the text object into the clipboard.
+    fn apply_text_object_delete(&mut self, inner: bool, kind: crate::keymap::TextObjectKind) {
+        if let Some((sr, sc, er, ec)) = self.text_object_range(inner, kind) {
+            self.with_buffer(|buf| buf.save_undo_snapshot());
+            self.set_selection_range(sr, sc, er, ec);
+            if let Some(text) = self.current_buffer_mut().and_then(|buf| buf.delete_selection()) {
+                self.sync_system_clipboard(&text);
+                self.clipboard = Some((text, ClipboardType::Charwise));
+                self.notify_lsp_change();
+            }
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// `YankTextObject` — yank the text object into the clipboard.
+    fn apply_text_object_yank(&mut self, inner: bool, kind: crate::keymap::TextObjectKind) {
+        if let Some((sr, sc, er, ec)) = self.text_object_range(inner, kind) {
+            self.set_selection_range(sr, sc, er, ec);
+            if let Some(text) = self.current_buffer().and_then(|buf| buf.yank_selection()) {
+                self.sync_system_clipboard(&text);
+                let lines = text.lines().count().max(1);
+                self.clipboard = Some((text, ClipboardType::Charwise));
+                self.set_status(format!(
+                    "{lines} line{} yanked",
+                    if lines == 1 { "" } else { "s" }
+                ));
+            }
+            self.with_buffer(|buf| buf.clear_selection());
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// `ChangeTextObject` — delete the text object and enter Insert mode.
+    fn apply_text_object_change(&mut self, inner: bool, kind: crate::keymap::TextObjectKind) {
+        if let Some((sr, sc, er, ec)) = self.text_object_range(inner, kind) {
+            self.with_buffer(|buf| buf.save_undo_snapshot());
+            self.set_selection_range(sr, sc, er, ec);
+            if let Some(text) = self.current_buffer_mut().and_then(|buf| buf.delete_selection()) {
+                self.sync_system_clipboard(&text);
+                self.clipboard = Some((text, ClipboardType::Charwise));
+                self.notify_lsp_change();
+            }
+            self.mode = Mode::Insert;
+        }
     }
 }
