@@ -287,6 +287,10 @@ pub struct AgentPanel {
     /// Whether to enable tool calling for Ollama (default: false).
     /// Set from `[provider.ollama] tool_calls = true` in config.
     pub ollama_tool_calls: bool,
+    /// Whether to include planning tools (create_task, complete_task, ask_user)
+    /// for Ollama (default: false). Small models misuse these.
+    /// Set from `[provider.ollama] planning_tools = true` in config.
+    pub ollama_planning_tools: bool,
     pub messages: Vec<ChatMessage>,
     /// Messages from sessions that have been compressed by the Auto-Janitor.
     /// Rendered above the live session in a dimmed style so the user can still

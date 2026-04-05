@@ -28,6 +28,7 @@ pub enum Mode {
     LspHover,        // Read-only hover info popup (K / SPC l h)
     LspRename,       // LSP rename input popup (SPC l r)
     InlineAssist,    // Inline AI transform overlay (SPC a i)
+    ReviewChanges,   // Multi-file review / change set view (SPC a r, ADR 0113)
 }
 
 /// The semantic kind of a tree-sitter text object.
@@ -162,6 +163,10 @@ pub enum Action {
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
     AgentJanitorCompress, // SPC a j — summarise + compress chat history
+    // Checkpoints / session undo (ADR 0112)
+    AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
+    // Multi-file review / change set view (ADR 0113)
+    ReviewChangesOpen, // SPC a r — open review overlay for all agent-touched files
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -339,6 +344,10 @@ impl KeyHandler {
         agent_node
             .children
             .insert('i', KeyNode::leaf("inline AI assist", Action::InlineAssistStart));
+        agent_node
+            .children
+            .insert('u', KeyNode::leaf("revert session (undo agent)", Action::AgentSessionRevert));
+        agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

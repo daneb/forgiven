@@ -347,6 +347,10 @@ impl Editor {
                             let _ = client.did_save(uri, Some(text));
                         }
                     }
+                    // Fire any matching on_save hooks (ADR 0114).
+                    if let Err(e) = self.fire_hooks_for_save(&path) {
+                        tracing::warn!("Hook error: {e}");
+                    }
                 }
             },
             Action::Quit => {
@@ -550,6 +554,44 @@ Skip anything already obvious from reading the code.";
                     if let Some(e) = submit_err {
                         self.set_status(format!("Janitor error: {e}"));
                     }
+                }
+            },
+            // ── Multi-file review / change set view (ADR 0113) ───────────────
+            Action::ReviewChangesOpen => {
+                if !self.agent_panel.has_checkpoint() {
+                    self.set_status("No agent changes to review".to_string());
+                } else {
+                    let project_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let state = crate::editor::ReviewChangesState::build(
+                        &self.agent_panel.session_snapshots,
+                        &project_root,
+                    );
+                    self.review_changes = Some(state);
+                    self.mode = Mode::ReviewChanges;
+                }
+            },
+            // ── Session revert (checkpoint undo) ─────────────────────────────
+            Action::AgentSessionRevert => {
+                if !self.agent_panel.has_checkpoint() {
+                    self.set_status(
+                        "No checkpoint: agent has not modified any files this session".to_string(),
+                    );
+                } else {
+                    let project_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let restored = self.agent_panel.revert_session(&project_root);
+                    let count = restored.len();
+                    // Queue the restored files for buffer reload.
+                    for rel in &restored {
+                        self.agent_panel.pending_reloads.push(rel.clone());
+                    }
+                    let msg = if count == 1 {
+                        format!("Session reverted: 1 file restored")
+                    } else {
+                        format!("Session reverted: {count} files restored")
+                    };
+                    self.set_status(msg);
                 }
             },
             // ── Diagnostics overlay ───────────────────────────────────────────

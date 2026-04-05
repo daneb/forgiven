@@ -119,6 +119,23 @@ pub(super) async fn agentic_loop(
                     .extend(mcp_tools);
             }
         }
+        // Strip planning / meta tools when disabled (small models misuse them).
+        if !provider.planning_tools {
+            const PLANNING: &[&str] = &["create_task", "complete_task", "ask_user"];
+            if let Some(arr) = defs.as_array_mut() {
+                arr.retain(|tool| {
+                    tool.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|name| !PLANNING.contains(&name))
+                        .unwrap_or(true)
+                });
+            }
+            info!(
+                "Agentic loop: planning tools disabled for {} (planning_tools = false)",
+                provider.kind.display_name()
+            );
+        }
         defs
     } else {
         info!(

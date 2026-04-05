@@ -165,6 +165,15 @@ pub struct OllamaProviderConfig {
     /// ```
     #[serde(default)]
     pub tool_calls: bool,
+    /// Enable `create_task`, `complete_task`, and `ask_user` planning tools for
+    /// Ollama.
+    ///
+    /// Defaults to `false`.  Small models (≤ 7 B) reliably misuse these tools
+    /// — calling `create_task` instead of actually performing the work or
+    /// answering a question.  Only enable for larger models (≥ 14 B) that you
+    /// have verified handle conditional tool instructions correctly.
+    #[serde(default)]
+    pub planning_tools: bool,
 }
 
 impl Default for OllamaProviderConfig {
@@ -174,6 +183,7 @@ impl Default for OllamaProviderConfig {
             default_model: default_ollama_model(),
             context_length: None,
             tool_calls: false,
+            planning_tools: false,
         }
     }
 }
@@ -223,6 +233,37 @@ fn default_ollama_model() -> String {
 // Agent config
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Agent hooks (ADR 0114) ────────────────────────────────────────────────────
+
+fn bool_true() -> bool {
+    true
+}
+
+/// A single event-driven automation hook.
+///
+/// Defined in config as `[[agent.hooks]]`.  Example:
+///
+/// ```toml
+/// [[agent.hooks]]
+/// trigger = "on_save"
+/// glob    = "*.rs"
+/// prompt  = "File {file} saved — check for obvious issues."
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentHook {
+    /// When to fire.  Currently only `"on_save"` is supported.
+    pub trigger: String,
+    /// Glob pattern matched against the project-relative path of the file that
+    /// triggered the event.  Supports `*`, `**`, and `?`.
+    pub glob: String,
+    /// Prompt sent to the agent.  `{file}` is replaced with the file path.
+    pub prompt: String,
+    /// Set `false` to disable the hook without removing it from config.
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 /// Configuration for the agent panel.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentConfig {
@@ -262,6 +303,10 @@ pub struct AgentConfig {
     /// Example: `"claude-haiku-4-5-20251001"`.
     #[serde(default)]
     pub janitor_model: String,
+    /// Event-driven hooks that fire the agent automatically.
+    /// Defined as `[[agent.hooks]]` in the config file.
+    #[serde(default)]
+    pub hooks: Vec<AgentHook>,
 }
 
 /// Top-level editor configuration.

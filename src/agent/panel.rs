@@ -83,6 +83,7 @@ impl AgentPanel {
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_context_length: None,
             ollama_tool_calls: false,
+            ollama_planning_tools: false,
             messages: Vec::new(),
             archived_messages: Vec::new(),
             input: String::new(),
@@ -666,6 +667,10 @@ impl AgentPanel {
                 ProviderKind::Copilot => true,
                 ProviderKind::Ollama => self.ollama_tool_calls,
             },
+            planning_tools: match self.provider {
+                ProviderKind::Copilot => true,
+                ProviderKind::Ollama => self.ollama_planning_tools,
+            },
         };
 
         let root_display = project_root.display().to_string();
@@ -699,10 +704,13 @@ impl AgentPanel {
             },
         };
 
-        let tool_rules = "\
-MANDATORY PROTOCOL — follow these rules without exception:\n\
-\n\
-TASK PLANNING RULES:\n\
+        let use_planning = match self.provider {
+            ProviderKind::Copilot => true,
+            ProviderKind::Ollama => self.ollama_planning_tools,
+        };
+
+        let planning_rules = if use_planning {
+            "TASK PLANNING RULES:\n\
 0. Use create_task / complete_task ONLY when the job involves 3 or more distinct\n\
    file operations (creates, rewrites, or edits across different files), OR when\n\
    the user explicitly asks you to plan or list steps.\n\
@@ -711,17 +719,41 @@ TASK PLANNING RULES:\n\
    as a separate step.\n\
    When planning IS needed, call create_task ONCE per step BEFORE any file work,\n\
    keep titles short and imperative (e.g. 'Create Program.cs'), and call\n\
-   complete_task with the exact same title after finishing each step.\n\
+   complete_task with the exact same title after finishing each step.\n\n"
+        } else {
+            ""
+        };
+
+        let ask_user_rule = if use_planning {
+            "7. Use ask_user ONLY when you genuinely cannot proceed without clarification —\n\
+   e.g., ambiguous destructive actions or mutually exclusive design choices.\n\
+   Do NOT use it to confirm routine read/write operations.\n\n"
+        } else {
+            ""
+        };
+
+        let planning_tool_entries = if use_planning {
+            "- create_task          Register a planned step (call once per step before file work).\n\
+- complete_task        Mark a step done (call after finishing each step).\n\
+- ask_user             Show the user a question dialog and wait for their choice.\n"
+        } else {
+            ""
+        };
+
+        let tool_rules = format!(
+            "MANDATORY PROTOCOL — follow these rules without exception:\n\
 \n\
+{planning_rules}\
 COMMUNICATION RULES:\n\
 6. Do NOT output any text while working through tool calls. Work silently.\n\
    After ALL tools have finished, ALWAYS write a concise summary of what was\n\
    accomplished (files changed, what was added/removed/fixed, and any caveats).\n\
    Do not narrate steps, explain retries, or announce what you are about to do.\n\
-7. Use ask_user ONLY when you genuinely cannot proceed without clarification —\n\
-   e.g., ambiguous destructive actions or mutually exclusive design choices.\n\
-   Do NOT use it to confirm routine read/write operations.\n\
-\n\
+7. Be maximally concise in every response. No filler phrases, no hedging, no\n\
+   pleasantries. If the answer is one sentence, write one sentence. Never use\n\
+   'Certainly!', 'Of course', 'I'll now...', or similar preamble. State only\n\
+   what changed and why — nothing else.\n\
+{ask_user_rule}\
 FILE EDITING RULES:\n\
 1. Before editing a file, prefer get_file_outline to understand its structure,\n\
    then get_symbol_context to get the specific symbol you need. Only fall back\n\
@@ -746,8 +778,7 @@ MEMORY RULES (only when memory tools are available):\n\
   to persist what you learned for future sessions.\n\
 \n\
 Available tools:\n\
-- create_task          Register a planned step (call once per step before file work).\n\
-- complete_task        Mark a step done (call after finishing each step).\n\
+{planning_tool_entries}\
 - get_file_outline     List all top-level definitions in a file (signatures only, no bodies).\n\
                        Use this first to find where a symbol lives — much cheaper than read_file.\n\
 - get_symbol_context   Get the full body of one symbol + signatures of what it calls.\n\
@@ -757,8 +788,8 @@ Available tools:\n\
 - search_files         Search for a pattern across files/directories (returns file:line: text).\n\
 - write_file           Write a complete file (for new files or full rewrites only).\n\
 - edit_file            Surgical find-and-replace. old_str must match EXACTLY once.\n\
-- list_directory       List a directory's contents.\n\
-- ask_user             Show the user a question dialog and wait for their choice.\n";
+- list_directory       List a directory's contents.\n"
+        );
 
         let system = if let Some(ref ctx) = context_snippet {
             let truncation_note = if ctx_total_lines > MAX_CTX_LINES {
@@ -1011,6 +1042,7 @@ Available tools:\n\
                 None
             },
             supports_tool_calls: false,
+            planning_tools: false,
         };
 
         let lang_str = language.as_deref().unwrap_or("code");
@@ -1425,6 +1457,37 @@ Available tools:\n\
                 let _ = tx.send(answer);
             }
         }
+    }
+
+    /// Returns `true` when at least one file has been snapshotted this session,
+    /// i.e. the agent has modified at least one file and `SPC a u` can revert.
+    pub fn has_checkpoint(&self) -> bool {
+        !self.session_snapshots.is_empty()
+    }
+
+    /// Restore all agent-touched files to their pre-session content.
+    ///
+    /// Each entry in `session_snapshots` maps a project-relative path to the
+    /// original file content captured before the agent first edited it.
+    /// Writes the originals back to disk and returns the project-relative paths
+    /// that were restored so the editor can reload open buffers.
+    /// Clears the snapshot map on completion.
+    pub fn revert_session(&mut self, project_root: &std::path::Path) -> Vec<String> {
+        let mut restored = Vec::new();
+        for (rel_path, original) in &self.session_snapshots {
+            let abs = project_root.join(rel_path);
+            if let Some(parent) = abs.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&abs, original) {
+                Ok(()) => restored.push(rel_path.clone()),
+                Err(e) => {
+                    tracing::warn!("[checkpoint] failed to restore {rel_path}: {e}");
+                },
+            }
+        }
+        self.session_snapshots.clear();
+        restored
     }
 
     /// Move the selection up or down in the ask_user dialog.

@@ -85,6 +85,13 @@ that motivated it, what was decided, and the consequences.
 | [0075](0075-slash-menu-description-hints.md) | Slash-Menu Description Hints | Accepted |
 | [0076](0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) | Accepted |
 | [0077](0077-agent-context-window-management.md) | Agent Context Window Management (`SPC a n`, token-aware truncation) | Accepted |
+| [0078](0078-prompt-caching.md) | Prompt Caching — Cached Token Tracking | Accepted |
+| [0079](0079-diff-only-tool-results.md) | Diff-Only Tool Results for File Write/Edit Operations | Accepted |
+| [0080](0080-tool-call-batching.md) | Tool Call Batching — read_files and search_files | Accepted |
+| [0081](0081-importance-scored-history.md) | Importance-Scored History Retention | Accepted |
+| [0082](0082-symbol-aware-context-tools.md) | Symbol-Aware Context Tools (get_file_outline, get_symbol_context) | Accepted |
+| [0083](0083-mcp-memory-server.md) | MCP Memory Server for Cross-Session Context | Accepted |
+| [0084](0084-llmlingua-mcp-sidecar.md) | LLMLingua MCP Sidecar for Tool Result Compression | Accepted |
 | [0085](0085-lsp-navigation-and-csharp-revival.md) | LSP Navigation (Goto Definition, Find References, Symbols) and C# Revival | Accepted |
 | [0086](0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling | Accepted |
 | [0087](0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation | Accepted |
@@ -92,6 +99,30 @@ that motivated it, what was decided, and the consequences.
 | [0089](0089-large-file-split-editor-agent-ui.md) | Large File Split: editor, agent, and ui modules | Accepted |
 | [0090](0090-visual-indent-markdown-tables-mcp-call-log.md) | Visual indent/dedent, Markdown table rendering, MCP call log | Accepted |
 | [0091](0091-lsp-hover-and-rename.md) | LSP Hover popup and Rename (WorkspaceEdit) | Accepted |
+| [0092](0092-persistent-session-metrics-jsonl.md) | Persistent Session Metrics JSONL Log | Accepted |
+| [0093](0093-cap-open-file-context-injection.md) | Cap Open-File Context Injection to 150 Lines | Accepted |
+| [0094](0094-fetch-models-before-budget-computation.md) | Fetch Models Before Context-Budget Computation | Accepted |
+| [0095](0095-persistent-log-file.md) | Persistent Log File at XDG Data Directory | Accepted |
+| [0096](0096-session-rounds-and-avg-tokens-diagnostic.md) | Session Rounds Counter and Average Tokens per Invocation | Accepted |
+| [0097](0097-speckit-auto-clear-context-per-phase.md) | Spec-Kit Auto-Clear Context Per Phase | Accepted |
+| [0098](0098-ollama-local-provider.md) | Ollama Local Provider | Accepted |
+| [0099](0099-context-breakdown-token-awareness.md) | Context Breakdown: Per-Segment Token Awareness (Phase 1) | Accepted |
+| [0100](0100-spec-slicer-virtual-context.md) | Spec Slicer: Virtual Context for Implement Phase | Accepted |
+| [0101](0101-auto-janitor-rolling-summary.md) | Auto-Janitor: Rolling History Compression (Phase 3) | Accepted |
+| [0102](0102-submit-hot-path-optimisations.md) | Submit Hot-Path Optimisations | Accepted |
+| [0103](0103-speckit-output-formatting-conventions.md) | Speckit Output Formatting Conventions | Accepted |
+| [0104](0104-tree-sitter-core-integration.md) | Tree-sitter Core Integration | Accepted |
+| [0105](0105-tree-sitter-text-objects.md) | Tree-sitter Text Objects | Accepted |
+| [0106](0106-code-folding.md) | AST-Based Code Folding | Accepted |
+| [0107](0107-sticky-scroll.md) | Sticky Scroll Context Header | Accepted |
+| [0108](0108-no-multi-cursor.md) | Non-Decision: Multi-Cursor Editing | Accepted |
+| [0109](0109-no-integrated-terminal.md) | Non-Decision: Integrated Terminal Pane | Accepted |
+| [0110](0110-surround-operations.md) | Surround Operations | Accepted |
+| [0111](0111-inline-assistant.md) | Inline Assistant (Selection Transform) | Accepted |
+| [0112](0112-agent-checkpoints.md) | Agent Checkpoints / Session Undo | Accepted |
+| [0113](0113-multi-file-review.md) | Multi-File Review / Change Set View | Accepted |
+| [0114](0114-agent-hooks.md) | Agent Hooks / Background Automation | Accepted |
+| [0115](0115-agent-brevity-constraints.md) | Agent Brevity Constraints | Accepted |
 
 ## What is an ADR?
 

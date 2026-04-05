@@ -40,6 +40,7 @@ impl UI {
             Mode::LspHover => "HOVER",
             Mode::LspRename => "RENAME",
             Mode::InlineAssist => "INLINE AI",
+            Mode::ReviewChanges => "REVIEW",
         };
 
         let mode_color = match mode {
@@ -66,6 +67,7 @@ impl UI {
             Mode::LspHover => Color::LightYellow,
             Mode::LspRename => Color::LightGreen,
             Mode::InlineAssist => Color::LightCyan,
+            Mode::ReviewChanges => Color::LightGreen,
         };
 
         let mut spans = vec![

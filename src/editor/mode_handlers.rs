@@ -368,4 +368,188 @@ impl Editor {
         }
         Ok(())
     }
+
+    // ── Review changes mode key handling (ADR 0113) ───────────────────────────
+
+    pub(super) fn handle_review_changes_mode(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::editor::Verdict;
+
+        match key.code {
+            // Quit / cancel — close overlay, return to Normal
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.review_changes = None;
+                self.mode = Mode::Normal;
+            },
+
+            // Scroll down one line
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.scroll = s.scroll.saturating_add(1);
+                }
+            },
+
+            // Scroll up one line
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.scroll = s.scroll.saturating_sub(1);
+                }
+            },
+
+            // Scroll down half-page
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.scroll = s.scroll.saturating_add(10);
+                }
+            },
+
+            // Scroll up half-page
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.scroll = s.scroll.saturating_sub(10);
+                }
+            },
+
+            // Jump to next file
+            KeyCode::Char(']') => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    let next = (s.focused_file + 1).min(s.diffs.len().saturating_sub(1));
+                    s.focused_file = next;
+                    s.scroll = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
+                }
+            },
+
+            // Jump to previous file
+            KeyCode::Char('[') => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    let prev = s.focused_file.saturating_sub(1);
+                    s.focused_file = prev;
+                    s.scroll = s.file_offsets.get(prev).copied().unwrap_or(s.scroll);
+                }
+            },
+
+            // Accept focused file (keep current disk state — nothing to write)
+            KeyCode::Char('y') => {
+                // Phase 1: mark accepted and find next pending
+                let (next_focused, next_offset) = {
+                    let Some(s) = self.review_changes.as_mut() else {
+                        return Ok(());
+                    };
+                    if let Some(diff) = s.diffs.get_mut(s.focused_file) {
+                        diff.verdict = Verdict::Accepted;
+                    }
+                    let cur = s.focused_file;
+                    let next = ((cur + 1)..s.diffs.len())
+                        .find(|&i| s.diffs[i].verdict == Verdict::Pending)
+                        .unwrap_or(cur);
+                    let offset = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
+                    (next, offset)
+                };
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.focused_file = next_focused;
+                    s.scroll = next_offset;
+                }
+            },
+
+            // Reject focused file — restore from snapshot
+            KeyCode::Char('n') => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                // Phase 1: collect what we need without holding mutable borrow
+                let (rel_path, needs_restore, cur_focused) = {
+                    let Some(s) = self.review_changes.as_ref() else {
+                        return Ok(());
+                    };
+                    let focused = s.focused_file;
+                    let diff = &s.diffs[focused];
+                    (diff.rel_path.clone(), diff.verdict != Verdict::Rejected, focused)
+                };
+                // Phase 2: restore file (accesses agent_panel, not review_changes)
+                if needs_restore {
+                    if let Some(original) =
+                        self.agent_panel.session_snapshots.get(&rel_path).cloned()
+                    {
+                        let abs = project_root.join(&rel_path);
+                        if let Some(parent) = abs.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&abs, &original);
+                        self.agent_panel.pending_reloads.push(rel_path.clone());
+                    }
+                }
+                // Phase 3: mark rejected + advance focus
+                let (next_focused, next_offset) = {
+                    let Some(s) = self.review_changes.as_mut() else {
+                        return Ok(());
+                    };
+                    if needs_restore {
+                        if let Some(diff) = s.diffs.get_mut(cur_focused) {
+                            diff.verdict = Verdict::Rejected;
+                        }
+                    }
+                    let next = ((cur_focused + 1)..s.diffs.len())
+                        .find(|&i| s.diffs[i].verdict == Verdict::Pending)
+                        .unwrap_or(cur_focused);
+                    let offset = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
+                    (next, offset)
+                };
+                if let Some(s) = self.review_changes.as_mut() {
+                    s.focused_file = next_focused;
+                    s.scroll = next_offset;
+                }
+            },
+
+            // Accept all pending files
+            KeyCode::Char('Y') => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    for diff in &mut s.diffs {
+                        if diff.verdict == Verdict::Pending {
+                            diff.verdict = Verdict::Accepted;
+                        }
+                    }
+                }
+            },
+
+            // Reject all pending files — restore each from snapshot
+            KeyCode::Char('N') => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                // Phase 1: collect paths to restore
+                let to_restore: Vec<String> = self
+                    .review_changes
+                    .as_ref()
+                    .map(|s| {
+                        s.diffs
+                            .iter()
+                            .filter(|d| d.verdict == Verdict::Pending)
+                            .map(|d| d.rel_path.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Phase 2: write originals back to disk
+                for rel_path in &to_restore {
+                    if let Some(original) =
+                        self.agent_panel.session_snapshots.get(rel_path).cloned()
+                    {
+                        let abs = project_root.join(rel_path);
+                        if let Some(parent) = abs.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&abs, &original);
+                        self.agent_panel.pending_reloads.push(rel_path.clone());
+                    }
+                }
+                // Phase 3: mark all as rejected
+                if let Some(s) = self.review_changes.as_mut() {
+                    for diff in &mut s.diffs {
+                        if diff.verdict == Verdict::Pending {
+                            diff.verdict = Verdict::Rejected;
+                        }
+                    }
+                }
+            },
+
+            _ => {},
+        }
+        Ok(())
+    }
 }

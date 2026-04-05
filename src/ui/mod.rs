@@ -229,6 +229,8 @@ pub struct RenderContext<'a> {
     pub sticky_header: Option<&'a str>,
     /// Inline assist overlay data (Mode::InlineAssist, ADR 0111).
     pub inline_assist: Option<InlineAssistView<'a>>,
+    /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
+    pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
 }
 
 /// UI rendering for the editor
@@ -529,6 +531,11 @@ impl UI {
         // Render inline assist overlay (Mode::InlineAssist, ADR 0111)
         if let Some(view) = &ctx.inline_assist {
             Self::render_inline_assist_overlay(frame, view, size);
+        }
+
+        // Render review changes overlay (Mode::ReviewChanges, ADR 0113)
+        if let Some(review) = ctx.review_changes {
+            Self::render_review_changes_overlay(frame, review, size);
         }
     }
 }

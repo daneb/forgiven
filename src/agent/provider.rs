@@ -187,6 +187,13 @@ pub struct ProviderSettings {
     /// Enable with `[provider.ollama] tool_calls = true` only for models you
     /// have verified support it (e.g. `qwen2.5-coder:14b` with Ollama ≥ 0.5).
     pub supports_tool_calls: bool,
+    /// Whether to include planning tools (`create_task`, `complete_task`,
+    /// `ask_user`) in the tool list.
+    ///
+    /// Always `true` for Copilot.  For Ollama, defaults to `false` — small
+    /// models (≤ 7 B) ignore the conditional instructions in the system prompt
+    /// and call these tools instead of actually performing work.
+    pub planning_tools: bool,
 }
 
 impl ProviderSettings {

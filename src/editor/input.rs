@@ -119,6 +119,7 @@ impl Editor {
             Mode::LspHover => self.handle_lsp_hover_mode(key)?,
             Mode::LspRename => self.handle_lsp_rename_mode(key)?,
             Mode::InlineAssist => self.handle_inline_assist_mode(key)?,
+            Mode::ReviewChanges => self.handle_review_changes_mode(key)?,
         }
 
         Ok(())

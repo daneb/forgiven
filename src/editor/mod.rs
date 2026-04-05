@@ -1,6 +1,7 @@
 mod actions;
 mod ai;
 mod file_ops;
+mod hooks;
 mod input;
 mod lsp;
 mod mode_handlers;
@@ -140,6 +141,108 @@ pub struct HoverPopupState {
     pub scroll: u16,
 }
 
+// ── Multi-file review / change set view (ADR 0113) ───────────────────────────
+
+/// A single line in a per-file unified diff.
+pub enum DiffLine {
+    /// Unchanged context line (shown dimmed).
+    Context(String),
+    /// Line added in the current version (shown green).
+    Added(String),
+    /// Line removed relative to the snapshot (shown red).
+    Removed(String),
+    /// Visual separator between non-adjacent hunks (shown as "···").
+    HunkSep,
+}
+
+/// Whether the user has accepted or rejected a file's agent changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+/// Diff data for one agent-modified file.
+pub struct FileDiff {
+    /// Project-relative path (key in `session_snapshots`).
+    pub rel_path: String,
+    /// Unified-diff lines: context + added + removed + hunk separators.
+    pub lines: Vec<DiffLine>,
+    /// User's accept/reject decision for this file.
+    pub verdict: Verdict,
+}
+
+/// All state for `Mode::ReviewChanges`.
+pub struct ReviewChangesState {
+    /// One entry per agent-touched file, sorted by path.
+    pub diffs: Vec<FileDiff>,
+    /// Vertical scroll offset into the flat rendered line list.
+    pub scroll: usize,
+    /// Index of the currently focused file (target for `y` / `n`).
+    pub focused_file: usize,
+    /// Precomputed first flat-rendered-line index for each file's header.
+    /// `file_offsets[i]` is the scroll offset that brings file `i` to the top.
+    pub file_offsets: Vec<usize>,
+}
+
+impl ReviewChangesState {
+    /// Build from the agent's session snapshots vs the current on-disk state.
+    pub fn build(
+        snapshots: &std::collections::HashMap<String, String>,
+        project_root: &std::path::Path,
+    ) -> Self {
+        let mut diffs: Vec<FileDiff> = snapshots
+            .iter()
+            .map(|(rel_path, original)| {
+                let abs = project_root.join(rel_path);
+                let current = std::fs::read_to_string(&abs).unwrap_or_default();
+                let lines = review_diff_lines(original, &current);
+                FileDiff { rel_path: rel_path.clone(), lines, verdict: Verdict::Pending }
+            })
+            .collect();
+        diffs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        let file_offsets = review_file_offsets(&diffs);
+        Self { diffs, scroll: 0, focused_file: 0, file_offsets }
+    }
+}
+
+/// Compute the first flat-rendered-line index for each file.
+/// Each file occupies 1 header line + its diff lines + 1 blank spacer.
+fn review_file_offsets(diffs: &[FileDiff]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(diffs.len());
+    let mut acc = 0usize;
+    for d in diffs {
+        offsets.push(acc);
+        acc += 1 + d.lines.len() + 1; // header + diff lines + spacer
+    }
+    offsets
+}
+
+/// Produce unified-diff lines (with 3-line context groups) via the `similar` crate.
+fn review_diff_lines(original: &str, current: &str) -> Vec<DiffLine> {
+    use similar::{ChangeTag, TextDiff};
+    if original == current {
+        return vec![];
+    }
+    let diff = TextDiff::from_lines(original, current);
+    let mut out = Vec::new();
+    for group in diff.grouped_ops(3) {
+        out.push(DiffLine::HunkSep);
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let line = change.value().trim_end_matches('\n').to_string();
+                match change.tag() {
+                    ChangeTag::Delete => out.push(DiffLine::Removed(line)),
+                    ChangeTag::Insert => out.push(DiffLine::Added(line)),
+                    ChangeTag::Equal => out.push(DiffLine::Context(line)),
+                }
+            }
+        }
+    }
+    out
+}
+
 // ── Mode-specific sub-states ──────────────────────────────────────────────────
 // Each struct owns all fields that are active only during a single Mode variant.
 // Grouping them prevents the top-level Editor struct from growing unboundedly as
@@ -276,6 +379,15 @@ pub struct Editor {
     // ── Inline assistant (ADR 0111) ───────────────────────────────────────────
     /// Active only while `mode == Mode::InlineAssist`.
     inline_assist: Option<InlineAssistState>,
+
+    // ── Multi-file review / change set view (ADR 0113) ───────────────────────
+    /// Active only while `mode == Mode::ReviewChanges`.
+    pub review_changes: Option<ReviewChangesState>,
+
+    // ── Agent hooks (ADR 0114) ────────────────────────────────────────────────
+    /// Per-hook cooldown tracking: `hook_index → last_fired`.
+    /// Prevents the same hook from firing more than once per 5 seconds.
+    hook_cooldowns: std::collections::HashMap<usize, std::time::Instant>,
 
     // ── Tree-sitter AST cache ─────────────────────────────────────────────────
     /// Wraps the Tree-sitter `Parser`; shared across all buffers (language is
@@ -441,6 +553,7 @@ impl Editor {
                 panel.ollama_base_url = config.provider.ollama.base_url.clone();
                 panel.ollama_context_length = config.provider.ollama.context_length;
                 panel.ollama_tool_calls = config.provider.ollama.tool_calls;
+                panel.ollama_planning_tools = config.provider.ollama.planning_tools;
                 panel
             },
             clipboard: None::<(String, ClipboardType)>,
@@ -449,6 +562,8 @@ impl Editor {
             visual_text_obj_prefix: None,
             surround_change_from: None,
             inline_assist: None,
+            review_changes: None,
+            hook_cooldowns: std::collections::HashMap::new(),
             ts_engine: crate::treesitter::TsEngine::new(),
             ts_cache: std::collections::HashMap::new(),
             ts_versions: std::collections::HashMap::new(),
@@ -1941,6 +2056,11 @@ impl Editor {
                     response: &s.response,
                     phase: s.phase,
                 }),
+                review_changes: if mode == Mode::ReviewChanges {
+                    self.review_changes.as_ref()
+                } else {
+                    None
+                },
             };
             UI::render(frame, &ctx);
         })?;

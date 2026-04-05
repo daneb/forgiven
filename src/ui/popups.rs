@@ -770,4 +770,118 @@ impl UI {
 
         frame.render_widget(Paragraph::new(rows).block(block), popup_area);
     }
+
+    // ── Review changes overlay (Mode::ReviewChanges, ADR 0113) ───────────────
+
+    /// Full-screen overlay listing every file the agent touched this session.
+    /// Each file shows a compact unified diff (3-line context) with per-file
+    /// accept / reject controls.
+    pub(super) fn render_review_changes_overlay(
+        frame: &mut Frame,
+        state: &crate::editor::ReviewChangesState,
+        area: Rect,
+    ) {
+        use crate::editor::{DiffLine, Verdict};
+
+        frame.render_widget(Clear, area);
+
+        let total = state.diffs.len();
+        let focused = state.focused_file;
+
+        // ── Build flat rendered line list ──────────────────────────────────────
+        // Each entry is (text, style).  We collect into an owned Vec so we can
+        // slice it for scrolling without lifetime issues.
+        let mut lines: Vec<(String, Style)> = Vec::new();
+
+        for (fi, file_diff) in state.diffs.iter().enumerate() {
+            // File header
+            let (verdict_tag, verdict_color) = match file_diff.verdict {
+                Verdict::Pending => ("pending", Color::Yellow),
+                Verdict::Accepted => ("accepted", Color::Green),
+                Verdict::Rejected => ("rejected", Color::Red),
+            };
+            let is_focused = fi == focused;
+            let header_bg = if is_focused { Color::DarkGray } else { Color::Reset };
+            let header_text = format!(" ── {} [{}] ", file_diff.rel_path, verdict_tag);
+            // We render the verdict tag in its colour inside the same line by
+            // using a single styled span — ratatui Line::from() would let us
+            // colour substrings, but our flat Vec model uses one style per row.
+            // Colour the whole header row in the verdict colour (dim for context).
+            let header_style =
+                Style::default().fg(verdict_color).bg(header_bg).add_modifier(Modifier::BOLD);
+            lines.push((header_text, header_style));
+
+            if file_diff.lines.is_empty() {
+                lines.push(("  (no changes)".to_string(), Style::default().fg(Color::DarkGray)));
+            } else {
+                for dl in &file_diff.lines {
+                    let (text, style) = match dl {
+                        DiffLine::HunkSep => {
+                            ("  ···".to_string(), Style::default().fg(Color::DarkGray))
+                        },
+                        DiffLine::Added(s) => {
+                            (format!("  + {s}"), Style::default().fg(Color::LightGreen))
+                        },
+                        DiffLine::Removed(s) => {
+                            (format!("  - {s}"), Style::default().fg(Color::Red))
+                        },
+                        DiffLine::Context(s) => {
+                            (format!("    {s}"), Style::default().fg(Color::DarkGray))
+                        },
+                    };
+                    lines.push((text, style));
+                }
+            }
+
+            // Blank spacer between files
+            if fi + 1 < total {
+                lines.push((String::new(), Style::default()));
+            }
+        }
+
+        // ── Layout: 3-row header + scrollable body ─────────────────────────────
+        let [header_area, body_area] =
+            Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+
+        // Header block
+        let hint = format!(
+            " Review Changes  ({}/{})  y=accept  n=reject  Y/N=all  [/]=jump  q=quit",
+            focused + 1,
+            total,
+        );
+        let header_block =
+            Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(Color::White)).block(header_block),
+            header_area,
+        );
+
+        // Body: apply scroll, render visible rows
+        let viewport = body_area.height as usize;
+        let total_lines = lines.len();
+        let scroll = state.scroll.min(total_lines.saturating_sub(1));
+        let visible: Vec<Line<'static>> = lines
+            .into_iter()
+            .skip(scroll)
+            .take(viewport)
+            .map(|(text, style)| Line::styled(text, style))
+            .collect();
+
+        // Scroll indicator in the bottom-right corner when content overflows
+        frame.render_widget(Paragraph::new(visible), body_area);
+        if total_lines > viewport {
+            let indicator = format!(" {}/{} ", scroll + 1, total_lines);
+            let ind_width = indicator.len() as u16;
+            let ind_area = Rect {
+                x: body_area.right().saturating_sub(ind_width + 1),
+                y: body_area.bottom().saturating_sub(1),
+                width: ind_width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray)),
+                ind_area,
+            );
+        }
+    }
 }

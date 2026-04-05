@@ -721,7 +721,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forgiven"
-version = "0.8.9-alpha.20"
+version = "0.9.0-alpha.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -739,6 +739,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "similar",
  "syntect",
  "thiserror 2.0.18",
  "tiktoken-rs",
@@ -2514,6 +2515,12 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"
