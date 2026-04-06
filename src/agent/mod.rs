@@ -291,6 +291,17 @@ pub struct AgentPanel {
     /// for Ollama (default: false). Small models misuse these.
     /// Set from `[provider.ollama] planning_tools = true` in config.
     pub ollama_planning_tools: bool,
+    /// Resolved API key for Anthropic/OpenAI/Gemini/OpenRouter.
+    /// Empty string for Copilot (uses OAuth) and Ollama (no auth).
+    /// Populated at startup from config after `$VAR` expansion.
+    pub api_key: String,
+    /// Base URL for OpenAI (allows Azure overrides).
+    /// Default: `"https://api.openai.com/v1"`.
+    pub openai_base_url: String,
+    /// `HTTP-Referer` header value for OpenRouter (optional).
+    pub openrouter_site_url: String,
+    /// `X-Title` header value for OpenRouter (optional).
+    pub openrouter_app_name: String,
     pub messages: Vec<ChatMessage>,
     /// Messages from sessions that have been compressed by the Auto-Janitor.
     /// Rendered above the live session in a dimmed style so the user can still

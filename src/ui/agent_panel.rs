@@ -108,6 +108,10 @@ impl UI {
                             let color = match panel.provider {
                                 ProviderKind::Copilot => Color::Cyan,
                                 ProviderKind::Ollama => Color::Magenta,
+                                ProviderKind::Anthropic => Color::LightRed,
+                                ProviderKind::OpenAi => Color::LightGreen,
+                                ProviderKind::Gemini => Color::LightBlue,
+                                ProviderKind::OpenRouter => Color::LightCyan,
                             };
                             (format!("{emoji} {name}"), color)
                         },
@@ -174,6 +178,10 @@ impl UI {
                     let stream_color = match panel.provider {
                         ProviderKind::Copilot => Color::Cyan,
                         ProviderKind::Ollama => Color::Magenta,
+                        ProviderKind::Anthropic => Color::LightRed,
+                        ProviderKind::OpenAi => Color::LightGreen,
+                        ProviderKind::Gemini => Color::LightBlue,
+                        ProviderKind::OpenRouter => Color::LightCyan,
                     };
                     let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
                         Span::styled(

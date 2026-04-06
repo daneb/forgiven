@@ -188,24 +188,125 @@ impl Default for OllamaProviderConfig {
     }
 }
 
+/// Per-provider settings for the Anthropic direct API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicProviderConfig {
+    /// API key — use `"$ANTHROPIC_API_KEY"` to read from the environment (recommended).
+    #[serde(default)]
+    pub api_key: String,
+    /// Preferred model ID (e.g. `"claude-sonnet-4-6"`).
+    #[serde(default = "default_anthropic_model")]
+    pub default_model: String,
+}
+
+impl Default for AnthropicProviderConfig {
+    fn default() -> Self {
+        Self { api_key: String::new(), default_model: default_anthropic_model() }
+    }
+}
+
+fn default_anthropic_model() -> String {
+    "claude-sonnet-4-6".to_string()
+}
+
+/// Per-provider settings for the OpenAI direct API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiProviderConfig {
+    /// API key — use `"$OPENAI_API_KEY"` to read from the environment (recommended).
+    #[serde(default)]
+    pub api_key: String,
+    /// Preferred model ID (e.g. `"gpt-4o"`).
+    #[serde(default = "default_openai_model")]
+    pub default_model: String,
+    /// Base URL override.  Omit to use `"https://api.openai.com/v1"`.
+    /// Override for Azure: `"https://MY-DEPLOYMENT.openai.azure.com/openai/deployments/MY-MODEL"`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for OpenAiProviderConfig {
+    fn default() -> Self {
+        Self { api_key: String::new(), default_model: default_openai_model(), base_url: None }
+    }
+}
+
+fn default_openai_model() -> String {
+    "gpt-4o".to_string()
+}
+
+/// Per-provider settings for the Google Gemini API (OpenAI-compatible endpoint).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GeminiProviderConfig {
+    /// API key — use `"$GEMINI_API_KEY"` to read from the environment (recommended).
+    #[serde(default)]
+    pub api_key: String,
+    /// Preferred model ID (e.g. `"gemini-2.5-pro"`).
+    #[serde(default = "default_gemini_model")]
+    pub default_model: String,
+}
+
+impl Default for GeminiProviderConfig {
+    fn default() -> Self {
+        Self { api_key: String::new(), default_model: default_gemini_model() }
+    }
+}
+
+fn default_gemini_model() -> String {
+    "gemini-2.5-pro".to_string()
+}
+
+/// Per-provider settings for OpenRouter.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenRouterProviderConfig {
+    /// API key — use `"$OPENROUTER_API_KEY"` to read from the environment (recommended).
+    #[serde(default)]
+    pub api_key: String,
+    /// Preferred model ID (e.g. `"anthropic/claude-sonnet-4-5"`).
+    #[serde(default = "default_openrouter_model")]
+    pub default_model: String,
+    /// Forwarded as `HTTP-Referer` per OpenRouter etiquette.
+    #[serde(default)]
+    pub site_url: String,
+    /// Forwarded as `X-Title` per OpenRouter etiquette.
+    #[serde(default)]
+    pub app_name: String,
+}
+
+impl Default for OpenRouterProviderConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            default_model: default_openrouter_model(),
+            site_url: String::new(),
+            app_name: String::new(),
+        }
+    }
+}
+
+fn default_openrouter_model() -> String {
+    "anthropic/claude-sonnet-4-5".to_string()
+}
+
 /// Top-level provider selection block (`[provider]` in `config.toml`).
 ///
 /// Example:
 /// ```toml
 /// [provider]
-/// active = "ollama"
+/// active = "anthropic"
+///
+/// [provider.anthropic]
+/// api_key       = "$ANTHROPIC_API_KEY"
+/// default_model = "claude-sonnet-4-6"
 ///
 /// [provider.ollama]
 /// base_url       = "http://localhost:11434"
 /// default_model  = "qwen2.5-coder:14b"
 /// context_length = 32768
-///
-/// [provider.copilot]
-/// default_model = "claude-sonnet-4"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
-    /// Which provider to use: `"copilot"` (default) or `"ollama"`.
+    /// Which provider to use: `"copilot"` (default), `"ollama"`, `"anthropic"`,
+    /// `"openai"`, `"gemini"`, or `"openrouter"`.
     /// Only one provider is active at a time; switching requires a restart.
     #[serde(default = "default_provider_active")]
     pub active: String,
@@ -215,6 +316,18 @@ pub struct ProviderConfig {
     /// Ollama-specific settings.
     #[serde(default)]
     pub ollama: OllamaProviderConfig,
+    /// Anthropic direct API settings.
+    #[serde(default)]
+    pub anthropic: AnthropicProviderConfig,
+    /// OpenAI direct API settings.
+    #[serde(default)]
+    pub openai: OpenAiProviderConfig,
+    /// Google Gemini API settings.
+    #[serde(default)]
+    pub gemini: GeminiProviderConfig,
+    /// OpenRouter aggregator settings.
+    #[serde(default)]
+    pub openrouter: OpenRouterProviderConfig,
 }
 
 fn default_provider_active() -> String {
@@ -429,6 +542,10 @@ impl Config {
     pub fn active_default_model(&self) -> &str {
         match self.provider.active.as_str() {
             "ollama" => &self.provider.ollama.default_model,
+            "anthropic" => &self.provider.anthropic.default_model,
+            "openai" => &self.provider.openai.default_model,
+            "gemini" => &self.provider.gemini.default_model,
+            "openrouter" => &self.provider.openrouter.default_model,
             _ => {
                 // Honour the legacy top-level field when the new nested field
                 // still holds its default ("claude-sonnet-4"), giving precedence

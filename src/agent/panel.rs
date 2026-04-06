@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use super::agentic_loop::agentic_loop;
 use super::auth::{exchange_token, load_oauth_token};
-use super::models::{fetch_models, fetch_models_ollama};
+use super::models::fetch_models_for_provider;
 use super::provider::{ProviderKind, ProviderSettings};
 use super::{
     append_session_metric, AgentPanel, AgentStatus, AgentTask, AskUserState, ChatMessage,
@@ -84,6 +84,10 @@ impl AgentPanel {
             ollama_context_length: None,
             ollama_tool_calls: false,
             ollama_planning_tools: false,
+            api_key: String::new(),
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            openrouter_site_url: String::new(),
+            openrouter_app_name: String::new(),
             messages: Vec::new(),
             archived_messages: Vec::new(),
             input: String::new(),
@@ -185,6 +189,17 @@ impl AgentPanel {
                 // "qwen2.5-coder:14b" → "qwen2.5-coder"
                 self.selected_model_id().split(':').next().unwrap_or("Ollama").to_string()
             },
+            ProviderKind::Anthropic => "Claude".to_string(),
+            ProviderKind::OpenAi => "GPT".to_string(),
+            ProviderKind::Gemini => "Gemini".to_string(),
+            ProviderKind::OpenRouter => {
+                // "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5"
+                self.selected_model_id()
+                    .split('/')
+                    .last()
+                    .unwrap_or("OpenRouter")
+                    .to_string()
+            },
         }
     }
 
@@ -195,24 +210,23 @@ impl AgentPanel {
         if !self.available_models.is_empty() {
             return Ok(());
         }
-        match self.provider.clone() {
-            ProviderKind::Copilot => {
-                let api_token = self.ensure_token().await?;
-                match fetch_models(&api_token).await {
-                    Ok(models) if !models.is_empty() => self.set_models(models, preferred_model),
-                    Ok(_) => warn!("Copilot /models returned an empty list"),
-                    Err(e) => return Err(e),
-                }
-            },
-            ProviderKind::Ollama => {
-                let base_url = self.ollama_base_url.clone();
-                let ctx = self.ollama_context_length;
-                match fetch_models_ollama(&base_url, ctx).await {
-                    Ok(models) if !models.is_empty() => self.set_models(models, preferred_model),
-                    Ok(_) => warn!("Ollama /api/tags returned an empty model list"),
-                    Err(e) => return Err(e),
-                }
-            },
+        let api_token = self.ensure_token().await?;
+        let provider = self.provider.clone();
+        let ollama_base_url = self.ollama_base_url.clone();
+        let ollama_ctx = self.ollama_context_length;
+        let openai_base_url = self.openai_base_url.clone();
+        match fetch_models_for_provider(
+            &provider,
+            &api_token,
+            &ollama_base_url,
+            ollama_ctx,
+            &openai_base_url,
+        )
+        .await
+        {
+            Ok(models) if !models.is_empty() => self.set_models(models, preferred_model),
+            Ok(_) => warn!("[{}] model list was empty", provider.display_name()),
+            Err(e) => return Err(e),
         }
         Ok(())
     }
@@ -228,38 +242,31 @@ impl AgentPanel {
         };
         let preferred = current_id.as_deref().unwrap_or(preferred_model);
 
-        match self.provider.clone() {
-            ProviderKind::Copilot => {
-                let api_token = self.ensure_token().await?;
-                match fetch_models(&api_token).await {
-                    Ok(models) if !models.is_empty() => {
-                        self.set_models(models, preferred);
-                        info!(
-                            "Refreshed Copilot model list, selected: {} ({})",
-                            self.selected_model_display(),
-                            self.selected_model_id()
-                        );
-                    },
-                    Ok(_) => warn!("Copilot /models returned an empty list"),
-                    Err(e) => return Err(e),
-                }
+        let api_token = self.ensure_token().await?;
+        let provider = self.provider.clone();
+        let ollama_base_url = self.ollama_base_url.clone();
+        let ollama_ctx = self.ollama_context_length;
+        let openai_base_url = self.openai_base_url.clone();
+        match fetch_models_for_provider(
+            &provider,
+            &api_token,
+            &ollama_base_url,
+            ollama_ctx,
+            &openai_base_url,
+        )
+        .await
+        {
+            Ok(models) if !models.is_empty() => {
+                self.set_models(models, preferred);
+                info!(
+                    "Refreshed {} model list, selected: {} ({})",
+                    provider.display_name(),
+                    self.selected_model_display(),
+                    self.selected_model_id()
+                );
             },
-            ProviderKind::Ollama => {
-                let base_url = self.ollama_base_url.clone();
-                let ctx = self.ollama_context_length;
-                match fetch_models_ollama(&base_url, ctx).await {
-                    Ok(models) if !models.is_empty() => {
-                        self.set_models(models, preferred);
-                        info!(
-                            "Refreshed Ollama model list, selected: {} ({})",
-                            self.selected_model_display(),
-                            self.selected_model_id()
-                        );
-                    },
-                    Ok(_) => warn!("Ollama /api/tags returned an empty list"),
-                    Err(e) => return Err(e),
-                }
-            },
+            Ok(_) => warn!("[{}] model list was empty on refresh", provider.display_name()),
+            Err(e) => return Err(e),
         }
         Ok(())
     }
@@ -623,42 +630,59 @@ impl AgentPanel {
         // even on the very first message of a session (Fix for ADR 0087 §2).
         let api_token = self.ensure_token().await?;
         if self.available_models.is_empty() {
-            match self.provider.clone() {
-                ProviderKind::Copilot => match fetch_models(&api_token).await {
-                    Ok(models) if !models.is_empty() => {
-                        info!("Fetched {} models from Copilot API", models.len());
-                        self.set_models(models, preferred_model);
-                    },
-                    Ok(_) => warn!("Copilot /models returned an empty list"),
-                    Err(e) => warn!("Could not fetch Copilot model list: {e}"),
+            let provider = self.provider.clone();
+            let ollama_base_url = self.ollama_base_url.clone();
+            let ollama_ctx = self.ollama_context_length;
+            let openai_base_url = self.openai_base_url.clone();
+            match fetch_models_for_provider(
+                &provider,
+                &api_token,
+                &ollama_base_url,
+                ollama_ctx,
+                &openai_base_url,
+            )
+            .await
+            {
+                Ok(models) if !models.is_empty() => {
+                    info!("Fetched {} models from {}", models.len(), provider.display_name());
+                    self.set_models(models, preferred_model);
                 },
-                ProviderKind::Ollama => {
-                    let base_url = self.ollama_base_url.clone();
-                    let ctx = self.ollama_context_length;
-                    match fetch_models_ollama(&base_url, ctx).await {
-                        Ok(models) if !models.is_empty() => {
-                            info!("Fetched {} models from Ollama", models.len());
-                            self.set_models(models, preferred_model);
-                        },
-                        Ok(_) => warn!("Ollama /api/tags returned an empty list"),
-                        Err(e) => warn!("Could not fetch Ollama model list: {e}"),
-                    }
-                },
+                Ok(_) => warn!("[{}] model list was empty", provider.display_name()),
+                Err(e) => warn!("Could not fetch {} model list: {e}", provider.display_name()),
             }
         }
         let model_id = self.selected_model_id().to_string();
         self.last_submit_model = model_id.clone();
 
         // ── Build provider settings for this invocation ──────────────────────
-        let chat_endpoint = match self.provider {
+        let chat_endpoint = match &self.provider {
             ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
-            ProviderKind::Ollama => {
-                format!("{}/v1/chat/completions", self.ollama_base_url)
+            ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
+            ProviderKind::Anthropic => {
+                "https://api.anthropic.com/v1/chat/completions".to_string()
             },
+            ProviderKind::OpenAi => {
+                format!("{}/chat/completions", self.openai_base_url)
+            },
+            ProviderKind::Gemini => {
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string()
+            },
+            ProviderKind::OpenRouter => {
+                "https://openrouter.ai/api/v1/chat/completions".to_string()
+            },
+        };
+        // For non-Copilot, non-Ollama providers the resolved api_key stored on
+        // the panel is used directly.  For Copilot we use the OAuth token just
+        // acquired.  For Ollama the token is empty (no auth).
+        let effective_token = match self.provider {
+            ProviderKind::Copilot => api_token.clone(),
+            ProviderKind::Ollama => String::new(),
+            _ => self.api_key.clone(),
         };
         let provider_settings = ProviderSettings {
             kind: self.provider.clone(),
-            api_token: api_token.clone(),
+            api_token: effective_token,
             chat_endpoint,
             num_ctx: if self.provider == ProviderKind::Ollama {
                 self.ollama_context_length
@@ -666,13 +690,15 @@ impl AgentPanel {
                 None
             },
             supports_tool_calls: match self.provider {
-                ProviderKind::Copilot => true,
                 ProviderKind::Ollama => self.ollama_tool_calls,
+                _ => true,
             },
             planning_tools: match self.provider {
-                ProviderKind::Copilot => true,
                 ProviderKind::Ollama => self.ollama_planning_tools,
+                _ => true,
             },
+            openrouter_site_url: self.openrouter_site_url.clone(),
+            openrouter_app_name: self.openrouter_app_name.clone(),
         };
 
         let root_display = project_root.display().to_string();
@@ -707,8 +733,8 @@ impl AgentPanel {
         };
 
         let use_planning = match self.provider {
-            ProviderKind::Copilot => true,
             ProviderKind::Ollama => self.ollama_planning_tools,
+            _ => true,
         };
 
         let planning_rules = if use_planning {
@@ -1026,17 +1052,31 @@ Available tools:\n\
         let api_token = self.ensure_token().await?;
         let model_id = self.selected_model_id().to_string();
 
-        let chat_endpoint = match self.provider {
+        let chat_endpoint = match &self.provider {
             ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
-            ProviderKind::Ollama => {
-                format!("{}/v1/chat/completions", self.ollama_base_url)
+            ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
+            ProviderKind::Anthropic => {
+                "https://api.anthropic.com/v1/chat/completions".to_string()
             },
+            ProviderKind::OpenAi => format!("{}/chat/completions", self.openai_base_url),
+            ProviderKind::Gemini => {
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string()
+            },
+            ProviderKind::OpenRouter => {
+                "https://openrouter.ai/api/v1/chat/completions".to_string()
+            },
+        };
+        let effective_token = match self.provider {
+            ProviderKind::Copilot => api_token,
+            ProviderKind::Ollama => String::new(),
+            _ => self.api_key.clone(),
         };
 
         // Disable tool calling — inline assist is pure text generation.
         let provider_settings = super::provider::ProviderSettings {
             kind: self.provider.clone(),
-            api_token,
+            api_token: effective_token,
             chat_endpoint,
             num_ctx: if self.provider == ProviderKind::Ollama {
                 self.ollama_context_length
@@ -1045,6 +1085,8 @@ Available tools:\n\
             },
             supports_tool_calls: false,
             planning_tools: false,
+            openrouter_site_url: self.openrouter_site_url.clone(),
+            openrouter_app_name: self.openrouter_app_name.clone(),
         };
 
         let lang_str = language.as_deref().unwrap_or("code");
@@ -1598,23 +1640,35 @@ Available tools:\n\
     }
 
     async fn ensure_token(&mut self) -> Result<String> {
-        // Ollama uses no authentication — return an empty token immediately.
-        if self.provider != ProviderKind::Copilot {
-            return Ok(String::new());
+        match self.provider {
+            ProviderKind::Ollama => {
+                // No authentication needed.
+                Ok(String::new())
+            },
+            ProviderKind::Anthropic
+            | ProviderKind::OpenAi
+            | ProviderKind::Gemini
+            | ProviderKind::OpenRouter => {
+                // Pre-resolved api_key stored on the panel at startup.
+                // Return it here so model-fetch calls can use it.
+                Ok(self.api_key.clone())
+            },
+            ProviderKind::Copilot => {
+                if let Some(ref t) = self.token {
+                    if !t.is_expired() {
+                        info!("Using cached token, expires at: {}", t.expires_at);
+                        return Ok(t.token.clone());
+                    } else {
+                        warn!("Cached token expired, refreshing...");
+                    }
+                }
+                info!("Refreshing Copilot API token");
+                let oauth = load_oauth_token()?;
+                let api_token = exchange_token(&oauth).await?;
+                let tok = api_token.token.clone();
+                self.token = Some(api_token);
+                Ok(tok)
+            },
         }
-        if let Some(ref t) = self.token {
-            if !t.is_expired() {
-                info!("Using cached token, expires at: {}", t.expires_at);
-                return Ok(t.token.clone());
-            } else {
-                warn!("Cached token expired, refreshing...");
-            }
-        }
-        info!("Refreshing Copilot API token");
-        let oauth = load_oauth_token()?;
-        let api_token = exchange_token(&oauth).await?;
-        let tok = api_token.token.clone();
-        self.token = Some(api_token);
-        Ok(tok)
     }
 }

@@ -39,7 +39,7 @@
 |---|---------|--------|-------------|------------|-------|
 | 5 | Multi-cursor editing | 🚫 | Intentionally excluded. See [ADR 0108](adr/0108-no-multi-cursor.md). | VS Code, Zed, Cursor, Helix | Counter to AI-first philosophy; use the agent for multi-site edits. Invasive refactor with no return value in this usage model. |
 | 6 | Inline assistant (selection transform) | ✅ | Select code → open mini-prompt → AI rewrites selection in-place. Different from agent panel — fast, contextual, no conversation history. | Zed, Cursor (Cmd+K), Windsurf | ADR 0111. `SPC a i`. Input → Generating → Preview phases. Accept=Enter, Cancel=Esc. Shipped. |
-| 7 | Multi-provider LLM backend | 🟡 | Copilot + Ollama (ADR 0098) exist. Missing: direct Anthropic API, OpenAI API, Google Gemini, OpenRouter. | Zed, Cursor, Continue | Abstract the agent backend behind a `Provider` trait. Each provider implements `stream_chat()`. Config selects provider + model. Copilot becomes one provider among many. |
+| 7 | Multi-provider LLM backend | ✅ | Anthropic, OpenAI, Gemini, OpenRouter added alongside Copilot + Ollama. Zero SSE parser changes — all six providers use the same streaming code path. API keys via `$VAR` env expansion. | Zed, Cursor, Continue | ADR 0116. Six `ProviderKind` variants; `ProviderSettings` carries all HTTP params. Model discovery per provider. UI colours per provider. |
 | 10 | Agent checkpoints / session undo | ✅ | `SPC a u` reverts all agent-modified files and deletes agent-created files. `session_snapshots` + `session_created_files` track all changes. Status message shows counts. | Zed, Cursor, Windsurf | ADR 0112. `revert_session()` in panel.rs. `FileCreated` StreamEvent tracks new files for deletion on revert. |
 
 ### Complexity 3 — High effort
@@ -98,7 +98,7 @@ These are areas where Forgiven is **ahead** of or **differentiated** from the co
 
 ### Phase 3 — AI interaction model
 8. ✅ Inline assistant (selection → prompt → rewrite) — ADR 0111
-9. Multi-provider LLM backend (Anthropic, OpenAI, Gemini direct)
+9. ✅ Multi-provider LLM backend — Anthropic, OpenAI, Gemini, OpenRouter — ADR 0116
 10. ✅ Agent checkpoints with session-level undo — ADR 0112
 11. ✅ Multi-file review / change set view — ADR 0113
 
@@ -124,4 +124,4 @@ This file lives in the Forgiven repo root. When working with Claude Code:
 
 ---
 
-*Last updated: 2026-04-06 by Claude (Phase 3 complete; Phase 4 item 12 complete — items 10/11/12 shipped)*
+*Last updated: 2026-04-06 by Claude (Phase 3 complete; Phase 4 item 12 complete; item 7 complete — all six providers shipped in ADR 0116)*

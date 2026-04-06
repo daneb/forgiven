@@ -23,6 +23,10 @@ use crate::lsp::LspManager;
 async fn one_shot_with_provider(
     provider: &ProviderKind,
     ollama_base_url: &str,
+    api_key: &str,
+    openai_base_url: &str,
+    openrouter_site_url: &str,
+    openrouter_app_name: &str,
     model_id: &str,
     system: &str,
     user: &str,
@@ -36,6 +40,27 @@ async fn one_shot_with_provider(
         ProviderKind::Ollama => {
             (String::new(), format!("{ollama_base_url}/v1/chat/completions"), false)
         },
+        ProviderKind::Anthropic => (
+            api_key.to_string(),
+            "https://api.anthropic.com/v1/chat/completions".to_string(),
+            false,
+        ),
+        ProviderKind::OpenAi => (
+            api_key.to_string(),
+            format!("{openai_base_url}/chat/completions"),
+            false,
+        ),
+        ProviderKind::Gemini => (
+            api_key.to_string(),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                .to_string(),
+            false,
+        ),
+        ProviderKind::OpenRouter => (
+            api_key.to_string(),
+            "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            false,
+        ),
     };
 
     let body = serde_json::json!({
@@ -69,6 +94,14 @@ async fn one_shot_with_provider(
             .header("editor-version", "forgiven/0.1.0")
             .header("editor-plugin-version", "forgiven-copilot/0.1.0")
             .header("openai-intent", "conversation-panel");
+    }
+    if matches!(provider, ProviderKind::OpenRouter) {
+        if !openrouter_site_url.is_empty() {
+            req = req.header("HTTP-Referer", openrouter_site_url);
+        }
+        if !openrouter_app_name.is_empty() {
+            req = req.header("X-Title", openrouter_app_name);
+        }
     }
 
     let resp =
@@ -298,6 +331,10 @@ impl Editor {
             .to_string();
         let provider_kind = self.agent_panel.provider.clone();
         let ollama_base_url = self.agent_panel.ollama_base_url.clone();
+        let api_key = self.agent_panel.api_key.clone();
+        let openai_base_url = self.agent_panel.openai_base_url.clone();
+        let openrouter_site_url = self.agent_panel.openrouter_site_url.clone();
+        let openrouter_app_name = self.agent_panel.openrouter_app_name.clone();
 
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -310,6 +347,10 @@ impl Editor {
             let result = one_shot_with_provider(
                 &provider_kind,
                 &ollama_base_url,
+                &api_key,
+                &openai_base_url,
+                &openrouter_site_url,
+                &openrouter_app_name,
                 &model_id,
                 system,
                 &user,
@@ -412,6 +453,10 @@ impl Editor {
             .to_string();
         let provider_kind = self.agent_panel.provider.clone();
         let ollama_base_url = self.agent_panel.ollama_base_url.clone();
+        let api_key = self.agent_panel.api_key.clone();
+        let openai_base_url = self.agent_panel.openai_base_url.clone();
+        let openrouter_site_url = self.agent_panel.openrouter_site_url.clone();
+        let openrouter_app_name = self.agent_panel.openrouter_app_name.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let system = "You are a technical writer creating release notes for a software project. \
@@ -425,6 +470,10 @@ impl Editor {
             let result = one_shot_with_provider(
                 &provider_kind,
                 &ollama_base_url,
+                &api_key,
+                &openai_base_url,
+                &openrouter_site_url,
+                &openrouter_app_name,
                 &model_id,
                 system,
                 &user,

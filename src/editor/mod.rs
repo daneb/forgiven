@@ -706,6 +706,29 @@ impl Editor {
                 panel.ollama_context_length = config.provider.ollama.context_length;
                 panel.ollama_tool_calls = config.provider.ollama.tool_calls;
                 panel.ollama_planning_tools = config.provider.ollama.planning_tools;
+                // Resolve API keys for direct-API providers ($VAR expansion).
+                panel.api_key = match panel.provider {
+                    crate::agent::ProviderKind::Anthropic => {
+                        crate::agent::provider::resolve_api_key(&config.provider.anthropic.api_key)
+                    },
+                    crate::agent::ProviderKind::OpenAi => {
+                        crate::agent::provider::resolve_api_key(&config.provider.openai.api_key)
+                    },
+                    crate::agent::ProviderKind::Gemini => {
+                        crate::agent::provider::resolve_api_key(&config.provider.gemini.api_key)
+                    },
+                    crate::agent::ProviderKind::OpenRouter => {
+                        crate::agent::provider::resolve_api_key(
+                            &config.provider.openrouter.api_key,
+                        )
+                    },
+                    _ => String::new(),
+                };
+                if let Some(ref base) = config.provider.openai.base_url {
+                    panel.openai_base_url = base.clone();
+                }
+                panel.openrouter_site_url = config.provider.openrouter.site_url.clone();
+                panel.openrouter_app_name = config.provider.openrouter.app_name.clone();
                 panel
             },
             clipboard: None::<(String, ClipboardType)>,

@@ -773,6 +773,14 @@ pub(super) async fn start_chat_stream_with_tools(
                 .header("editor-plugin-version", "forgiven-copilot/0.1.0")
                 .header("openai-intent", "conversation-panel");
         }
+        if provider.kind == ProviderKind::OpenRouter {
+            if !provider.openrouter_site_url.is_empty() {
+                req = req.header("HTTP-Referer", &provider.openrouter_site_url);
+            }
+            if !provider.openrouter_app_name.is_empty() {
+                req = req.header("X-Title", &provider.openrouter_app_name);
+            }
+        }
 
         let resp = req.json(&body).send().await;
 

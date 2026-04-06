@@ -1,10 +1,11 @@
-//! Provider abstraction — selects between GitHub Copilot and a local Ollama server.
+//! Provider abstraction — selects between GitHub Copilot, Ollama, Anthropic,
+//! OpenAI, Google Gemini, and OpenRouter.
 //!
 //! The active provider is set once at startup from the `[provider]` section of
 //! `~/.config/forgiven/config.toml` and is never changed at runtime.  All agent
-//! interactions route through the chosen provider's endpoint, which shares the
-//! same OpenAI-compatible SSE streaming format — so the entire streaming parser
-//! and tool-calling loop work unchanged across providers.
+//! interactions route through the chosen provider's endpoint.  Copilot and all
+//! four new providers share the same OpenAI-compatible SSE wire format, so the
+//! streaming parser and tool-calling loop are unchanged across all providers.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider kind
@@ -23,6 +24,18 @@ pub enum ProviderKind {
     /// Uses Ollama's OpenAI-compatible `/v1/chat/completions` endpoint so the
     /// same SSE parser works without modification.
     Ollama,
+    /// Anthropic direct API — Bearer `ANTHROPIC_API_KEY`, OpenAI-compatible
+    /// endpoint at `api.anthropic.com/v1/chat/completions`.
+    Anthropic,
+    /// OpenAI direct API — Bearer `OPENAI_API_KEY`, standard
+    /// `/v1/chat/completions`.  `base_url` may be overridden for Azure OpenAI.
+    OpenAi,
+    /// Google Gemini — Bearer `GEMINI_API_KEY`, OpenAI-compatible endpoint at
+    /// `generativelanguage.googleapis.com/v1beta/openai/`.
+    Gemini,
+    /// OpenRouter aggregator — Bearer `OPENROUTER_API_KEY`, single key for
+    /// 300+ models.  Optional `HTTP-Referer` / `X-Title` headers identify the client.
+    OpenRouter,
 }
 
 impl ProviderKind {
@@ -31,6 +44,10 @@ impl ProviderKind {
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "ollama" => Self::Ollama,
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAi,
+            "gemini" => Self::Gemini,
+            "openrouter" => Self::OpenRouter,
             _ => Self::Copilot,
         }
     }
@@ -40,15 +57,16 @@ impl ProviderKind {
         match self {
             Self::Copilot => "Copilot",
             Self::Ollama => "Ollama",
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::Gemini => "Gemini",
+            Self::OpenRouter => "OpenRouter",
         }
     }
 
     /// Emoji placed before "You" in the user's message headers.
     pub fn user_emoji(&self) -> &'static str {
-        match self {
-            Self::Copilot => "🧑",
-            Self::Ollama => "👤",
-        }
+        "🧑"
     }
 
     /// Emoji placed before the AI's name in assistant message headers.
@@ -56,30 +74,34 @@ impl ProviderKind {
         match self {
             Self::Copilot => "🤖",
             Self::Ollama => "🦙",
+            Self::Anthropic => "🟠",
+            Self::OpenAi => "🟢",
+            Self::Gemini => "🔵",
+            Self::OpenRouter => "🌐",
         }
     }
 
     /// Whether this provider requires a `Bearer` token in API requests.
     pub fn requires_auth(&self) -> bool {
-        matches!(self, Self::Copilot)
+        !matches!(self, Self::Ollama)
     }
 
     /// Whether to include `"stream_options": { "include_usage": true }` in chat
     /// requests.  Ollama's OpenAI-compat layer does not support this field
     /// reliably; sending it may cause the request to fail on older Ollama builds.
     pub fn supports_stream_usage(&self) -> bool {
-        matches!(self, Self::Copilot)
+        !matches!(self, Self::Ollama)
     }
 
     /// HTTP connect timeout in seconds.
     ///
     /// Ollama needs a longer connect timeout on a cold start because the local
     /// server may need to load the model into RAM before accepting the first
-    /// request.  For Copilot (cloud), a tight timeout surfaces network issues quickly.
+    /// request.  All cloud providers use a tight timeout.
     pub fn connect_timeout_secs(&self) -> u64 {
         match self {
-            Self::Copilot => 15,
             Self::Ollama => 60,
+            _ => 15,
         }
     }
 
@@ -90,8 +112,8 @@ impl ProviderKind {
     /// network jitter and queuing delays.
     pub fn chunk_timeout_secs(&self) -> u64 {
         match self {
-            Self::Copilot => 60,
             Self::Ollama => 20,
+            _ => 60,
         }
     }
 
@@ -101,9 +123,30 @@ impl ProviderKind {
     /// won't resolve by retrying.  Fail fast so the user sees the error promptly.
     pub fn max_retries(&self) -> usize {
         match self {
-            Self::Copilot => 5,
             Self::Ollama => 2,
+            _ => 5,
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API key resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve an API key from config, expanding `$VAR` references.
+///
+/// If `raw` starts with `$` followed by an uppercase identifier (e.g.
+/// `"$ANTHROPIC_API_KEY"`), the value is read from the environment at call
+/// time.  Literal strings are returned as-is.  If the env var is unset or
+/// empty, an empty string is returned and the first API call will produce a
+/// clear 401 error — no silent failure.
+///
+/// This matches the `$VAR` expansion pattern used for MCP env vars (ADR 0050).
+pub fn resolve_api_key(raw: &str) -> String {
+    if let Some(var_name) = raw.strip_prefix('$') {
+        std::env::var(var_name).unwrap_or_default()
+    } else {
+        raw.to_string()
     }
 }
 
@@ -165,35 +208,28 @@ pub async fn warmup_ollama(base_url: String, model: String) {
 pub struct ProviderSettings {
     /// Which provider these settings belong to.
     pub kind: ProviderKind,
-    /// Bearer token for Copilot requests.  Empty string for Ollama (no auth).
+    /// Bearer token for Copilot/Anthropic/OpenAI/Gemini/OpenRouter requests.
+    /// Empty string for Ollama (no auth).
     pub api_token: String,
     /// Full URL of the `/v1/chat/completions` endpoint.
-    ///
-    /// - Copilot: `https://api.githubcopilot.com/chat/completions`
-    /// - Ollama:  `http://localhost:11434/v1/chat/completions` (or custom base_url)
     pub chat_endpoint: String,
     /// `num_ctx` value injected into Ollama's `"options"` field in each request.
     /// Controls the active KV-cache / context window on the Ollama server side.
     ///
     /// Without this, Ollama may use its server default (as low as 4 096 tokens).
-    /// Set to `None` for Copilot — the field is unknown and should be omitted.
+    /// Set to `None` for all non-Ollama providers.
     pub num_ctx: Option<u32>,
     /// Whether to send tool definitions and run the agentic tool-calling loop.
-    ///
-    /// `true` for Copilot (full tool calling support).
-    /// For Ollama, defaults to `false` — tool-calling behaviour varies widely
-    /// across model versions.  Many models emit the call as raw text instead of
-    /// the structured OpenAI `tool_calls` delta format, which breaks the loop.
-    /// Enable with `[provider.ollama] tool_calls = true` only for models you
-    /// have verified support it (e.g. `qwen2.5-coder:14b` with Ollama ≥ 0.5).
     pub supports_tool_calls: bool,
     /// Whether to include planning tools (`create_task`, `complete_task`,
     /// `ask_user`) in the tool list.
-    ///
-    /// Always `true` for Copilot.  For Ollama, defaults to `false` — small
-    /// models (≤ 7 B) ignore the conditional instructions in the system prompt
-    /// and call these tools instead of actually performing work.
     pub planning_tools: bool,
+    /// Value for the `HTTP-Referer` header sent to OpenRouter.
+    /// Empty for all other providers.
+    pub openrouter_site_url: String,
+    /// Value for the `X-Title` header sent to OpenRouter.
+    /// Empty for all other providers.
+    pub openrouter_app_name: String,
 }
 
 impl ProviderSettings {

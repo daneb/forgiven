@@ -97,43 +97,37 @@ in CI.
 ### Tree-sitter text objects
 AST-aware text objects powered by [Tree-sitter](https://tree-sitter.github.io/). Works in
 Normal mode (operate immediately) and Visual mode (select first, then operate).
-
-| Sequence | Meaning |
-|----------|---------|
-| `vif` / `vaf` | Visual-select function **body** / **entire** function (incl. signature) |
-| `vic` / `vac` | Visual-select class/struct/impl **body** / **entire** node |
-| `vib` / `vab` | Visual-select **inner** / **outer** `{}` block |
-| `dif` / `daf` | Delete inner / outer function |
-| `yif` / `yaf` | Yank inner / outer function |
-| `cif` / `caf` | Change inner / outer function (delete + enter Insert) |
-| `dic` / `dac` | Delete inner / outer class/struct/impl |
-| `dib` / `dab` | Delete inner / outer block |
-
-The same `i`/`a` + `f`/`c`/`b` suffix applies to `y`, `d`, and `c` operators uniformly.
-In Visual mode, pressing `i` or `a` followed by a kind character replaces the current selection.
-
 Supported languages: **Rust**, **Python**, **JavaScript**, **TypeScript**, **TypeScript TSX**,
-**Go**, **JSON**, **Bash**. Falls back gracefully (status message) for unsupported file types.
+**Go**, **JSON**, **Bash**.
+
+See [docs/reference.md](docs/reference.md#tree-sitter-text-objects) for the full operator/object table.
 
 ### Spacemacs-style leader key (`SPC`)
 Which-key popup shows available bindings after a 500 ms pause.
 
-| Prefix | Binding | Action |
-|--------|---------|--------|
-| `SPC b` | `b/n/p/d` | List / next / previous / close buffer |
-| `SPC f` | `f/n/s` | Find file / new file / save |
-| `SPC q` | `q` | Quit |
-| `SPC l` | `h/d/r/f/s` | LSP hover / definition / rename / references / symbols |
-| `SPC a` | `a/f` | Toggle / focus agent panel |
-| `SPC e` | `e/f/h` | Toggle / focus file explorer / toggle hidden files |
-| `SPC g` | `g` | Open lazygit |
-| `SPC m` | `p/b` | Markdown preview toggle / open in browser |
-| `SPC s` | `g` | Search text in project (ripgrep) |
+See [docs/reference.md](docs/reference.md#leader-key-bindings-spc) for the full leader key table.
 
 ### Language Server Protocol
 - Auto-connects to `rust-analyzer` and `copilot-language-server` on startup
 - Inline diagnostics gutter (● errors, warnings)
 - Hover, go-to-definition, references, rename, document symbols
+
+### AI backend — multi-provider
+
+Six LLM providers are supported, all using the same OpenAI-compatible SSE wire
+format.  Set `[provider] active` in `config.toml`; no restart required to rebuild
+once configured:
+
+| Provider | Key source | Notable models |
+|----------|-----------|----------------|
+| `copilot` (default) | GitHub OAuth — no key needed | Claude Sonnet 4.6, GPT-4o, o3 |
+| `ollama` | None (local) | qwen2.5-coder, llama3, deepseek-coder-v2 |
+| `anthropic` | `$ANTHROPIC_API_KEY` | Claude Opus/Sonnet/Haiku 4.x |
+| `openai` | `$OPENAI_API_KEY` | GPT-4o, o3, o4-mini; Azure via `base_url` |
+| `gemini` | `$GEMINI_API_KEY` | Gemini 2.5 Pro / Flash (1 M token window) |
+| `openrouter` | `$OPENROUTER_API_KEY` | 300+ models from one key |
+
+See the [Configuration](#configuration) section for `config.toml` examples.
 
 ### GitHub Copilot integration
 - Ghost-text inline completions (streamed, Tab to accept)
@@ -150,37 +144,21 @@ Which-key popup shows available bindings after a 500 ms pause.
 
 ### File explorer
 - Left-sidebar tree (`SPC e e`); lazy directory loading
-- `j`/`k` or arrows navigate; `Enter`/`l` expands a dir or opens a file
-- `n` — new file (pre-fills Command mode with the target directory path)
-- `m` — new folder (inline popup, `Enter` confirms, `Esc` cancels)
-- `r` — rename selected entry (inline popup, `Enter` confirms, `Esc` cancels)
-- `d` — delete selected entry (confirmation popup, `y` confirms, `n`/`Esc` cancels)
-- `h` — toggle hidden files (`SPC e h` from Normal mode)
-- `R` — reload/refresh the tree from disk
-- `Esc`/`Tab` — blur explorer and return to editor
+- Create, rename, delete files and folders; toggle hidden files (`SPC e h`)
 - Hides `target/`, `node_modules/`, `dist/`, `build/` and dotfiles by default
 
-### Project-wide search (`SPC s g`)
+See [docs/reference.md](docs/reference.md#file-explorer-modeexplorer) for full keybindings.
 
-- Opens a centred popup overlay in `SEARCH` mode
-- **Query** field: text to search (ripgrep regex, smart-case)
-- **File filter** field: optional glob pattern (e.g. `*.rs`, `src/**/*.ts`) — `Tab` switches focus
-- Results update live with a 300 ms debounce; up to 500 matches displayed
-- `↑`/`↓` or `j`/`k` navigate the list; `Enter` opens the file at the matched line
-- `Esc` closes the panel and returns to Normal mode
+### Project-wide search (`SPC s g`)
+- Centred popup overlay; ripgrep regex with smart-case, optional file-glob filter
+- Results update live with a 300 ms debounce; up to 500 matches; `Enter` opens file at line
 
 ### In-file search (`/`)
-- `/` enters search mode; type a pattern and press `Enter` to highlight all matches
-- `n` / `N` jump to next / previous match in Normal mode
-- `Esc` cancels the search prompt without running
+- `/` enters search mode; `Enter` highlights all matches; `n`/`N` jump between them
 
 ### Markdown (`SPC m p` / `SPC m b`)
-- `SPC m p` — toggle a read-only rendered preview for any buffer
-- Full CommonMark: headings, bold/italic, inline code, fenced code blocks, lists,
-  blockquotes, horizontal rules; Mermaid blocks shown with a hint to open in browser
-- `SPC m b` — render the current buffer to HTML and open in the system browser;
-  Mermaid diagrams are rendered via Mermaid.js (CDN)
-- Status bar shows `PREVIEW` in Magenta when preview is active
+- `SPC m p` — toggle a read-only rendered preview (CommonMark + Mermaid hints)
+- `SPC m b` — render to HTML and open in the system browser with Mermaid.js
 
 ### Other
 - lazygit full-screen overlay (`SPC g g`)
@@ -220,9 +198,50 @@ supports the following sections:
 # ── Editor ────────────────────────────────────────────────────────────────
 tab_width           = 4          # spaces per tab (default: 4)
 use_spaces          = true       # expand tabs to spaces (default: true)
-default_copilot_model = "gpt-4o" # preferred Copilot model ID
+default_copilot_model = "gpt-4o" # preferred Copilot model ID (legacy; prefer [provider.copilot])
 max_agent_rounds    = 20         # agentic tool rounds before pause (default: 20)
 agent_warning_threshold = 3      # warn N rounds before the limit (default: 3)
+
+# ── LLM provider ─────────────────────────────────────────────────────────
+# Select the active backend.  All providers share the same agent/tool loop.
+# Switching providers requires a restart.
+[provider]
+active = "copilot"   # "copilot" | "ollama" | "anthropic" | "openai" | "gemini" | "openrouter"
+
+# GitHub Copilot Enterprise — OAuth-authenticated, no key needed.
+[provider.copilot]
+default_model = "claude-sonnet-4-6"
+
+# Local Ollama server — no auth, models run on your machine.
+[provider.ollama]
+base_url       = "http://localhost:11434"
+default_model  = "qwen2.5-coder:14b"
+context_length = 32768   # pins Ollama's KV-cache; omit to use server default
+tool_calls     = false   # enable only for models verified to emit structured tool_calls
+planning_tools = false   # enable for models ≥ 14B that handle conditional tool instructions
+
+# Anthropic direct API — values starting with $ are resolved from the environment.
+[provider.anthropic]
+api_key       = "$ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-6"
+
+# OpenAI direct API — also works with Azure OpenAI via base_url override.
+[provider.openai]
+api_key       = "$OPENAI_API_KEY"
+default_model = "gpt-4o"
+# base_url    = "https://MY-DEPLOYMENT.openai.azure.com/openai/deployments/MY-MODEL"
+
+# Google Gemini (OpenAI-compatible endpoint — 1 M token context window).
+[provider.gemini]
+api_key       = "$GEMINI_API_KEY"
+default_model = "gemini-2.5-pro"
+
+# OpenRouter — single key for 300+ models from multiple providers.
+[provider.openrouter]
+api_key       = "$OPENROUTER_API_KEY"
+default_model = "anthropic/claude-sonnet-4-5"
+site_url      = "https://github.com/yourname/forgiven"   # forwarded as HTTP-Referer
+app_name      = "forgiven"                                # forwarded as X-Title
 
 # ── Agent / prompt framework ─────────────────────────────────────────────
 [agent]
@@ -330,154 +349,20 @@ Common sources of context bloat and their mitigations:
 
 ## Keybinding Reference
 
-### Normal mode
+Full keybinding tables for all modes are in **[docs/reference.md](docs/reference.md)**:
 
-| Key | Action |
-|-----|--------|
-| `i/a/I/A/o/O` | Enter Insert mode (at / after / line-start / line-end / new-below / new-above) |
-| `h/j/k/l` | Move left / down / up / right (no line-wrap) |
-| `w/b` | Word forward / backward |
-| `0/^/$` | Line start / first non-blank / line end |
-| `gg/G` | File top / bottom |
-| `x` | Delete char at cursor |
-| `dd/D/dw` | Delete line / to EOL / word (into clipboard) |
-| `dt{c}` / `df{c}` | Delete till (exclusive) / find (inclusive) next occurrence of `{c}` |
-| `yy/yw/y$` | Yank line / word / to EOL |
-| `yt{c}` / `yf{c}` | Yank till / find next occurrence of `{c}` |
-| `cc/cw` | Change line / word |
-| `ct{c}` / `cf{c}` | Change till / find next occurrence of `{c}` (delete + Insert) |
-| `f{c}` / `t{c}` | Move cursor to / before next occurrence of `{c}` on line |
-| `F{c}` / `T{c}` | Move cursor to / after previous occurrence of `{c}` on line |
-| `v` + `i/a` + `f/c/b` | Visual-select text object (inner/outer function/class/block) |
-| `d` + `i/a` + `f/c/b` | Delete text object (e.g. `daf` = delete outer function) |
-| `y` + `i/a` + `f/c/b` | Yank text object |
-| `c` + `i/a` + `f/c/b` | Change text object (delete + Insert) |
-| `p/P` | Paste after / before cursor |
-| `u/Ctrl+R` | Undo / redo |
-| `v/V` | Visual / Visual-line selection |
-| `/` | In-file search (enter `InFileSearch` mode) |
-| `n/N` | Next / previous search match |
-| `:` | Command mode |
-| `SPC` | Leader key (see table above) |
-
-### Insert mode
-
-| Key | Action |
-|-----|--------|
-| `Esc` | Return to Normal mode |
-| `Tab` | Accept ghost-text completion (if visible) |
-| `Backspace/Delete` | Delete before / after cursor |
-| Arrows | Move cursor |
-
-### Visual / Visual-line mode
-
-| Key | Action |
-|-----|--------|
-| `h/j/k/l` / arrows | Extend selection |
-| `w/b` | Extend selection by word |
-| `0/^/$` | Extend selection to line start / first non-blank / line end |
-| `G` | Extend selection to file bottom |
-| `i` + `f/c/b` | Replace selection with inner text object (function/class/block) |
-| `a` + `f/c/b` | Replace selection with outer text object |
-| `y` | Yank selection |
-| `d/x` | Delete selection |
-| `c` | Delete selection and enter Insert mode |
-| `Tab` / `Shift+Tab` | Indent / dedent selected lines |
-| `Esc` | Cancel |
-
-### File explorer (`Mode::Explorer`)
-
-| Key | Action |
-|-----|--------|
-| `j/k` or `↓/↑` | Move cursor down / up |
-| `Enter` or `l` | Expand directory / open file (returns to Normal mode) |
-| `n` | New file — pre-fills Command mode with `e <dir>/` |
-| `m` | New folder — opens new-folder popup |
-| `r` | Rename selected entry (opens rename popup) |
-| `d` | Delete selected entry (opens confirmation popup) |
-| `h` | Toggle hidden files visibility |
-| `R` | Reload / refresh tree from disk |
-| `Esc` or `Tab` | Blur explorer, return to editor |
-
-### Rename popup (`Mode::RenameFile`)
-
-| Key | Action |
-|-----|--------|
-| *(type)* | Edit the filename |
-| `Backspace` | Delete last character |
-| `Enter` | Confirm rename |
-| `Esc` | Cancel, return to explorer |
-
-### Delete confirmation (`Mode::DeleteFile`)
-
-| Key | Action |
-|-----|--------|
-| `y` or `Y` | Confirm deletion (permanent) |
-| `n`, `N` or `Esc` | Cancel, return to explorer |
-
-### New folder popup (`Mode::NewFolder`)
-
-| Key | Action |
-|-----|--------|
-| *(type)* | Edit the folder name |
-| `Backspace` | Delete last character |
-| `Enter` | Confirm — creates the directory (and any missing parents) |
-| `Esc` | Cancel, return to explorer |
-
-### In-file search (`Mode::InFileSearch`)
-
-| Key | Action |
-|-----|--------|
-| *(type)* | Build search pattern |
-| `Backspace` | Delete last character |
-| `Enter` | Run search, return to Normal mode; `n`/`N` jump between matches |
-| `Esc` | Cancel, return to Normal mode |
-
-### Markdown preview (`Mode::MarkdownPreview`)
-
-| Key | Action |
-|-----|--------|
-| `j/k` or `↓/↑` | Scroll down / up one line |
-| `Ctrl+D` / `Ctrl+U` | Scroll down / up half-page |
-| `g` / `G` | Jump to top / bottom |
-| `q` or `Esc` | Exit preview, return to Normal mode |
-
-### Agent panel (`Mode::Agent`)
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message |
-| `Alt+Enter` | Insert newline in message |
-| `Backspace` | Delete last character |
-| `j` / `k` | Scroll history up / down |
-| `Ctrl+C` | **Abort** running stream (safe at any point) |
-| `Ctrl+K` | Copy next code block from last reply (cycles through all blocks) |
-| `Ctrl+M` | Open next mermaid diagram from last reply in browser (cycles; auto-fixes parens) |
-| `Ctrl+Y` | Yank full last reply to system clipboard |
-| `Ctrl+A` | Open apply-diff overlay for the last code block |
-| `Ctrl+P` | Attach a file to the next message (context picker) |
-| `Ctrl+T` | Cycle model; loads model list from API on first press |
-| `Esc` | Blur panel, return to editor |
-
-### Apply-diff overlay (`Mode::ApplyDiff`)
-
-| Key | Action |
-|-----|--------|
-| `y` / `Enter` | Apply change to target file / buffer |
-| `n` / `Esc` | Discard, return to agent panel |
-| `j` / `k` | Scroll down / up one line |
-| `Ctrl+D` / `Ctrl+U` | Scroll down / up half-page |
-
-### Search panel (`Mode::Search`, `SPC s g`)
-
-| Key | Action |
-|-----|--------|
-| *(type)* | Update search query (or glob if glob field focused) |
-| `Tab` | Switch focus between query and file-glob fields |
-| `↑` / `k` | Select previous result |
-| `↓` / `j` | Select next result |
-| `Enter` | Open selected file at matched line |
-| `Esc` | Close panel, return to Normal mode |
+- [Normal mode](docs/reference.md#normal-mode)
+- [Insert mode](docs/reference.md#insert-mode)
+- [Visual / Visual-line mode](docs/reference.md#visual--visual-line-mode)
+- [Command mode](docs/reference.md#command-mode-)
+- [Tree-sitter text objects](docs/reference.md#tree-sitter-text-objects)
+- [Leader key bindings (`SPC`)](docs/reference.md#leader-key-bindings-spc)
+- [File explorer](docs/reference.md#file-explorer-modeexplorer)
+- [In-file search](docs/reference.md#in-file-search-modeinfilesearch)
+- [Project-wide search](docs/reference.md#project-wide-search-modesearch-spc-s-g)
+- [Markdown preview](docs/reference.md#markdown-preview-modemarkdownpreview)
+- [Agent panel](docs/reference.md#agent-panel-modeagent)
+- [Apply-diff overlay](docs/reference.md#apply-diff-overlay-modeapplydiff)
 
 ---
 
@@ -516,7 +401,7 @@ forgiven/
 │   └── ui/                  # Terminal rendering (ratatui)
 │       └── mod.rs
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0084)
+│   └── adr/                 # Architecture Decision Records (0001 – 0116)
 └── Cargo.toml
 ```
 
@@ -672,6 +557,17 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0099](docs/adr/0099-context-breakdown-token-awareness.md) | Context Breakdown: Per-Segment Token Awareness (Phase 1) |
 | [0104](docs/adr/0104-tree-sitter-core-integration.md) | Tree-sitter Core Integration (AST engine foundation) |
 | [0105](docs/adr/0105-tree-sitter-text-objects.md) | Tree-sitter Text Objects (`vif`, `daf`, `yic`, etc.) |
+| [0106](docs/adr/0106-code-folding.md) | AST-Based Code Folding (`za`, `zM`, `zR`) |
+| [0107](docs/adr/0107-sticky-scroll.md) | Sticky Scroll / Context Header |
+| [0108](docs/adr/0108-no-multi-cursor.md) | No Multi-Cursor Editing (intentional exclusion) |
+| [0109](docs/adr/0109-no-integrated-terminal.md) | No Integrated Terminal Pane (intentional exclusion) |
+| [0110](docs/adr/0110-surround-operations.md) | Surround Operations (`ds`, `cs`, `ys`) |
+| [0111](docs/adr/0111-inline-assistant.md) | Inline Assistant (Selection → Prompt → Rewrite) |
+| [0112](docs/adr/0112-agent-checkpoints.md) | Agent Checkpoints / Session Undo (`SPC a u`) |
+| [0113](docs/adr/0113-multi-file-review.md) | Multi-File Review / Change Set View (`SPC a r`) |
+| [0114](docs/adr/0114-agent-hooks.md) | Agent Hooks (`on_save`, `on_test_fail`) |
+| [0115](docs/adr/0115-agent-brevity-constraints.md) | Agent Brevity Constraints |
+| [0116](docs/adr/0116-multi-provider-llm-backend.md) | Multi-Provider LLM Backend (Anthropic, OpenAI, Gemini, OpenRouter) |
 
 ---
 
@@ -692,15 +588,28 @@ cargo test
 
 ## Security & Privacy
 
-forgiven makes **no background network calls**. The only outbound connections
-are to GitHub's official Copilot endpoints and only when you actively use
-Copilot features:
+forgiven makes **no background network calls**. Outbound connections are made
+only when you actively use agent features, and only to the provider you have
+configured:
+
+**Copilot (default)**
 
 | Endpoint | Triggered by |
 |----------|-------------|
 | `api.github.com/copilot_internal/v2/token` | First Copilot action per session |
 | `api.githubcopilot.com/models` | `Ctrl+T` in agent panel |
 | `api.githubcopilot.com/chat/completions` | Sending a message to the agent |
+
+**Direct-API providers** (Anthropic, OpenAI, Gemini, OpenRouter)
+
+| Provider | Endpoint | Triggered by |
+|----------|----------|-------------|
+| Anthropic | `api.anthropic.com/v1/…` | Agent message / commit msg / release notes |
+| OpenAI | `api.openai.com/v1/…` (or custom `base_url`) | Same |
+| Gemini | `generativelanguage.googleapis.com/v1beta/openai/…` | Same |
+| OpenRouter | `openrouter.ai/api/v1/…` | Same |
+
+**Ollama** makes no external calls — all traffic stays on `localhost`.
 
 No telemetry. No analytics. No crash reporting. The agent is sandboxed to your
 project root — it cannot read or write files outside the directory you opened.
