@@ -45,15 +45,12 @@ async fn one_shot_with_provider(
             "https://api.anthropic.com/v1/chat/completions".to_string(),
             false,
         ),
-        ProviderKind::OpenAi => (
-            api_key.to_string(),
-            format!("{openai_base_url}/chat/completions"),
-            false,
-        ),
+        ProviderKind::OpenAi => {
+            (api_key.to_string(), format!("{openai_base_url}/chat/completions"), false)
+        },
         ProviderKind::Gemini => (
             api_key.to_string(),
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-                .to_string(),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string(),
             false,
         ),
         ProviderKind::OpenRouter => (

@@ -296,7 +296,10 @@ fn openai_context_window(id: &str) -> u32 {
 }
 
 /// Fetch chat-capable models from the OpenAI `/models` endpoint.
-pub(super) async fn fetch_models_openai(api_token: &str, base_url: &str) -> Result<Vec<ModelVersion>> {
+pub(super) async fn fetch_models_openai(
+    api_token: &str,
+    base_url: &str,
+) -> Result<Vec<ModelVersion>> {
     let url = format!("{base_url}/models");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -408,10 +411,9 @@ pub(super) async fn fetch_models_gemini(api_token: &str) -> Result<Vec<ModelVers
                         return None;
                     }
                     // Context window from the compat response, or 1M fallback.
-                    let context_window = v
-                        .get("context_window")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(1_000_000) as u32;
+                    let context_window =
+                        v.get("context_window").and_then(|x| x.as_u64()).unwrap_or(1_000_000)
+                            as u32;
                     Some(ModelVersion {
                         id: id.clone(),
                         version: id.clone(),

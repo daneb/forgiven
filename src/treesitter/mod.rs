@@ -65,14 +65,14 @@ impl TsLang {
 
     fn ts_language(self) -> tree_sitter::Language {
         match self {
-            TsLang::Rust => tree_sitter_rust::language(),
-            TsLang::Python => tree_sitter_python::language(),
-            TsLang::JavaScript => tree_sitter_javascript::language(),
-            TsLang::TypeScript => tree_sitter_typescript::language_typescript(),
-            TsLang::TypeScriptTsx => tree_sitter_typescript::language_tsx(),
-            TsLang::Go => tree_sitter_go::language(),
-            TsLang::Json => tree_sitter_json::language(),
-            TsLang::Bash => tree_sitter_bash::language(),
+            TsLang::Rust => tree_sitter_rust::LANGUAGE.into(),
+            TsLang::Python => tree_sitter_python::LANGUAGE.into(),
+            TsLang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            TsLang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            TsLang::TypeScriptTsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            TsLang::Go => tree_sitter_go::LANGUAGE.into(),
+            TsLang::Json => tree_sitter_json::LANGUAGE.into(),
+            TsLang::Bash => tree_sitter_bash::LANGUAGE.into(),
         }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "forgiven"
-version = "0.9.0-alpha.3"
+version = "0.9.0-alpha.4"
 edition = "2021"
 authors = ["Dane Balia"]
 description = "An AI-first, terminal-based code editor with GitHub Copilot agent integration"
@@ -54,14 +54,14 @@ futures-util = "0.3"
 syntect = { version = "5", default-features = false, features = ["default-themes", "default-syntaxes", "regex-fancy", "yaml-load"] }
 
 # Tree-sitter (AST parsing — text objects, folding, sticky scroll)
-tree-sitter            = "0.22"
-tree-sitter-rust       = "0.21"
-tree-sitter-python     = "0.21"
-tree-sitter-javascript = "0.21"
-tree-sitter-typescript = "0.21"
-tree-sitter-go         = "0.21"
-tree-sitter-json       = "0.21"
-tree-sitter-bash       = "0.21"
+tree-sitter            = "0.24"
+tree-sitter-rust       = "0.24"
+tree-sitter-python     = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go         = "0.25"
+tree-sitter-json       = "0.24"
+tree-sitter-bash       = "0.25"
 
 # System clipboard
 arboard = "3"

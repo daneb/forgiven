@@ -194,11 +194,7 @@ impl AgentPanel {
             ProviderKind::Gemini => "Gemini".to_string(),
             ProviderKind::OpenRouter => {
                 // "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5"
-                self.selected_model_id()
-                    .split('/')
-                    .last()
-                    .unwrap_or("OpenRouter")
-                    .to_string()
+                self.selected_model_id().split('/').last().unwrap_or("OpenRouter").to_string()
             },
         }
     }
@@ -658,9 +654,7 @@ impl AgentPanel {
         let chat_endpoint = match &self.provider {
             ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
             ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
-            ProviderKind::Anthropic => {
-                "https://api.anthropic.com/v1/chat/completions".to_string()
-            },
+            ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
             ProviderKind::OpenAi => {
                 format!("{}/chat/completions", self.openai_base_url)
             },
@@ -668,9 +662,7 @@ impl AgentPanel {
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
                     .to_string()
             },
-            ProviderKind::OpenRouter => {
-                "https://openrouter.ai/api/v1/chat/completions".to_string()
-            },
+            ProviderKind::OpenRouter => "https://openrouter.ai/api/v1/chat/completions".to_string(),
         };
         // For non-Copilot, non-Ollama providers the resolved api_key stored on
         // the panel is used directly.  For Copilot we use the OAuth token just
@@ -1055,17 +1047,13 @@ Available tools:\n\
         let chat_endpoint = match &self.provider {
             ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
             ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
-            ProviderKind::Anthropic => {
-                "https://api.anthropic.com/v1/chat/completions".to_string()
-            },
+            ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
             ProviderKind::OpenAi => format!("{}/chat/completions", self.openai_base_url),
             ProviderKind::Gemini => {
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
                     .to_string()
             },
-            ProviderKind::OpenRouter => {
-                "https://openrouter.ai/api/v1/chat/completions".to_string()
-            },
+            ProviderKind::OpenRouter => "https://openrouter.ai/api/v1/chat/completions".to_string(),
         };
         let effective_token = match self.provider {
             ProviderKind::Copilot => api_token,

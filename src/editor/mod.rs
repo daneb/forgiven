@@ -718,9 +718,7 @@ impl Editor {
                         crate::agent::provider::resolve_api_key(&config.provider.gemini.api_key)
                     },
                     crate::agent::ProviderKind::OpenRouter => {
-                        crate::agent::provider::resolve_api_key(
-                            &config.provider.openrouter.api_key,
-                        )
+                        crate::agent::provider::resolve_api_key(&config.provider.openrouter.api_key)
                     },
                     _ => String::new(),
                 };
