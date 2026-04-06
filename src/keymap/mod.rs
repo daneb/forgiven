@@ -269,6 +269,8 @@ pub struct KeyHandler {
     pending_second_key: Option<char>,
     /// Accumulated numeric count prefix (e.g. `3` before `dd` → delete 3 lines).
     pending_count: Option<usize>,
+    /// Last f/t/F/T action — replayed by `;` / `,`.
+    last_find: Option<Action>,
 }
 
 impl KeyHandler {
@@ -282,6 +284,7 @@ impl KeyHandler {
             pending_key: None,
             pending_second_key: None,
             pending_count: None,
+            last_find: None,
         }
     }
 
@@ -499,6 +502,19 @@ impl KeyHandler {
         self.pending_count = None;
     }
 
+    /// Reverse the direction of a find action (used by `,`).
+    fn reverse_find(action: &Action) -> Action {
+        match action {
+            Action::FindCharForward { ch, inclusive } => {
+                Action::FindCharBackward { ch: *ch, inclusive: *inclusive }
+            },
+            Action::FindCharBackward { ch, inclusive } => {
+                Action::FindCharForward { ch: *ch, inclusive: *inclusive }
+            },
+            _ => Action::Noop,
+        }
+    }
+
     /// Handle a key in Normal mode, returning an action
     pub fn handle_normal(&mut self, key: KeyEvent) -> Action {
         // ── Numeric count prefix (e.g. 3 in 3dd / 5j) ────────────────────────
@@ -571,11 +587,27 @@ impl KeyHandler {
                     ('c', 'c') => Action::ChangeLine,
                     ('c', 'w') => Action::ChangeWord,
                     ('c', '$') => Action::DeleteToLineEnd, // same as D, then insert
-                    // f/t/F/T — find char (standalone)
-                    ('f', _) => Action::FindCharForward { ch, inclusive: true },
-                    ('t', _) => Action::FindCharForward { ch, inclusive: false },
-                    ('F', _) => Action::FindCharBackward { ch, inclusive: true },
-                    ('T', _) => Action::FindCharBackward { ch, inclusive: false },
+                    // f/t/F/T — find char (standalone); record for `;` / `,` repeat
+                    ('f', _) => {
+                        let a = Action::FindCharForward { ch, inclusive: true };
+                        self.last_find = Some(a.clone());
+                        a
+                    },
+                    ('t', _) => {
+                        let a = Action::FindCharForward { ch, inclusive: false };
+                        self.last_find = Some(a.clone());
+                        a
+                    },
+                    ('F', _) => {
+                        let a = Action::FindCharBackward { ch, inclusive: true };
+                        self.last_find = Some(a.clone());
+                        a
+                    },
+                    ('T', _) => {
+                        let a = Action::FindCharBackward { ch, inclusive: false };
+                        self.last_find = Some(a.clone());
+                        a
+                    },
                     // z — fold operations (ADR 0106)
                     ('z', 'a') => Action::FoldToggle,
                     ('z', 'M') => Action::FoldCloseAll,
@@ -673,6 +705,12 @@ impl KeyHandler {
             KeyCode::Char('/') => Action::InFileSearchStart,
             KeyCode::Char('n') => Action::InFileSearchNext,
             KeyCode::Char('N') => Action::InFileSearchPrev,
+
+            // f/t repeat: `;` = same direction, `,` = opposite direction
+            KeyCode::Char(';') => self.last_find.clone().unwrap_or(Action::Noop),
+            KeyCode::Char(',') => {
+                self.last_find.as_ref().map(Self::reverse_find).unwrap_or(Action::Noop)
+            },
 
             _ => Action::Noop,
         }

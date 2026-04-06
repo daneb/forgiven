@@ -334,10 +334,9 @@ impl UI {
 
         // ── Input box ─────────────────────────────────────────────────────────
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… (Enter=send, Alt+Enter=newline, Ctrl+V=paste image, Ctrl+P=attach file, Ctrl+T=model)"
-                .to_string()
+            " Ask Copilot… ".to_string()
         } else {
-            " Message Copilot… (Ctrl+T=model) ".to_string()
+            " Message Copilot… ".to_string()
         };
         let hint = hint.as_str();
         let input_block =

@@ -451,7 +451,6 @@ pub struct TestConfig {
     pub run_on_save: bool,
 }
 
-
 /// Top-level editor configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {

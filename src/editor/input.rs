@@ -1115,9 +1115,11 @@ impl Editor {
                 _ => {},
             },
 
-            InlineAssistPhase::Generating => if key.code == KeyCode::Esc {
-                self.inline_assist = None;
-                self.mode = Mode::Normal;
+            InlineAssistPhase::Generating => {
+                if key.code == KeyCode::Esc {
+                    self.inline_assist = None;
+                    self.mode = Mode::Normal;
+                }
             },
 
             InlineAssistPhase::Preview => match key.code {
