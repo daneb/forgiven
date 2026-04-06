@@ -1480,10 +1480,7 @@ Available tools:\n\
     /// Clears both `session_snapshots` and `session_created_files` on completion.
     /// The caller should push `restored_paths` into `pending_reloads` so open
     /// buffers are refreshed.
-    pub fn revert_session(
-        &mut self,
-        project_root: &std::path::Path,
-    ) -> (Vec<String>, Vec<String>) {
+    pub fn revert_session(&mut self, project_root: &std::path::Path) -> (Vec<String>, Vec<String>) {
         let mut restored = Vec::new();
         for (rel_path, original) in &self.session_snapshots {
             let abs = project_root.join(rel_path);

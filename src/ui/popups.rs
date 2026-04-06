@@ -815,14 +815,17 @@ impl UI {
                 for dl in &file_diff.lines {
                     let (text, style) = match dl {
                         DiffLine::HunkStart(idx) => {
-                            let hv = file_diff.hunk_verdicts.get(*idx).copied().unwrap_or(Verdict::Pending);
+                            let hv = file_diff
+                                .hunk_verdicts
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(Verdict::Pending);
                             let (htag, hcolor) = match hv {
                                 Verdict::Pending => ("pending", Color::Yellow),
                                 Verdict::Accepted => ("accepted", Color::Green),
                                 Verdict::Rejected => ("rejected", Color::Red),
                             };
-                            let is_focused_hunk =
-                                fi == focused && state.focused_hunk == Some(*idx);
+                            let is_focused_hunk = fi == focused && state.focused_hunk == Some(*idx);
                             let hunk_bg =
                                 if is_focused_hunk { Color::DarkGray } else { Color::Reset };
                             let t = if hunk_count > 1 {

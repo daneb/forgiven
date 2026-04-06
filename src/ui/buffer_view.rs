@@ -114,41 +114,37 @@ impl UI {
                         let seg_diag = has_diagnostic && seg == 0;
                         let seg_ghost = if seg == 0 { row_ghost } else { None };
 
-                        let mut line = if let Some(spans) =
-                            highlighted_lines.and_then(|h| h.get(line_idx))
-                        {
-                            Self::render_highlighted_line(
-                                spans,
-                                seg_start_col,
-                                viewport_width,
-                                seg_diag,
-                                seg_ghost,
-                                selection,
-                                buf_row,
-                            )
-                        } else {
-                            Self::render_line(
-                                raw_line_text,
-                                seg_start_col,
-                                viewport_width,
-                                buf_row,
-                                selection,
-                                *scroll_row,
-                                seg_diag,
-                                seg_ghost,
-                            )
-                        };
+                        let mut line =
+                            if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
+                                Self::render_highlighted_line(
+                                    spans,
+                                    seg_start_col,
+                                    viewport_width,
+                                    seg_diag,
+                                    seg_ghost,
+                                    selection,
+                                    buf_row,
+                                )
+                            } else {
+                                Self::render_line(
+                                    raw_line_text,
+                                    seg_start_col,
+                                    viewport_width,
+                                    buf_row,
+                                    selection,
+                                    *scroll_row,
+                                    seg_diag,
+                                    seg_ghost,
+                                )
+                            };
 
                         // Fold stub only on the first segment.
                         if seg == 0 {
                             if let Some(fd) = fold_data {
                                 if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
                                     let n = end_row.saturating_sub(buf_row);
-                                    let stub = format!(
-                                        " ··· {} line{}",
-                                        n,
-                                        if n == 1 { "" } else { "s" }
-                                    );
+                                    let stub =
+                                        format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
                                     line.spans.push(Span::styled(
                                         stub,
                                         Style::default().fg(Color::DarkGray),
@@ -191,8 +187,7 @@ impl UI {
                     if let Some(fd) = fold_data {
                         if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
                             let n = end_row.saturating_sub(buf_row);
-                            let stub =
-                                format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
+                            let stub = format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
                             line.spans
                                 .push(Span::styled(stub, Style::default().fg(Color::DarkGray)));
                         }
@@ -223,8 +218,10 @@ impl UI {
                     // cursor.row, then add the intra-line wrap offset.
                     let mut cursor_vrow: usize = 0;
                     for r in *scroll_row..cursor.row {
-                        let len =
-                            lines.get(r - start_line).map(|l: &String| l.chars().count()).unwrap_or(0);
+                        let len = lines
+                            .get(r - start_line)
+                            .map(|l: &String| l.chars().count())
+                            .unwrap_or(0);
                         cursor_vrow += visual_rows_for_len(len, text_width);
                     }
                     cursor_vrow += cursor.col / text_width;

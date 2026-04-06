@@ -436,7 +436,11 @@ impl Editor {
                     let hunk_count = s.diffs.get(fi).map_or(0, |d| d.hunk_verdicts.len());
                     let next_hunk = match s.focused_hunk {
                         None => {
-                            if hunk_count > 0 { Some(0) } else { None }
+                            if hunk_count > 0 {
+                                Some(0)
+                            } else {
+                                None
+                            }
                         },
                         Some(h) if h + 1 < hunk_count => Some(h + 1),
                         _ => {
@@ -445,14 +449,21 @@ impl Editor {
                             if next_fi != fi {
                                 s.focused_file = next_fi;
                             }
-                            let nc = s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
-                            if nc > 0 { Some(0) } else { None }
+                            let nc =
+                                s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
+                            if nc > 0 {
+                                Some(0)
+                            } else {
+                                None
+                            }
                         },
                     };
                     s.focused_hunk = next_hunk;
                     // Scroll to the focused hunk
                     if let Some(h) = next_hunk {
-                        if let Some(offset) = s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h)) {
+                        if let Some(offset) =
+                            s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h))
+                        {
                             s.scroll = *offset;
                         }
                     }
@@ -469,14 +480,21 @@ impl Editor {
                             if fi > 0 {
                                 s.focused_file = fi - 1;
                             }
-                            let nc = s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
-                            if nc > 0 { Some(nc - 1) } else { None }
+                            let nc =
+                                s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
+                            if nc > 0 {
+                                Some(nc - 1)
+                            } else {
+                                None
+                            }
                         },
                         Some(h) => Some(h - 1),
                     };
                     s.focused_hunk = prev_hunk;
                     if let Some(h) = prev_hunk {
-                        if let Some(offset) = s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h)) {
+                        if let Some(offset) =
+                            s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h))
+                        {
                             s.scroll = *offset;
                         }
                     }

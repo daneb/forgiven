@@ -133,8 +133,7 @@ impl Editor {
         }
 
         // Compute project-relative path for glob matching.
-        let cwd =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let rel_path = saved_path
             .strip_prefix(&cwd)
             .unwrap_or(saved_path)
@@ -259,10 +258,7 @@ impl Editor {
             tokio::runtime::Handle::current().block_on(async {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    tokio::process::Command::new(&program)
-                        .args(&args)
-                        .current_dir(&cwd)
-                        .output(),
+                    tokio::process::Command::new(&program).args(&args).current_dir(&cwd).output(),
                 )
                 .await
             })
@@ -337,10 +333,8 @@ impl Editor {
                     continue;
                 }
             }
-            let prompt = hook
-                .prompt
-                .replace("{file}", &rel_path)
-                .replace("{output}", &truncated_output);
+            let prompt =
+                hook.prompt.replace("{file}", &rel_path).replace("{output}", &truncated_output);
             matched = Some((i, prompt));
             break;
         }

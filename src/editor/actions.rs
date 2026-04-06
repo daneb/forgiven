@@ -597,10 +597,8 @@ Skip anything already obvious from reading the code.";
                     }
                     if !deleted.is_empty() {
                         let n = deleted.len();
-                        parts.push(format!(
-                            "{n} new file{} deleted",
-                            if n == 1 { "" } else { "s" }
-                        ));
+                        parts
+                            .push(format!("{n} new file{} deleted", if n == 1 { "" } else { "s" }));
                     }
                     let msg = if parts.is_empty() {
                         "Session reverted (nothing to restore)".to_string()

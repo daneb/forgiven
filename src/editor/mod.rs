@@ -187,9 +187,14 @@ impl FileDiff {
         }
         let all_acc = self.hunk_verdicts.iter().all(|v| *v == Verdict::Accepted);
         let all_rej = self.hunk_verdicts.iter().all(|v| *v == Verdict::Rejected);
-        if all_acc { Verdict::Accepted } else if all_rej { Verdict::Rejected } else { Verdict::Pending }
+        if all_acc {
+            Verdict::Accepted
+        } else if all_rej {
+            Verdict::Rejected
+        } else {
+            Verdict::Pending
+        }
     }
-
 }
 
 /// All state for `Mode::ReviewChanges`.
@@ -252,7 +257,14 @@ impl ReviewChangesState {
 
         diffs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
         let (file_offsets, hunk_line_offsets) = review_compute_offsets(&diffs);
-        Self { diffs, scroll: 0, focused_file: 0, file_offsets, focused_hunk: None, hunk_line_offsets }
+        Self {
+            diffs,
+            scroll: 0,
+            focused_file: 0,
+            file_offsets,
+            focused_hunk: None,
+            hunk_line_offsets,
+        }
     }
 }
 
@@ -310,7 +322,11 @@ fn review_diff_lines(original: &str, current: &str) -> (Vec<DiffLine>, usize) {
 /// For each hunk: if `Rejected`, use the original lines; otherwise use the
 /// agent's version.  Lines outside any hunk group (far context) are taken from
 /// the agent version unchanged.
-pub(crate) fn apply_hunk_verdicts(original: &str, agent_version: &str, verdicts: &[Verdict]) -> String {
+pub(crate) fn apply_hunk_verdicts(
+    original: &str,
+    agent_version: &str,
+    verdicts: &[Verdict],
+) -> String {
     use similar::TextDiff;
 
     if verdicts.iter().all(|v| *v != Verdict::Rejected) {

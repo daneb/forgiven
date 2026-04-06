@@ -511,9 +511,8 @@ pub(super) async fn agentic_loop(
                                 });
                             } else {
                                 // New file — record it so revert_session() can delete it.
-                                let _ = tx.send(StreamEvent::FileCreated {
-                                    path: path_str.to_string(),
-                                });
+                                let _ = tx
+                                    .send(StreamEvent::FileCreated { path: path_str.to_string() });
                             }
                         }
                     }
