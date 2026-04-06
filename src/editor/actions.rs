@@ -351,6 +351,10 @@ impl Editor {
                     if let Err(e) = self.fire_hooks_for_save(&path) {
                         tracing::warn!("Hook error: {e}");
                     }
+                    // Run tests and fire on_test_fail hooks if configured.
+                    if let Err(e) = self.run_tests_if_configured(&path) {
+                        tracing::warn!("Test hook error: {e}");
+                    }
                 }
             },
             Action::Quit => {
@@ -565,6 +569,7 @@ Skip anything already obvious from reading the code.";
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let state = crate::editor::ReviewChangesState::build(
                         &self.agent_panel.session_snapshots,
+                        &self.agent_panel.session_created_files,
                         &project_root,
                     );
                     self.review_changes = Some(state);
@@ -580,16 +585,27 @@ Skip anything already obvious from reading the code.";
                 } else {
                     let project_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let restored = self.agent_panel.revert_session(&project_root);
-                    let count = restored.len();
-                    // Queue the restored files for buffer reload.
+                    let (restored, deleted) = self.agent_panel.revert_session(&project_root);
+                    // Queue restored files for buffer reload.
                     for rel in &restored {
                         self.agent_panel.pending_reloads.push(rel.clone());
                     }
-                    let msg = if count == 1 {
-                        format!("Session reverted: 1 file restored")
+                    let mut parts = Vec::new();
+                    if !restored.is_empty() {
+                        let n = restored.len();
+                        parts.push(format!("{n} file{} restored", if n == 1 { "" } else { "s" }));
+                    }
+                    if !deleted.is_empty() {
+                        let n = deleted.len();
+                        parts.push(format!(
+                            "{n} new file{} deleted",
+                            if n == 1 { "" } else { "s" }
+                        ));
+                    }
+                    let msg = if parts.is_empty() {
+                        "Session reverted (nothing to restore)".to_string()
                     } else {
-                        format!("Session reverted: {count} files restored")
+                        format!("Session reverted: {}", parts.join(", "))
                     };
                     self.set_status(msg);
                 }

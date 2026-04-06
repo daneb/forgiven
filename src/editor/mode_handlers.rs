@@ -414,6 +414,7 @@ impl Editor {
                 if let Some(s) = self.review_changes.as_mut() {
                     let next = (s.focused_file + 1).min(s.diffs.len().saturating_sub(1));
                     s.focused_file = next;
+                    s.focused_hunk = None;
                     s.scroll = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
                 }
             },
@@ -423,126 +424,211 @@ impl Editor {
                 if let Some(s) = self.review_changes.as_mut() {
                     let prev = s.focused_file.saturating_sub(1);
                     s.focused_file = prev;
+                    s.focused_hunk = None;
                     s.scroll = s.file_offsets.get(prev).copied().unwrap_or(s.scroll);
                 }
             },
 
-            // Accept focused file (keep current disk state — nothing to write)
+            // Tab — advance to next hunk (within current file, then next file)
+            KeyCode::Tab => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    let fi = s.focused_file;
+                    let hunk_count = s.diffs.get(fi).map_or(0, |d| d.hunk_verdicts.len());
+                    let next_hunk = match s.focused_hunk {
+                        None => {
+                            if hunk_count > 0 { Some(0) } else { None }
+                        },
+                        Some(h) if h + 1 < hunk_count => Some(h + 1),
+                        _ => {
+                            // Wrap to first hunk of next file
+                            let next_fi = (fi + 1).min(s.diffs.len().saturating_sub(1));
+                            if next_fi != fi {
+                                s.focused_file = next_fi;
+                            }
+                            let nc = s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
+                            if nc > 0 { Some(0) } else { None }
+                        },
+                    };
+                    s.focused_hunk = next_hunk;
+                    // Scroll to the focused hunk
+                    if let Some(h) = next_hunk {
+                        if let Some(offset) = s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h)) {
+                            s.scroll = *offset;
+                        }
+                    }
+                }
+            },
+
+            // Shift+Tab — go to previous hunk
+            KeyCode::BackTab => {
+                if let Some(s) = self.review_changes.as_mut() {
+                    let fi = s.focused_file;
+                    let prev_hunk = match s.focused_hunk {
+                        None | Some(0) => {
+                            // Wrap to last hunk of previous file
+                            if fi > 0 {
+                                s.focused_file = fi - 1;
+                            }
+                            let nc = s.diffs.get(s.focused_file).map_or(0, |d| d.hunk_verdicts.len());
+                            if nc > 0 { Some(nc - 1) } else { None }
+                        },
+                        Some(h) => Some(h - 1),
+                    };
+                    s.focused_hunk = prev_hunk;
+                    if let Some(h) = prev_hunk {
+                        if let Some(offset) = s.hunk_line_offsets.get(s.focused_file).and_then(|v| v.get(h)) {
+                            s.scroll = *offset;
+                        }
+                    }
+                }
+            },
+
+            // Accept focused hunk (or file if no hunk focused)
             KeyCode::Char('y') => {
-                // Phase 1: mark accepted and find next pending
+                let hunk_focused =
+                    self.review_changes.as_ref().map_or(false, |s| s.focused_hunk.is_some());
+                if hunk_focused {
+                    return self.review_accept_focused_hunk();
+                }
+                // File-level accept: all hunks → Accepted, advance to next pending file
                 let (next_focused, next_offset) = {
                     let Some(s) = self.review_changes.as_mut() else {
                         return Ok(());
                     };
-                    if let Some(diff) = s.diffs.get_mut(s.focused_file) {
-                        diff.verdict = Verdict::Accepted;
-                    }
                     let cur = s.focused_file;
+                    if let Some(diff) = s.diffs.get_mut(cur) {
+                        for v in &mut diff.hunk_verdicts {
+                            *v = Verdict::Accepted;
+                        }
+                    }
                     let next = ((cur + 1)..s.diffs.len())
-                        .find(|&i| s.diffs[i].verdict == Verdict::Pending)
+                        .find(|&i| s.diffs[i].file_verdict() == Verdict::Pending)
                         .unwrap_or(cur);
                     let offset = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
                     (next, offset)
                 };
                 if let Some(s) = self.review_changes.as_mut() {
                     s.focused_file = next_focused;
+                    s.focused_hunk = None;
                     s.scroll = next_offset;
                 }
             },
 
-            // Reject focused file — restore from snapshot
+            // Reject focused hunk (or file if no hunk focused)
             KeyCode::Char('n') => {
+                let hunk_focused =
+                    self.review_changes.as_ref().map_or(false, |s| s.focused_hunk.is_some());
+                if hunk_focused {
+                    return self.review_reject_focused_hunk();
+                }
+                // File-level reject: all hunks → Rejected, write original to disk
                 let project_root =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                // Phase 1: collect what we need without holding mutable borrow
-                let (rel_path, needs_restore, cur_focused) = {
+                let (rel_path, original, already_rejected, cur_focused) = {
                     let Some(s) = self.review_changes.as_ref() else {
                         return Ok(());
                     };
                     let focused = s.focused_file;
                     let diff = &s.diffs[focused];
-                    (diff.rel_path.clone(), diff.verdict != Verdict::Rejected, focused)
+                    (
+                        diff.rel_path.clone(),
+                        diff.original.clone(),
+                        diff.file_verdict() == Verdict::Rejected,
+                        focused,
+                    )
                 };
-                // Phase 2: restore file (accesses agent_panel, not review_changes)
-                if needs_restore {
-                    if let Some(original) =
-                        self.agent_panel.session_snapshots.get(&rel_path).cloned()
-                    {
-                        let abs = project_root.join(&rel_path);
-                        if let Some(parent) = abs.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(&abs, &original);
-                        self.agent_panel.pending_reloads.push(rel_path.clone());
+                if !already_rejected {
+                    let abs = project_root.join(&rel_path);
+                    if let Some(parent) = abs.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
+                    if original.is_empty() {
+                        // Newly created file: delete it
+                        let _ = std::fs::remove_file(&abs);
+                    } else {
+                        let _ = std::fs::write(&abs, &original);
+                    }
+                    self.agent_panel.pending_reloads.push(rel_path.clone());
                 }
-                // Phase 3: mark rejected + advance focus
                 let (next_focused, next_offset) = {
                     let Some(s) = self.review_changes.as_mut() else {
                         return Ok(());
                     };
-                    if needs_restore {
-                        if let Some(diff) = s.diffs.get_mut(cur_focused) {
-                            diff.verdict = Verdict::Rejected;
+                    if let Some(diff) = s.diffs.get_mut(cur_focused) {
+                        for v in &mut diff.hunk_verdicts {
+                            *v = Verdict::Rejected;
                         }
                     }
                     let next = ((cur_focused + 1)..s.diffs.len())
-                        .find(|&i| s.diffs[i].verdict == Verdict::Pending)
+                        .find(|&i| s.diffs[i].file_verdict() == Verdict::Pending)
                         .unwrap_or(cur_focused);
                     let offset = s.file_offsets.get(next).copied().unwrap_or(s.scroll);
                     (next, offset)
                 };
                 if let Some(s) = self.review_changes.as_mut() {
                     s.focused_file = next_focused;
+                    s.focused_hunk = None;
                     s.scroll = next_offset;
                 }
             },
 
-            // Accept all pending files
+            // Accept focused hunk explicitly (also works when hunk is highlighted)
+            KeyCode::Char('a') => {
+                return self.review_accept_focused_hunk();
+            },
+
+            // Reject focused hunk explicitly
+            KeyCode::Char('r') => {
+                return self.review_reject_focused_hunk();
+            },
+
+            // Accept all pending files (all hunks → Accepted)
             KeyCode::Char('Y') => {
                 if let Some(s) = self.review_changes.as_mut() {
                     for diff in &mut s.diffs {
-                        if diff.verdict == Verdict::Pending {
-                            diff.verdict = Verdict::Accepted;
+                        for v in &mut diff.hunk_verdicts {
+                            if *v == Verdict::Pending {
+                                *v = Verdict::Accepted;
+                            }
                         }
                     }
                 }
             },
 
-            // Reject all pending files — restore each from snapshot
+            // Reject all pending files — restore each from its original
             KeyCode::Char('N') => {
                 let project_root =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                // Phase 1: collect paths to restore
-                let to_restore: Vec<String> = self
+                // Collect (rel_path, original) for all pending files
+                let to_restore: Vec<(String, String)> = self
                     .review_changes
                     .as_ref()
                     .map(|s| {
                         s.diffs
                             .iter()
-                            .filter(|d| d.verdict == Verdict::Pending)
-                            .map(|d| d.rel_path.clone())
+                            .filter(|d| d.file_verdict() == Verdict::Pending)
+                            .map(|d| (d.rel_path.clone(), d.original.clone()))
                             .collect()
                     })
                     .unwrap_or_default();
-                // Phase 2: write originals back to disk
-                for rel_path in &to_restore {
-                    if let Some(original) =
-                        self.agent_panel.session_snapshots.get(rel_path).cloned()
-                    {
-                        let abs = project_root.join(rel_path);
-                        if let Some(parent) = abs.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(&abs, &original);
-                        self.agent_panel.pending_reloads.push(rel_path.clone());
+                for (rel_path, original) in &to_restore {
+                    let abs = project_root.join(rel_path);
+                    if let Some(parent) = abs.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
+                    if original.is_empty() {
+                        let _ = std::fs::remove_file(&abs);
+                    } else {
+                        let _ = std::fs::write(&abs, original);
+                    }
+                    self.agent_panel.pending_reloads.push(rel_path.clone());
                 }
-                // Phase 3: mark all as rejected
                 if let Some(s) = self.review_changes.as_mut() {
                     for diff in &mut s.diffs {
-                        if diff.verdict == Verdict::Pending {
-                            diff.verdict = Verdict::Rejected;
+                        if diff.file_verdict() == Verdict::Pending {
+                            for v in &mut diff.hunk_verdicts {
+                                *v = Verdict::Rejected;
+                            }
                         }
                     }
                 }
@@ -550,6 +636,79 @@ impl Editor {
 
             _ => {},
         }
+        Ok(())
+    }
+
+    /// Accept the currently focused hunk and write the effective file content to disk.
+    fn review_accept_focused_hunk(&mut self) -> Result<()> {
+        use crate::editor::{apply_hunk_verdicts, Verdict};
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (fi, hunk_idx, rel_path, original, agent_version) = {
+            let Some(s) = self.review_changes.as_ref() else {
+                return Ok(());
+            };
+            let fi = s.focused_file;
+            let Some(h) = s.focused_hunk else {
+                return Ok(());
+            };
+            let diff = &s.diffs[fi];
+            (fi, h, diff.rel_path.clone(), diff.original.clone(), diff.agent_version.clone())
+        };
+        // Mark hunk accepted
+        if let Some(s) = self.review_changes.as_mut() {
+            if let Some(diff) = s.diffs.get_mut(fi) {
+                if let Some(v) = diff.hunk_verdicts.get_mut(hunk_idx) {
+                    *v = Verdict::Accepted;
+                }
+                // Write effective content to disk
+                let content = apply_hunk_verdicts(&original, &agent_version, &diff.hunk_verdicts);
+                let abs = project_root.join(&rel_path);
+                if let Some(parent) = abs.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&abs, &content);
+            }
+        }
+        self.agent_panel.pending_reloads.push(rel_path);
+        Ok(())
+    }
+
+    /// Reject the currently focused hunk and write the effective file content to disk.
+    fn review_reject_focused_hunk(&mut self) -> Result<()> {
+        use crate::editor::{apply_hunk_verdicts, Verdict};
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (fi, hunk_idx, rel_path, original, agent_version) = {
+            let Some(s) = self.review_changes.as_ref() else {
+                return Ok(());
+            };
+            let fi = s.focused_file;
+            let Some(h) = s.focused_hunk else {
+                return Ok(());
+            };
+            let diff = &s.diffs[fi];
+            (fi, h, diff.rel_path.clone(), diff.original.clone(), diff.agent_version.clone())
+        };
+        if let Some(s) = self.review_changes.as_mut() {
+            if let Some(diff) = s.diffs.get_mut(fi) {
+                if let Some(v) = diff.hunk_verdicts.get_mut(hunk_idx) {
+                    *v = Verdict::Rejected;
+                }
+                let content = apply_hunk_verdicts(&original, &agent_version, &diff.hunk_verdicts);
+                let abs = project_root.join(&rel_path);
+                if let Some(parent) = abs.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if content.is_empty() && original.is_empty() {
+                    // All hunks rejected for a created file — delete it
+                    let _ = std::fs::remove_file(&abs);
+                } else {
+                    let _ = std::fs::write(&abs, &content);
+                }
+            }
+        }
+        self.agent_panel.pending_reloads.push(rel_path);
         Ok(())
     }
 }

@@ -400,6 +400,11 @@ pub struct AgentPanel {
     /// Keys are project-relative paths; values are the file contents before the
     /// agent's first edit.  Cleared by `new_conversation()`.
     pub session_snapshots: std::collections::HashMap<String, String>,
+    /// Project-relative paths of files that were created from scratch by the
+    /// agent this session (i.e. did not exist when the session started).
+    /// `revert_session()` deletes these files rather than restoring content.
+    /// Cleared by `new_conversation()`.
+    pub session_created_files: Vec<String>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -469,6 +474,12 @@ pub enum StreamEvent {
     FileSnapshot {
         path: String,
         original: String,
+    },
+    /// Sent when `write_file` targets a path that did not exist before the
+    /// session.  Stored separately from `FileSnapshot` so `revert_session()`
+    /// can delete these files rather than trying to restore their content.
+    FileCreated {
+        path: String,
     },
     /// A task was created by the agent via the create_task tool.
     TaskCreated {

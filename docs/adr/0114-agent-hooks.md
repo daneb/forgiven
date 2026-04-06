@@ -44,9 +44,9 @@ enabled  = false          # temporarily disabled without removing
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `trigger` | `String` | When to fire. Currently only `"on_save"`. |
+| `trigger` | `String` | When to fire: `"on_save"` or `"on_test_fail"`. |
 | `glob` | `String` | Glob pattern matched against the project-relative path of the triggering file. |
-| `prompt` | `String` | Message sent to the agent. `{file}` is replaced with the file path. |
+| `prompt` | `String` | Message sent to the agent. `{file}` is replaced with the file path; `{output}` (on_test_fail only) is replaced with truncated test output. |
 | `enabled` | `bool` | Default `true`. Set `false` to disable without deleting the hook. |
 
 ### Trigger: `on_save`
@@ -54,6 +54,42 @@ enabled  = false          # temporarily disabled without removing
 Fires when the **editor itself saves** a file (i.e. `Action::FileSave` succeeds).
 External writes detected by the file watcher (ADR 0064) do **not** trigger hooks —
 the user did not initiate them and they could cause feedback loops.
+
+### Trigger: `on_test_fail`
+
+Fires when a test run transitions from passing to failing (pass→fail only; repeated
+failures are silent). Configuration is in a separate `[agent.test]` section:
+
+```toml
+[agent.test]
+command      = "cargo test"   # optional; auto-detected from project root
+run_on_save  = true           # must be true to enable test runs on save
+```
+
+Auto-detection precedence: `Cargo.toml` → `cargo test`, `package.json` → `npm test`,
+`pyproject.toml` / `pytest.ini` / `setup.cfg` → `pytest`.
+
+Test output (stdout + stderr combined) is truncated to 2 000 characters before being
+substituted into the `{output}` placeholder to keep prompt size bounded.
+
+**Cooldown:** 30 seconds (longer than `on_save`'s 5 seconds — tests take time).
+
+**Re-entry guard:** `Editor::hooks_firing: bool` is set to `true` when an
+`on_test_fail` agent fires and reset to `false` when the agent returns to
+`AgentStatus::Idle`. While set, `run_tests_if_configured()` is a no-op, preventing
+the cycle: agent edits → save → tests → agent fires again.
+
+Example:
+
+```toml
+[agent.test]
+run_on_save = true
+
+[[agent.hooks]]
+trigger = "on_test_fail"
+glob    = "**/*.rs"
+prompt  = "Tests are now failing. Output:\n{output}\nDiagnose and fix the root cause."
+```
 
 ### Glob matching
 
@@ -104,10 +140,10 @@ No new mode or keybind is required.
 
 | File | Change |
 |------|--------|
-| `src/config/mod.rs` | Add `AgentHook` struct; add `hooks: Vec<AgentHook>` to `AgentConfig` |
-| `src/editor/mod.rs` | Add `mod hooks`; add `hook_cooldowns: HashMap<usize, Instant>` field; init to empty |
-| `src/editor/hooks.rs` | New: `glob_matches()`, `Editor::fire_hooks_for_save()` |
-| `src/editor/actions.rs` | Call `self.fire_hooks_for_save(&path)` after successful `FileSave` |
+| `src/config/mod.rs` | `AgentHook` struct; `hooks: Vec<AgentHook>` in `AgentConfig`; `TestConfig { command, run_on_save }` in `AgentConfig` |
+| `src/editor/mod.rs` | `hook_cooldowns`, `last_test_passed`, `hooks_firing` fields; reset `hooks_firing` in tick loop |
+| `src/editor/hooks.rs` | `glob_matches()`, `fire_hooks_for_save()`, `run_tests_if_configured()`, `fire_hooks_for_test_fail()`, `detect_test_command()` |
+| `src/editor/actions.rs` | Call `fire_hooks_for_save()` and `run_tests_if_configured()` after `FileSave` |
 
 ---
 
@@ -147,7 +183,7 @@ is complex. `on_save` is a clean discrete event.
 
 **Negative / trade-offs**
 
-- Only `on_save` trigger in this revision; `on_lint_error`, `on_test_fail` deferred.
+- `on_lint_error` deferred — LSP diagnostics arrive asynchronously during typing; rate-limiting without debouncing is complex.
 - First matching hook wins; multiple hooks cannot fire for the same save event.
 - No hook output is stored separately — it goes into the normal chat history,
   which may interrupt an in-progress conversation if the user was mid-type.

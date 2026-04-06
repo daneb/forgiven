@@ -53,10 +53,21 @@ Mnemonic: **u**ndo the agent session.
 - Revert after revert: after `SPC a u` the snapshot map is empty; a subsequent
   `SPC a u` shows "No checkpoint".
 
+### Newly created files
+
+When `write_file` targets a path that did not exist before the session, a
+`StreamEvent::FileCreated { path }` event is emitted instead of `FileSnapshot`.
+`AgentPanel` stores these in `session_created_files: Vec<String>`.
+
+`revert_session()` deletes these files (`std::fs::remove_file`) after restoring
+the snapshots. `has_checkpoint()` returns `true` when either `session_snapshots`
+or `session_created_files` is non-empty.
+
+The status message after revert distinguishes the two cases:
+`"Session reverted: 3 files restored, 1 new file deleted"`.
+
 ### What is NOT covered
 
-- New files created by the agent (no pre-existing content to restore). These
-  are silently skipped; the user must delete them manually or via git.
 - Binary files. `std::fs::read_to_string` returns an empty string on UTF-8
   errors — binary files are treated as if they had no prior content and will be
   truncated on revert. This is acceptable for a code editor.
@@ -83,7 +94,8 @@ for partial revert is unclear.
 - Every `write_file`/`edit_file` tool call now reads the file from disk once
   before executing (if it hasn't been snapshotted yet). This adds one syscall
   per unique file per session — negligible cost.
-- `AgentPanel` grows one `HashMap<String, String>` field; memory usage is
-  bounded by the number and total size of files the agent edits in a session.
+- `AgentPanel` grows two fields: `session_snapshots: HashMap<String, String>`
+  and `session_created_files: Vec<String>`. Memory is bounded by the number and
+  size of files touched in the session.
 - `SPC a u` is now the single-command "undo everything the agent did" escape
-  hatch, visible in the which-key menu under `SPC a`.
+  hatch — both modifications and new creations — visible under `SPC a`.

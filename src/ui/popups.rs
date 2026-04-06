@@ -795,7 +795,8 @@ impl UI {
 
         for (fi, file_diff) in state.diffs.iter().enumerate() {
             // File header
-            let (verdict_tag, verdict_color) = match file_diff.verdict {
+            let file_v = file_diff.file_verdict();
+            let (verdict_tag, verdict_color) = match file_v {
                 Verdict::Pending => ("pending", Color::Yellow),
                 Verdict::Accepted => ("accepted", Color::Green),
                 Verdict::Rejected => ("rejected", Color::Red),
@@ -803,10 +804,6 @@ impl UI {
             let is_focused = fi == focused;
             let header_bg = if is_focused { Color::DarkGray } else { Color::Reset };
             let header_text = format!(" ── {} [{}] ", file_diff.rel_path, verdict_tag);
-            // We render the verdict tag in its colour inside the same line by
-            // using a single styled span — ratatui Line::from() would let us
-            // colour substrings, but our flat Vec model uses one style per row.
-            // Colour the whole header row in the verdict colour (dim for context).
             let header_style =
                 Style::default().fg(verdict_color).bg(header_bg).add_modifier(Modifier::BOLD);
             lines.push((header_text, header_style));
@@ -814,10 +811,26 @@ impl UI {
             if file_diff.lines.is_empty() {
                 lines.push(("  (no changes)".to_string(), Style::default().fg(Color::DarkGray)));
             } else {
+                let hunk_count = file_diff.hunk_verdicts.len();
                 for dl in &file_diff.lines {
                     let (text, style) = match dl {
-                        DiffLine::HunkSep => {
-                            ("  ···".to_string(), Style::default().fg(Color::DarkGray))
+                        DiffLine::HunkStart(idx) => {
+                            let hv = file_diff.hunk_verdicts.get(*idx).copied().unwrap_or(Verdict::Pending);
+                            let (htag, hcolor) = match hv {
+                                Verdict::Pending => ("pending", Color::Yellow),
+                                Verdict::Accepted => ("accepted", Color::Green),
+                                Verdict::Rejected => ("rejected", Color::Red),
+                            };
+                            let is_focused_hunk =
+                                fi == focused && state.focused_hunk == Some(*idx);
+                            let hunk_bg =
+                                if is_focused_hunk { Color::DarkGray } else { Color::Reset };
+                            let t = if hunk_count > 1 {
+                                format!("  ··· hunk {}/{} [{}] ···", idx + 1, hunk_count, htag)
+                            } else {
+                                format!("  ··· [{}] ···", htag)
+                            };
+                            (t, Style::default().fg(hcolor).bg(hunk_bg))
                         },
                         DiffLine::Added(s) => {
                             (format!("  + {s}"), Style::default().fg(Color::LightGreen))
@@ -844,10 +857,16 @@ impl UI {
             Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
 
         // Header block
+        let hunk_hint = if state.focused_hunk.is_some() {
+            "  tab/T=hunk nav  a=accept hunk  r=reject hunk"
+        } else {
+            "  tab=focus hunk"
+        };
         let hint = format!(
-            " Review Changes  ({}/{})  y=accept  n=reject  Y/N=all  [/]=jump  q=quit",
+            " Review Changes  ({}/{})  y/n=file  Y/N=all  [/]=jump{}  q=quit",
             focused + 1,
             total,
+            hunk_hint,
         );
         let header_block =
             Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan));

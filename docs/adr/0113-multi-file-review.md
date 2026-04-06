@@ -53,33 +53,36 @@ pub enum DiffLine {
     Context(String),
     Added(String),
     Removed(String),
-    HunkSep,        // "···" between non-adjacent hunks
+    HunkStart(usize),   // carries hunk index; replaces old HunkSep
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Pending,
-    Accepted,
-    Rejected,
-}
+pub enum Verdict { Pending, Accepted, Rejected }
 
 pub struct FileDiff {
     pub rel_path: String,
     pub lines: Vec<DiffLine>,
-    pub verdict: Verdict,
+    pub hunk_verdicts: Vec<Verdict>,  // one per hunk
+    pub original: String,             // pre-agent content (empty for new files)
+    pub agent_version: String,        // post-agent content
 }
 
 pub struct ReviewChangesState {
-    /// One entry per agent-touched file, sorted by path.
     pub diffs: Vec<FileDiff>,
-    /// Scroll offset in the flat rendered line list.
     pub scroll: usize,
-    /// Index of the file currently focused for y/n actions.
     pub focused_file: usize,
-    /// Precomputed first flat-line index for each file's header.
+    pub focused_hunk: Option<usize>,        // hunk focused for a/r actions
     pub file_offsets: Vec<usize>,
+    pub hunk_line_offsets: Vec<Vec<usize>>, // flat line index of each HunkStart
 }
 ```
+
+`FileDiff::file_verdict()` derives a file-level verdict from `hunk_verdicts`:
+all-Accepted → Accepted, all-Rejected → Rejected, otherwise Pending.
+
+`apply_hunk_verdicts(original, agent_version, verdicts)` reconstructs the file
+by emitting `agent_version` lines for accepted/pending hunks and `original` lines
+for rejected hunks, using `TextDiff::grouped_ops(3)` to identify hunk boundaries.
 
 ### UX flow
 
@@ -88,11 +91,14 @@ pub struct ReviewChangesState {
 2. [ReviewChanges]   j / k            → scroll one line
 3. [ReviewChanges]   Ctrl+D / Ctrl+U  → scroll half-page
 4. [ReviewChanges]   ] / [            → jump to next / previous file
-5. [ReviewChanges]   y                → accept focused file (keep disk state)
-6. [ReviewChanges]   n                → reject focused file (restore from snapshot)
-7. [ReviewChanges]   Y                → accept all pending files
-8. [ReviewChanges]   N                → reject all pending files
-9. [ReviewChanges]   q / Esc          → close, return to Mode::Normal
+5. [ReviewChanges]   Tab / Shift+Tab  → cycle forward / backward through hunks
+6. [ReviewChanges]   y                → accept focused file (all hunks)
+7. [ReviewChanges]   n                → reject focused file (all hunks, restore)
+8. [ReviewChanges]   a                → accept focused hunk only
+9. [ReviewChanges]   r                → reject focused hunk only (partial restore)
+10. [ReviewChanges]  Y                → accept all pending files
+11. [ReviewChanges]  N                → reject all pending files
+12. [ReviewChanges]  q / Esc          → close, return to Mode::Normal
 ```
 
 `SPC a r` is a no-op (status message) when `has_checkpoint()` is false.
@@ -189,10 +195,9 @@ The in-memory snapshot approach (ADR 0112) already covers all agent-touched file
 without any git dependency.
 
 ### Per-hunk accept/reject
-The granularity of per-hunk decisions (like `git add -p`) adds significant
-implementation complexity (hunk cursor, partial apply logic). Per-file granularity
-covers the common case: "I like what the agent did to `foo.rs` but not `bar.rs`".
-Per-hunk can be added in a future revision.
+Implemented. `HunkStart(usize)` carries a hunk index; `hunk_verdicts: Vec<Verdict>`
+tracks per-hunk decisions. `apply_hunk_verdicts()` does partial file reconstruction.
+`Tab`/`Shift+Tab` navigate hunks; `a`/`r` accept/reject the focused hunk.
 
 ### Separate diff buffer / split pane
 Rendering the diff into a live editor buffer (like a `git diff` pane) would let the
@@ -213,11 +218,9 @@ full-screen overlay is simpler and sufficient.
 
 **Negative / trade-offs**
 
-- Per-hunk granularity is not supported in this revision.
-- `similar` adds a compile-time dependency (~100 KB compiled). Acceptable given the
-  context (this is a dev tool, not an embedded target).
-- Files created by the agent (no pre-session snapshot) do not appear in the review.
-  They must be deleted manually or via `git clean`. Consistent with ADR 0112.
+- `similar` adds a compile-time dependency (~100 KB compiled). Acceptable for a dev tool.
+- Files created by the agent appear in the review with `original = ""`. Rejecting them
+  deletes the file from disk (consistent with ADR 0112 `revert_session()`).
 
 ---
 

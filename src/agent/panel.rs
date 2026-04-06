@@ -126,6 +126,7 @@ impl AgentPanel {
             pending_janitor: false,
             cached_project_tree: None,
             session_snapshots: std::collections::HashMap::new(),
+            session_created_files: Vec::new(),
         }
     }
 
@@ -440,6 +441,7 @@ impl AgentPanel {
         self.session_rounds = 0;
         self.cached_project_tree = None;
         self.session_snapshots.clear();
+        self.session_created_files.clear();
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -1145,6 +1147,12 @@ Available tools:\n\
                         // Only store the first snapshot per path per session.
                         self.session_snapshots.entry(path).or_insert(original);
                     },
+                    Ok(StreamEvent::FileCreated { path }) => {
+                        active = true;
+                        if !self.session_created_files.contains(&path) {
+                            self.session_created_files.push(path);
+                        }
+                    },
                     Ok(StreamEvent::TaskCreated { title }) => {
                         active = true;
                         self.tasks.push(AgentTask { title, done: false });
@@ -1459,20 +1467,23 @@ Available tools:\n\
         }
     }
 
-    /// Returns `true` when at least one file has been snapshotted this session,
-    /// i.e. the agent has modified at least one file and `SPC a u` can revert.
+    /// Returns `true` when the agent has modified or created at least one file
+    /// this session and `SPC a u` can revert.
     pub fn has_checkpoint(&self) -> bool {
-        !self.session_snapshots.is_empty()
+        !self.session_snapshots.is_empty() || !self.session_created_files.is_empty()
     }
 
-    /// Restore all agent-touched files to their pre-session content.
+    /// Restore all agent-touched files to their pre-session content and delete
+    /// any files the agent created from scratch.
     ///
-    /// Each entry in `session_snapshots` maps a project-relative path to the
-    /// original file content captured before the agent first edited it.
-    /// Writes the originals back to disk and returns the project-relative paths
-    /// that were restored so the editor can reload open buffers.
-    /// Clears the snapshot map on completion.
-    pub fn revert_session(&mut self, project_root: &std::path::Path) -> Vec<String> {
+    /// Returns `(restored, deleted)` counts so the caller can build a status message.
+    /// Clears both `session_snapshots` and `session_created_files` on completion.
+    /// The caller should push `restored_paths` into `pending_reloads` so open
+    /// buffers are refreshed.
+    pub fn revert_session(
+        &mut self,
+        project_root: &std::path::Path,
+    ) -> (Vec<String>, Vec<String>) {
         let mut restored = Vec::new();
         for (rel_path, original) in &self.session_snapshots {
             let abs = project_root.join(rel_path);
@@ -1487,7 +1498,20 @@ Available tools:\n\
             }
         }
         self.session_snapshots.clear();
-        restored
+
+        let mut deleted = Vec::new();
+        for rel_path in &self.session_created_files {
+            let abs = project_root.join(rel_path);
+            match std::fs::remove_file(&abs) {
+                Ok(()) => deleted.push(rel_path.clone()),
+                Err(e) => {
+                    tracing::warn!("[checkpoint] failed to delete created file {rel_path}: {e}");
+                },
+            }
+        }
+        self.session_created_files.clear();
+
+        (restored, deleted)
     }
 
     /// Move the selection up or down in the ask_user dialog.

@@ -307,6 +307,41 @@ pub struct AgentConfig {
     /// Defined as `[[agent.hooks]]` in the config file.
     #[serde(default)]
     pub hooks: Vec<AgentHook>,
+    /// Test runner configuration for the `on_test_fail` hook trigger.
+    #[serde(default)]
+    pub test: TestConfig,
+}
+
+// ── Test runner config (ADR 0114 — on_test_fail trigger) ─────────────────────
+
+/// Configuration for the test runner used by `on_test_fail` hooks.
+///
+/// Example:
+/// ```toml
+/// [agent.test]
+/// command      = "cargo test"
+/// run_on_save  = true
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TestConfig {
+    /// The shell command to run tests.  When empty, the project root is
+    /// inspected to auto-detect the test framework:
+    /// - `Cargo.toml` present → `cargo test`
+    /// - `package.json` present → `npm test`
+    /// - `pyproject.toml` or `pytest.ini` present → `pytest`
+    #[serde(default)]
+    pub command: String,
+    /// Run tests automatically after every file save (when at least one
+    /// `on_test_fail` hook is configured).  Defaults to `false` so that
+    /// test runs are opt-in.
+    #[serde(default)]
+    pub run_on_save: bool,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self { command: String::new(), run_on_save: false }
+    }
 }
 
 /// Top-level editor configuration.

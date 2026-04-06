@@ -40,7 +40,7 @@
 | 5 | Multi-cursor editing | 🚫 | Intentionally excluded. See [ADR 0108](adr/0108-no-multi-cursor.md). | VS Code, Zed, Cursor, Helix | Counter to AI-first philosophy; use the agent for multi-site edits. Invasive refactor with no return value in this usage model. |
 | 6 | Inline assistant (selection transform) | ✅ | Select code → open mini-prompt → AI rewrites selection in-place. Different from agent panel — fast, contextual, no conversation history. | Zed, Cursor (Cmd+K), Windsurf | ADR 0111. `SPC a i`. Input → Generating → Preview phases. Accept=Enter, Cancel=Esc. Shipped. |
 | 7 | Multi-provider LLM backend | 🟡 | Copilot + Ollama (ADR 0098) exist. Missing: direct Anthropic API, OpenAI API, Google Gemini, OpenRouter. | Zed, Cursor, Continue | Abstract the agent backend behind a `Provider` trait. Each provider implements `stream_chat()`. Config selects provider + model. Copilot becomes one provider among many. |
-| 10 | Agent checkpoints / session undo | 🟡 | Diff overlay (Ctrl+A) exists per-block. Missing: snapshot entire project state before agent session, one-click revert of all changes. | Zed, Cursor, Windsurf | Before first tool call in a session, `git stash` or snapshot all modified buffers. Track which files the agent touched. Provide `SPC a u` to revert entire session. |
+| 10 | Agent checkpoints / session undo | ✅ | `SPC a u` reverts all agent-modified files and deletes agent-created files. `session_snapshots` + `session_created_files` track all changes. Status message shows counts. | Zed, Cursor, Windsurf | ADR 0112. `revert_session()` in panel.rs. `FileCreated` StreamEvent tracks new files for deletion on revert. |
 
 ### Complexity 3 — High effort
 
@@ -48,8 +48,8 @@
 |---|---------|--------|-------------|------------|-------|
 | 8 | DAP debugger integration | ❌ | Debug Adapter Protocol — set breakpoints, step through code, inspect variables, watch expressions. | Zed, VS Code, Neovim (nvim-dap), JetBrains | New subsystem: DAP client over stdio/TCP. UI: breakpoint gutter marks, variables panel, call stack panel, step controls in status bar. Zed shipped this in one quarter. |
 | 9 | Integrated terminal | 🚫 | Intentionally excluded. See [ADR 0109](adr/0109-no-integrated-terminal.md). | VS Code, Zed, Cursor, Neovim | Not applicable: forgiven runs inside a terminal — the shell is already present. PTY emulator would violate `unsafe_code = "forbid"`. Agent panel streams tool output inline. |
-| 12 | Agent hooks / background automation | ❌ | Trigger agents on events: file save, test failure, lint error. Auto-generate tests, docs, or fixes without explicit chat. | Kiro, Windsurf | Config-driven: `[[agent.hooks]]` with `trigger = "on_save"`, `prompt = "..."`, `glob = "*.rs"`. File watcher (already have `notify`) dispatches to agent. Needs rate limiting and user visibility. |
-| 13 | Multi-file review / change set view | 🟡 | Current: Ctrl+A diff overlay targets one file. Missing: unified view of all agent edits across multiple files with per-hunk accept/reject. | Zed, Cursor | New mode: `ReviewChanges`. Collects all files modified by the agent session. Renders a scrollable multi-buffer diff with `y`/`n` per hunk and `Y`/`N` for all. |
+| 12 | Agent hooks / background automation | ✅ | `on_save` and `on_test_fail` triggers. Config: `[[agent.hooks]]` + `[agent.test]`. Auto-detects test framework. Pass→fail transition fires hook with `{output}` placeholder. 30 s cooldown. Re-entry guard prevents loops. | Kiro, Windsurf | ADR 0114. `fire_hooks_for_save()` + `run_tests_if_configured()` + `fire_hooks_for_test_fail()` in editor/hooks.rs. |
+| 13 | Multi-file review / change set view | ✅ | `SPC a r` opens unified multi-file diff. `y`/`n` per file, `Y`/`N` all, `Tab`/`Shift+Tab` hunk navigation, `a`/`r` per-hunk accept/reject. New files included. | Zed, Cursor | ADR 0113. `ReviewChangesState` + `apply_hunk_verdicts()` in editor/mod.rs. Partial file writes preserve accepted hunks. |
 
 ### Complexity 4 — Very high effort
 
@@ -99,11 +99,11 @@ These are areas where Forgiven is **ahead** of or **differentiated** from the co
 ### Phase 3 — AI interaction model
 8. ✅ Inline assistant (selection → prompt → rewrite) — ADR 0111
 9. Multi-provider LLM backend (Anthropic, OpenAI, Gemini direct)
-10. Agent checkpoints with session-level undo
-11. Multi-file review / change set view
+10. ✅ Agent checkpoints with session-level undo — ADR 0112
+11. ✅ Multi-file review / change set view — ADR 0113
 
 ### Phase 4 — Advanced AI
-12. Agent hooks (event-driven automation)
+12. ✅ Agent hooks (on_save + on_test_fail) — ADR 0114
 13. Parallel sub-agents
 14. ACP host implementation
 
@@ -124,4 +124,4 @@ This file lives in the Forgiven repo root. When working with Claude Code:
 
 ---
 
-*Last updated: 2026-04-05 by Claude (Phase 3, item 8 complete — ADR 0111 inline assistant shipped)*
+*Last updated: 2026-04-06 by Claude (Phase 3 complete; Phase 4 item 12 complete — items 10/11/12 shipped)*

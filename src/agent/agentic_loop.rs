@@ -501,13 +501,20 @@ pub(super) async fn agentic_loop(
                 if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
                     if let Some(path_str) = args.get("path").and_then(|v| v.as_str()) {
                         if snapshotted.insert(path_str.to_string()) {
-                            // First edit of this file this session — send the original.
                             let abs = project_root.join(path_str);
-                            let original = std::fs::read_to_string(&abs).unwrap_or_default();
-                            let _ = tx.send(StreamEvent::FileSnapshot {
-                                path: path_str.to_string(),
-                                original,
-                            });
+                            if abs.exists() {
+                                // Existing file — snapshot its current content.
+                                let original = std::fs::read_to_string(&abs).unwrap_or_default();
+                                let _ = tx.send(StreamEvent::FileSnapshot {
+                                    path: path_str.to_string(),
+                                    original,
+                                });
+                            } else {
+                                // New file — record it so revert_session() can delete it.
+                                let _ = tx.send(StreamEvent::FileCreated {
+                                    path: path_str.to_string(),
+                                });
+                            }
                         }
                     }
                 }

@@ -151,11 +151,12 @@ pub enum DiffLine {
     Added(String),
     /// Line removed relative to the snapshot (shown red).
     Removed(String),
-    /// Visual separator between non-adjacent hunks (shown as "···").
-    HunkSep,
+    /// Start of hunk `n` (0-indexed).  Replaces the old `HunkSep` and carries
+    /// the hunk index so the renderer can look up per-hunk verdict.
+    HunkStart(usize),
 }
 
-/// Whether the user has accepted or rejected a file's agent changes.
+/// Whether the user has accepted or rejected a file's (or hunk's) changes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Pending,
@@ -167,10 +168,28 @@ pub enum Verdict {
 pub struct FileDiff {
     /// Project-relative path (key in `session_snapshots`).
     pub rel_path: String,
-    /// Unified-diff lines: context + added + removed + hunk separators.
+    /// Unified-diff lines with `HunkStart(idx)` separators.
     pub lines: Vec<DiffLine>,
-    /// User's accept/reject decision for this file.
-    pub verdict: Verdict,
+    /// Per-hunk accept/reject decision.  Length equals the number of hunks.
+    pub hunk_verdicts: Vec<Verdict>,
+    /// File content before any agent edits (from `session_snapshots`, or `""` for new files).
+    pub original: String,
+    /// File content after all agent edits (read from disk when the overlay was opened).
+    pub agent_version: String,
+}
+
+impl FileDiff {
+    /// Derive the file-level verdict from the hunk verdicts.
+    /// Accepted if all hunks accepted; Rejected if all rejected; Pending otherwise.
+    pub fn file_verdict(&self) -> Verdict {
+        if self.hunk_verdicts.is_empty() {
+            return Verdict::Accepted;
+        }
+        let all_acc = self.hunk_verdicts.iter().all(|v| *v == Verdict::Accepted);
+        let all_rej = self.hunk_verdicts.iter().all(|v| *v == Verdict::Rejected);
+        if all_acc { Verdict::Accepted } else if all_rej { Verdict::Rejected } else { Verdict::Pending }
+    }
+
 }
 
 /// All state for `Mode::ReviewChanges`.
@@ -179,56 +198,98 @@ pub struct ReviewChangesState {
     pub diffs: Vec<FileDiff>,
     /// Vertical scroll offset into the flat rendered line list.
     pub scroll: usize,
-    /// Index of the currently focused file (target for `y` / `n`).
+    /// Index of the currently focused file (target for file-level `y` / `n`).
     pub focused_file: usize,
     /// Precomputed first flat-rendered-line index for each file's header.
     /// `file_offsets[i]` is the scroll offset that brings file `i` to the top.
     pub file_offsets: Vec<usize>,
+    /// Focused hunk index within the focused file (`None` = no hunk focused).
+    pub focused_hunk: Option<usize>,
+    /// For each file, the flat line index of each `HunkStart` within that file's block.
+    /// `hunk_line_offsets[file_idx][hunk_idx]` is the absolute flat line index.
+    pub hunk_line_offsets: Vec<Vec<usize>>,
 }
 
 impl ReviewChangesState {
-    /// Build from the agent's session snapshots vs the current on-disk state.
+    /// Build from agent session state vs the current on-disk state.
+    /// `created_paths` lists files newly created by the agent (original = "").
     pub fn build(
         snapshots: &std::collections::HashMap<String, String>,
+        created_paths: &[String],
         project_root: &std::path::Path,
     ) -> Self {
         let mut diffs: Vec<FileDiff> = snapshots
             .iter()
             .map(|(rel_path, original)| {
                 let abs = project_root.join(rel_path);
-                let current = std::fs::read_to_string(&abs).unwrap_or_default();
-                let lines = review_diff_lines(original, &current);
-                FileDiff { rel_path: rel_path.clone(), lines, verdict: Verdict::Pending }
+                let agent_version = std::fs::read_to_string(&abs).unwrap_or_default();
+                let (lines, hunk_count) = review_diff_lines(original, &agent_version);
+                let hunk_verdicts = vec![Verdict::Pending; hunk_count];
+                FileDiff {
+                    rel_path: rel_path.clone(),
+                    lines,
+                    hunk_verdicts,
+                    original: original.clone(),
+                    agent_version,
+                }
             })
             .collect();
+
+        // Add newly created files (original = empty string)
+        for rel_path in created_paths {
+            let abs = project_root.join(rel_path);
+            let agent_version = std::fs::read_to_string(&abs).unwrap_or_default();
+            let (lines, hunk_count) = review_diff_lines("", &agent_version);
+            let hunk_verdicts = vec![Verdict::Pending; hunk_count];
+            diffs.push(FileDiff {
+                rel_path: rel_path.clone(),
+                lines,
+                hunk_verdicts,
+                original: String::new(),
+                agent_version,
+            });
+        }
+
         diffs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        let file_offsets = review_file_offsets(&diffs);
-        Self { diffs, scroll: 0, focused_file: 0, file_offsets }
+        let (file_offsets, hunk_line_offsets) = review_compute_offsets(&diffs);
+        Self { diffs, scroll: 0, focused_file: 0, file_offsets, focused_hunk: None, hunk_line_offsets }
     }
 }
 
-/// Compute the first flat-rendered-line index for each file.
-/// Each file occupies 1 header line + its diff lines + 1 blank spacer.
-fn review_file_offsets(diffs: &[FileDiff]) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(diffs.len());
+/// Compute flat-line offsets for files and hunks within each file.
+/// Returns `(file_offsets, hunk_line_offsets)`.
+fn review_compute_offsets(diffs: &[FileDiff]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let mut file_offsets = Vec::with_capacity(diffs.len());
+    let mut hunk_line_offsets: Vec<Vec<usize>> = Vec::with_capacity(diffs.len());
     let mut acc = 0usize;
     for d in diffs {
-        offsets.push(acc);
-        acc += 1 + d.lines.len() + 1; // header + diff lines + spacer
+        file_offsets.push(acc);
+        acc += 1; // file header line
+        let mut hunks_in_file = Vec::new();
+        for dl in &d.lines {
+            if let DiffLine::HunkStart(_) = dl {
+                hunks_in_file.push(acc);
+            }
+            acc += 1;
+        }
+        acc += 1; // blank spacer
+        hunk_line_offsets.push(hunks_in_file);
     }
-    offsets
+    (file_offsets, hunk_line_offsets)
 }
 
 /// Produce unified-diff lines (with 3-line context groups) via the `similar` crate.
-fn review_diff_lines(original: &str, current: &str) -> Vec<DiffLine> {
+/// Returns `(lines, hunk_count)`.
+fn review_diff_lines(original: &str, current: &str) -> (Vec<DiffLine>, usize) {
     use similar::{ChangeTag, TextDiff};
     if original == current {
-        return vec![];
+        return (vec![], 0);
     }
     let diff = TextDiff::from_lines(original, current);
     let mut out = Vec::new();
+    let mut hunk_idx = 0usize;
     for group in diff.grouped_ops(3) {
-        out.push(DiffLine::HunkSep);
+        out.push(DiffLine::HunkStart(hunk_idx));
         for op in &group {
             for change in diff.iter_changes(op) {
                 let line = change.value().trim_end_matches('\n').to_string();
@@ -239,7 +300,75 @@ fn review_diff_lines(original: &str, current: &str) -> Vec<DiffLine> {
                 }
             }
         }
+        hunk_idx += 1;
     }
+    (out, hunk_idx)
+}
+
+/// Reconstruct file content by selectively reverting rejected hunks.
+///
+/// For each hunk: if `Rejected`, use the original lines; otherwise use the
+/// agent's version.  Lines outside any hunk group (far context) are taken from
+/// the agent version unchanged.
+pub(crate) fn apply_hunk_verdicts(original: &str, agent_version: &str, verdicts: &[Verdict]) -> String {
+    use similar::TextDiff;
+
+    if verdicts.iter().all(|v| *v != Verdict::Rejected) {
+        return agent_version.to_string();
+    }
+    if verdicts.iter().all(|v| *v == Verdict::Rejected) {
+        return original.to_string();
+    }
+
+    let diff = TextDiff::from_lines(original, agent_version);
+    let groups = diff.grouped_ops(3);
+
+    let orig_lines: Vec<&str> = original.split_inclusive('\n').collect();
+    let curr_lines: Vec<&str> = agent_version.split_inclusive('\n').collect();
+
+    let mut out = String::new();
+    let mut orig_consumed = 0usize;
+
+    for (hunk_idx, group) in groups.iter().enumerate() {
+        let group_old_start = group[0].old_range().start;
+        // Emit "far context" lines between previous group and this one (identical in both versions)
+        for i in orig_consumed..group_old_start {
+            if let Some(l) = orig_lines.get(i) {
+                out.push_str(l);
+            }
+        }
+
+        let rejected = matches!(verdicts.get(hunk_idx), Some(Verdict::Rejected));
+        let group_old_end = group.last().unwrap().old_range().end;
+
+        if rejected {
+            // Revert: emit original lines for this hunk's old range
+            for i in group_old_start..group_old_end {
+                if let Some(l) = orig_lines.get(i) {
+                    out.push_str(l);
+                }
+            }
+        } else {
+            // Accept: emit current (agent) lines for this hunk's new range
+            let group_new_start = group[0].new_range().start;
+            let group_new_end = group.last().unwrap().new_range().end;
+            for i in group_new_start..group_new_end {
+                if let Some(l) = curr_lines.get(i) {
+                    out.push_str(l);
+                }
+            }
+        }
+
+        orig_consumed = group_old_end;
+    }
+
+    // Emit remaining original lines after all groups
+    for i in orig_consumed..orig_lines.len() {
+        if let Some(l) = orig_lines.get(i) {
+            out.push_str(l);
+        }
+    }
+
     out
 }
 
@@ -388,6 +517,13 @@ pub struct Editor {
     /// Per-hook cooldown tracking: `hook_index → last_fired`.
     /// Prevents the same hook from firing more than once per 5 seconds.
     hook_cooldowns: std::collections::HashMap<usize, std::time::Instant>,
+    /// Result of the most recent test run: `true` = passing, `false` = failing.
+    /// `None` until the first test run completes.  Used by `on_test_fail` hooks
+    /// to detect pass→fail transitions (repeated failures do not re-fire the hook).
+    last_test_passed: Option<bool>,
+    /// Set to `true` while an agent hook is running to prevent re-entrant test
+    /// runs that would loop (agent fixes → save → tests → agent fires again).
+    hooks_firing: bool,
 
     // ── Tree-sitter AST cache ─────────────────────────────────────────────────
     /// Wraps the Tree-sitter `Parser`; shared across all buffers (language is
@@ -564,6 +700,8 @@ impl Editor {
             inline_assist: None,
             review_changes: None,
             hook_cooldowns: std::collections::HashMap::new(),
+            last_test_passed: None,
+            hooks_firing: false,
             ts_engine: crate::treesitter::TsEngine::new(),
             ts_cache: std::collections::HashMap::new(),
             ts_versions: std::collections::HashMap::new(),
@@ -1199,6 +1337,10 @@ impl Editor {
                 self.agent_panel.poll_stream(self.config.agent.janitor_threshold_tokens);
             if let Some(err) = self.agent_panel.last_error.take() {
                 self.set_status(format!("Agent error: {err}"));
+            }
+            // Clear the hook re-entry guard once the agent goes idle.
+            if self.hooks_firing && self.agent_panel.status == crate::agent::AgentStatus::Idle {
+                self.hooks_firing = false;
             }
             if agent_active {
                 needs_render = true;
