@@ -20,6 +20,7 @@ use crate::lsp::LspManager;
 /// Used for short generation tasks (commit messages, release notes) that don't
 /// need the full agentic loop.  Acquires a Copilot token when needed; for Ollama
 /// uses the OpenAI-compatible endpoint with no auth.
+#[allow(clippy::too_many_arguments)]
 async fn one_shot_with_provider(
     provider: &ProviderKind,
     ollama_base_url: &str,

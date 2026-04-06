@@ -435,7 +435,7 @@ pub struct AgentConfig {
 /// command      = "cargo test"
 /// run_on_save  = true
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TestConfig {
     /// The shell command to run tests.  When empty, the project root is
     /// inspected to auto-detect the test framework:
@@ -451,11 +451,6 @@ pub struct TestConfig {
     pub run_on_save: bool,
 }
 
-impl Default for TestConfig {
-    fn default() -> Self {
-        Self { command: String::new(), run_on_save: false }
-    }
-}
 
 /// Top-level editor configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]

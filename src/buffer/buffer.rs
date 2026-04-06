@@ -8,7 +8,7 @@ pub fn visual_rows_for_len(char_len: usize, wrap_width: usize) -> usize {
     if wrap_width == 0 || char_len == 0 {
         1
     } else {
-        (char_len + wrap_width - 1) / wrap_width
+        char_len.div_ceil(wrap_width)
     }
 }
 

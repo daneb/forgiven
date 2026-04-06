@@ -1073,7 +1073,7 @@ impl Editor {
         let fold_ranges = self
             .ts_cache
             .get(&buf_idx)
-            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .map(crate::treesitter::query::fold_ranges)
             .unwrap_or_default();
 
         if fold_ranges.is_empty() {
@@ -1117,7 +1117,7 @@ impl Editor {
         let fold_ranges = self
             .ts_cache
             .get(&buf_idx)
-            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .map(crate::treesitter::query::fold_ranges)
             .unwrap_or_default();
 
         if fold_ranges.is_empty() {
@@ -1138,7 +1138,7 @@ impl Editor {
             let ranges = self
                 .ts_cache
                 .get(&buf_idx)
-                .map(|s| crate::treesitter::query::fold_ranges(s))
+                .map(crate::treesitter::query::fold_ranges)
                 .unwrap_or_default();
             let mut h = std::collections::HashSet::new();
             for (s, e) in &ranges {
@@ -1156,7 +1156,7 @@ impl Editor {
             let ranges = self
                 .ts_cache
                 .get(&buf_idx)
-                .map(|s| crate::treesitter::query::fold_ranges(s))
+                .map(crate::treesitter::query::fold_ranges)
                 .unwrap_or_default();
             if let Some(&(start, _)) = ranges
                 .iter()
@@ -1810,7 +1810,7 @@ impl Editor {
         let fold_ranges: Vec<(usize, usize)> = self
             .ts_cache
             .get(&buf_idx)
-            .map(|s| crate::treesitter::query::fold_ranges(s))
+            .map(crate::treesitter::query::fold_ranges)
             .unwrap_or_default();
 
         let fold_closed_set = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();

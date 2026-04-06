@@ -194,7 +194,7 @@ impl AgentPanel {
             ProviderKind::Gemini => "Gemini".to_string(),
             ProviderKind::OpenRouter => {
                 // "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5"
-                self.selected_model_id().split('/').last().unwrap_or("OpenRouter").to_string()
+                self.selected_model_id().split('/').next_back().unwrap_or("OpenRouter").to_string()
             },
         }
     }

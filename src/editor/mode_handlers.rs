@@ -504,7 +504,7 @@ impl Editor {
             // Accept focused hunk (or file if no hunk focused)
             KeyCode::Char('y') => {
                 let hunk_focused =
-                    self.review_changes.as_ref().map_or(false, |s| s.focused_hunk.is_some());
+                    self.review_changes.as_ref().is_some_and(|s| s.focused_hunk.is_some());
                 if hunk_focused {
                     return self.review_accept_focused_hunk();
                 }
@@ -535,7 +535,7 @@ impl Editor {
             // Reject focused hunk (or file if no hunk focused)
             KeyCode::Char('n') => {
                 let hunk_focused =
-                    self.review_changes.as_ref().map_or(false, |s| s.focused_hunk.is_some());
+                    self.review_changes.as_ref().is_some_and(|s| s.focused_hunk.is_some());
                 if hunk_focused {
                     return self.review_reject_focused_hunk();
                 }

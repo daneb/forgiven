@@ -278,9 +278,12 @@ pub(super) fn fetch_models_anthropic() -> Vec<ModelVersion> {
 /// The `/models` endpoint does not return this value, so we look it up.
 fn openai_context_window(id: &str) -> u32 {
     let n = id.to_lowercase();
-    if n.contains("gpt-4o") || n.contains("gpt-4.1") || n.contains("o3") || n.contains("o4") {
-        128_000
-    } else if n.contains("gpt-4-turbo") {
+    if n.contains("gpt-4o")
+        || n.contains("gpt-4.1")
+        || n.contains("o3")
+        || n.contains("o4")
+        || n.contains("gpt-4-turbo")
+    {
         128_000
     } else if n.contains("gpt-4-32k") {
         32_768

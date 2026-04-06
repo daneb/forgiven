@@ -490,7 +490,7 @@ impl UI {
     ///
     /// - Input phase:     shows a prompt bar at the bottom of the screen.
     /// - Generating phase: shows the same bar with a "generating…" indicator
-    ///                     and the accumulating response.
+    ///   and the accumulating response.
     /// - Preview phase:   shows the full response with accept/reject hints.
     pub(super) fn render_inline_assist_overlay(
         frame: &mut Frame,
