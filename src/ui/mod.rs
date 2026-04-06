@@ -231,6 +231,8 @@ pub struct RenderContext<'a> {
     pub inline_assist: Option<InlineAssistView<'a>>,
     /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
     pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
+    /// When `true`, long lines are visually wrapped at the viewport edge.
+    pub soft_wrap: bool,
 }
 
 /// UI rendering for the editor
@@ -273,6 +275,7 @@ impl UI {
         let lsp_rename_buffer = ctx.lsp_rename_buffer;
         let fold_data = ctx.fold_data;
         let sticky_header = ctx.sticky_header;
+        let soft_wrap = ctx.soft_wrap;
 
         let size = frame.area();
 
@@ -404,6 +407,7 @@ impl UI {
                 startup_elapsed,
                 None,
                 None,
+                soft_wrap,
             );
 
             // Draw vertical separator
@@ -425,6 +429,7 @@ impl UI {
                 startup_elapsed,
                 None,
                 None,
+                soft_wrap,
             );
         } else {
             Self::render_buffer(
@@ -440,6 +445,7 @@ impl UI {
                 startup_elapsed,
                 fold_data,
                 sticky_header,
+                soft_wrap,
             );
         }
 

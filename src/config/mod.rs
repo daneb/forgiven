@@ -374,6 +374,14 @@ pub struct Config {
     /// Warn the user when this many rounds remain before hitting the limit.
     #[serde(default = "default_agent_warning_threshold")]
     pub agent_warning_threshold: usize,
+    /// Visually wrap long lines at the viewport edge instead of scrolling horizontally.
+    /// The buffer is unchanged — no newlines are inserted.  Defaults to `false`.
+    /// Enable in `~/.config/forgiven/config.toml`:
+    /// ```toml
+    /// soft_wrap = true
+    /// ```
+    #[serde(default)]
+    pub soft_wrap: bool,
 }
 
 fn default_tab_width() -> usize {
@@ -407,6 +415,7 @@ impl Default for Config {
             default_copilot_model: default_copilot_model(),
             max_agent_rounds: default_max_agent_rounds(),
             agent_warning_threshold: default_agent_warning_threshold(),
+            soft_wrap: false,
         }
     }
 }

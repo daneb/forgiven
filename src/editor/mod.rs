@@ -1757,7 +1757,12 @@ impl Editor {
         };
         let viewport_width = editor_area_w.saturating_sub(GUTTER);
 
-        self.with_buffer(|buf| buf.scroll_to_cursor(viewport_height, viewport_width));
+        if self.config.soft_wrap {
+            // Text width = viewport_width (gutter already subtracted above).
+            self.with_buffer(|buf| buf.scroll_to_cursor_wrapped(viewport_height, viewport_width));
+        } else {
+            self.with_buffer(|buf| buf.scroll_to_cursor(viewport_height, viewport_width));
+        }
 
         // ── Fold data (ADR 0106) ──────────────────────────────────────────────
         // Populate the tree-sitter cache for the current buffer (no-op if already
@@ -2203,6 +2208,7 @@ impl Editor {
                 } else {
                     None
                 },
+                soft_wrap: self.config.soft_wrap,
             };
             UI::render(frame, &ctx);
         })?;

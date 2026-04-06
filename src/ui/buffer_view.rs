@@ -1,4 +1,5 @@
 use super::*;
+use crate::buffer::visual_rows_for_len;
 
 impl UI {
     /// Render the buffer content.
@@ -21,6 +22,7 @@ impl UI {
         startup_elapsed: Option<std::time::Duration>,
         fold_data: Option<&FoldData>,
         sticky_header: Option<&str>,
+        soft_wrap: bool,
     ) {
         // ── Markdown preview mode — render pre-computed lines directly ─────────
         if let Some(md_lines) = preview_lines {
@@ -70,6 +72,9 @@ impl UI {
             let mut visible_lines: Vec<Line<'static>> = Vec::with_capacity(viewport_height);
             let mut buf_row = start_line;
 
+            // text_width = columns available for text (gutter is 2 chars).
+            let text_width = viewport_width.saturating_sub(2);
+
             while buf_row < max_buf_line && visible_lines.len() < viewport_height {
                 // Skip rows hidden inside a closed fold.
                 if let Some(fd) = fold_data {
@@ -94,42 +99,108 @@ impl UI {
                     }
                 });
 
-                // Use pre-highlighted spans when available (line_idx = buf_row - scroll_row
-                // correctly indexes the unfiltered highlighted_lines slice).
-                let mut line = if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx))
-                {
-                    Self::render_highlighted_line(
-                        spans,
-                        *scroll_col,
-                        viewport_width,
-                        has_diagnostic,
-                        row_ghost,
-                        selection,
-                        buf_row,
-                    )
-                } else {
-                    Self::render_line(
-                        raw_line_text,
-                        *scroll_col,
-                        viewport_width,
-                        buf_row,
-                        selection,
-                        *scroll_row,
-                        has_diagnostic,
-                        row_ghost,
-                    )
-                };
+                if soft_wrap && text_width > 0 {
+                    // ── Soft-wrap path: emit one visual row per segment ───────
+                    let char_len = raw_line_text.chars().count();
+                    let num_segs = visual_rows_for_len(char_len, text_width);
 
-                // Append fold stub indicator for closed fold start rows.
-                if let Some(fd) = fold_data {
-                    if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
-                        let n = end_row.saturating_sub(buf_row);
-                        let stub = format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
-                        line.spans.push(Span::styled(stub, Style::default().fg(Color::DarkGray)));
+                    for seg in 0..num_segs {
+                        if visible_lines.len() >= viewport_height {
+                            break;
+                        }
+                        let seg_start_col = seg * text_width;
+                        // Diagnostic marker only on the first segment; continuation
+                        // lines get a plain blank gutter so the dot isn't repeated.
+                        let seg_diag = has_diagnostic && seg == 0;
+                        let seg_ghost = if seg == 0 { row_ghost } else { None };
+
+                        let mut line = if let Some(spans) =
+                            highlighted_lines.and_then(|h| h.get(line_idx))
+                        {
+                            Self::render_highlighted_line(
+                                spans,
+                                seg_start_col,
+                                viewport_width,
+                                seg_diag,
+                                seg_ghost,
+                                selection,
+                                buf_row,
+                            )
+                        } else {
+                            Self::render_line(
+                                raw_line_text,
+                                seg_start_col,
+                                viewport_width,
+                                buf_row,
+                                selection,
+                                *scroll_row,
+                                seg_diag,
+                                seg_ghost,
+                            )
+                        };
+
+                        // Fold stub only on the first segment.
+                        if seg == 0 {
+                            if let Some(fd) = fold_data {
+                                if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
+                                    let n = end_row.saturating_sub(buf_row);
+                                    let stub = format!(
+                                        " ··· {} line{}",
+                                        n,
+                                        if n == 1 { "" } else { "s" }
+                                    );
+                                    line.spans.push(Span::styled(
+                                        stub,
+                                        Style::default().fg(Color::DarkGray),
+                                    ));
+                                }
+                            }
+                        }
+
+                        visible_lines.push(line);
                     }
+                } else {
+                    // ── Normal (no-wrap) path ─────────────────────────────────
+                    // Use pre-highlighted spans when available (line_idx = buf_row - scroll_row
+                    // correctly indexes the unfiltered highlighted_lines slice).
+                    let mut line =
+                        if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
+                            Self::render_highlighted_line(
+                                spans,
+                                *scroll_col,
+                                viewport_width,
+                                has_diagnostic,
+                                row_ghost,
+                                selection,
+                                buf_row,
+                            )
+                        } else {
+                            Self::render_line(
+                                raw_line_text,
+                                *scroll_col,
+                                viewport_width,
+                                buf_row,
+                                selection,
+                                *scroll_row,
+                                has_diagnostic,
+                                row_ghost,
+                            )
+                        };
+
+                    // Append fold stub indicator for closed fold start rows.
+                    if let Some(fd) = fold_data {
+                        if let Some(&end_row) = fd.fold_starts.get(&buf_row) {
+                            let n = end_row.saturating_sub(buf_row);
+                            let stub =
+                                format!(" ··· {} line{}", n, if n == 1 { "" } else { "s" });
+                            line.spans
+                                .push(Span::styled(stub, Style::default().fg(Color::DarkGray)));
+                        }
+                    }
+
+                    visible_lines.push(line);
                 }
 
-                visible_lines.push(line);
                 buf_row += 1;
             }
 
@@ -146,16 +217,38 @@ impl UI {
             // prepended to every rendered line — the cursor must be offset by the same amount.
             const GUTTER_WIDTH: u16 = 2;
             if mode != Mode::PickBuffer && show_cursor {
-                // `cursor.row` has been pre-adjusted by the editor to be the visual row
-                // (= buffer row minus hidden rows above it within the viewport).
-                let cursor_row = cursor.row.saturating_sub(*scroll_row);
-                let cursor_col = cursor.col.saturating_sub(*scroll_col);
+                if soft_wrap && text_width > 0 {
+                    // ── Soft-wrap cursor position ─────────────────────────────
+                    // Count visual rows from scroll_row up to (but not including)
+                    // cursor.row, then add the intra-line wrap offset.
+                    let mut cursor_vrow: usize = 0;
+                    for r in *scroll_row..cursor.row {
+                        let len =
+                            lines.get(r - start_line).map(|l: &String| l.chars().count()).unwrap_or(0);
+                        cursor_vrow += visual_rows_for_len(len, text_width);
+                    }
+                    cursor_vrow += cursor.col / text_width;
+                    let cursor_vcol = cursor.col % text_width;
 
-                if cursor_row < viewport_height && cursor_col < viewport_width {
-                    frame.set_cursor_position((
-                        content_area.x + GUTTER_WIDTH + cursor_col as u16,
-                        content_area.y + cursor_row as u16,
-                    ));
+                    if cursor_vrow < viewport_height && cursor_vcol < text_width {
+                        frame.set_cursor_position((
+                            content_area.x + GUTTER_WIDTH + cursor_vcol as u16,
+                            content_area.y + cursor_vrow as u16,
+                        ));
+                    }
+                } else {
+                    // ── Normal cursor position ────────────────────────────────
+                    // `cursor.row` has been pre-adjusted by the editor to be the visual row
+                    // (= buffer row minus hidden rows above it within the viewport).
+                    let cursor_row = cursor.row.saturating_sub(*scroll_row);
+                    let cursor_col = cursor.col.saturating_sub(*scroll_col);
+
+                    if cursor_row < viewport_height && cursor_col < viewport_width {
+                        frame.set_cursor_position((
+                            content_area.x + GUTTER_WIDTH + cursor_col as u16,
+                            content_area.y + cursor_row as u16,
+                        ));
+                    }
                 }
             }
         } else {

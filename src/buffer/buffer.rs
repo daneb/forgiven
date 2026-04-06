@@ -2,6 +2,16 @@ use crate::buffer::cursor::Cursor;
 use crate::buffer::history::EditHistory;
 use std::path::PathBuf;
 
+/// Number of visual rows a line of `char_len` characters occupies when
+/// soft-wrapped at `wrap_width` columns.  Always at least 1.
+pub fn visual_rows_for_len(char_len: usize, wrap_width: usize) -> usize {
+    if wrap_width == 0 || char_len == 0 {
+        1
+    } else {
+        (char_len + wrap_width - 1) / wrap_width
+    }
+}
+
 /// Selection range for visual mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
@@ -1188,6 +1198,49 @@ impl Buffer {
             self.scroll_col = self.cursor.col;
         } else if self.cursor.col >= self.scroll_col + viewport_cols {
             self.scroll_col = self.cursor.col.saturating_sub(viewport_cols - 1);
+        }
+    }
+
+    /// Like `scroll_to_cursor` but for soft-wrap mode.
+    ///
+    /// `wrap_width` is the number of text columns per visual row (viewport width
+    /// minus the 2-char gutter).  `scroll_col` is forced to 0 — horizontal
+    /// scrolling is meaningless when lines wrap.
+    ///
+    /// Visual-row arithmetic: each logical line `l` occupies
+    /// `ceil(char_len(l) / wrap_width)` visual rows (minimum 1 for empty lines).
+    /// The cursor's visual row from `scroll_row` is the sum of visual rows for
+    /// all lines before it plus `cursor.col / wrap_width`.
+    pub fn scroll_to_cursor_wrapped(&mut self, viewport_rows: usize, wrap_width: usize) {
+        self.scroll_col = 0;
+
+        if viewport_rows == 0 || wrap_width == 0 {
+            return;
+        }
+
+        // Cursor above viewport: snap scroll_row up.
+        if self.cursor.row < self.scroll_row {
+            self.scroll_row = self.cursor.row;
+            return;
+        }
+
+        // Compute cursor's visual row relative to current scroll_row.
+        let mut cursor_vrow: usize = 0;
+        for r in self.scroll_row..self.cursor.row {
+            let len = self.lines.get(r).map(|l| l.chars().count()).unwrap_or(0);
+            cursor_vrow += visual_rows_for_len(len, wrap_width);
+        }
+        cursor_vrow += self.cursor.col / wrap_width;
+
+        if cursor_vrow < viewport_rows {
+            return; // already visible
+        }
+
+        // Cursor below viewport: advance scroll_row until cursor fits.
+        while cursor_vrow >= viewport_rows && self.scroll_row < self.cursor.row {
+            let len = self.lines.get(self.scroll_row).map(|l| l.chars().count()).unwrap_or(0);
+            cursor_vrow -= visual_rows_for_len(len, wrap_width);
+            self.scroll_row += 1;
         }
     }
 
