@@ -401,6 +401,16 @@ pub struct AgentPanel {
     /// exceeds the configured threshold.  The editor tick-loop reads this flag
     /// and triggers `Action::AgentJanitorCompress` automatically.
     pub pending_janitor: bool,
+    /// User input that was being typed when auto-janitor fired.  Saved by
+    /// `compress_history()` and restored by `poll_stream()` after the
+    /// summarisation round completes, so the user never loses typed text.
+    pub janitor_saved_input: String,
+    /// True when a `StreamEvent::Usage` has arrived for the current round.
+    /// Reset to `false` at submit time and in the Done handler.  If still
+    /// false at Done (e.g. Ollama, which doesn't emit usage events), the Done
+    /// handler falls back to a character-count token estimate so the janitor
+    /// threshold can still fire.
+    pub usage_received_this_round: bool,
     /// Cached project file-tree string (depth 2), rebuilt at most once every 30 s.
     /// Avoids a full filesystem walk on every `submit()` call.
     /// Cleared by `new_conversation()` to force a fresh tree on the next session.
@@ -445,6 +455,10 @@ pub enum AgentStatus {
     CallingTool { round: usize, name: String },
     /// API call failed; retrying with exponential backoff.
     Retrying { attempt: usize, max: usize },
+    /// Auto-Janitor summarisation round is in flight.
+    Compressing,
+    /// Auto-Janitor completed; shown until the next submit clears it.
+    JanitorDone,
 }
 
 impl AgentStatus {
@@ -460,6 +474,8 @@ impl AgentStatus {
                 Some(format!("{name} [{round}/{max_rounds}]"))
             },
             AgentStatus::Retrying { attempt, max } => Some(format!("retrying ({attempt}/{max})…")),
+            AgentStatus::Compressing => Some("auto-janitor: compressing…".to_string()),
+            AgentStatus::JanitorDone => Some("auto-janitor: context compressed ✓".to_string()),
         }
     }
 }

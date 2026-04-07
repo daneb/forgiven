@@ -36,7 +36,12 @@ impl UI {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let popup_width = 64.min(area.width);
+        // 2 borders + 14 (" Binary file '") + 29 ("'   [o] open   [Esc] dismiss ")
+        let overhead: u16 = 45;
+        let desired_width = (name.chars().count() as u16 + overhead).min(area.width);
+        let popup_width = desired_width.max(overhead);
+        let max_name = popup_width.saturating_sub(overhead) as usize;
+        let name = trunc(&name, max_name);
         let popup_height = 3u16;
         let x = (area.width.saturating_sub(popup_width)) / 2;
         let y = (area.height.saturating_sub(popup_height)) / 2;

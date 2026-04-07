@@ -128,6 +128,8 @@ impl AgentPanel {
             at_picker: None,
             janitor_compressing: false,
             pending_janitor: false,
+            janitor_saved_input: String::new(),
+            usage_received_this_round: false,
             cached_project_tree: None,
             session_snapshots: std::collections::HashMap::new(),
             session_created_files: Vec::new(),
@@ -494,9 +496,12 @@ impl AgentPanel {
              <conversation>\n{history_text}\n</conversation>"
         );
 
-        // Drop existing history — the janitor round goes out bare (no prior context).
-        self.messages.clear();
+        // Preserve original conversation in archive so the user can scroll back
+        // and see what was there before compression.
+        self.archived_messages.extend(std::mem::take(&mut self.messages));
         self.tasks.clear();
+        // Save any text the user was typing so it isn't destroyed.
+        self.janitor_saved_input = std::mem::take(&mut self.input);
         self.input = prompt;
         self.janitor_compressing = true;
     }
@@ -524,11 +529,57 @@ impl AgentPanel {
         let files = std::mem::take(&mut self.file_blocks);
         let images = std::mem::take(&mut self.image_blocks);
 
+        // Resolve context window early so the file-block cap below can use it.
+        let context_limit = self.context_window_size();
+
         // Assemble user text: file blocks first (structured context), then pasted
         // blocks (ad-hoc snippets), then typed input.  Each section separated by \n\n.
+        //
+        // Cap total injected file content so the prompt never exceeds the model
+        // window.  Each file is already truncated to AT_PICKER_MAX_LINES lines by the
+        // picker; this enforces an aggregate ceiling.  Budget = 50% of the context
+        // window, leaving room for the system prompt, history, and typed instruction.
+        let max_file_tokens: usize = (context_limit as usize) / 2;
+        let mut used_file_tokens: usize = 0;
         let mut parts: Vec<String> = Vec::new();
         for (name, content, _) in &files {
-            parts.push(format!("File: {name}\n\n```\n{content}\n```"));
+            let file_tokens = content.len() / 4;
+            if used_file_tokens >= max_file_tokens {
+                parts.push(format!(
+                    "File: {name}\n\n[omitted — aggregate file context limit \
+                     ({max_file_tokens} tokens) reached; use read_file to access this file]"
+                ));
+                continue;
+            }
+            let remaining_chars = (max_file_tokens - used_file_tokens) * 4;
+            if content.len() > remaining_chars {
+                let truncated: String = content
+                    .lines()
+                    .scan(0usize, |acc, line| {
+                        *acc += line.len() + 1;
+                        Some((*acc, line))
+                    })
+                    .take_while(|(acc, _)| *acc <= remaining_chars)
+                    .map(|(_, line)| line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                used_file_tokens += truncated.len() / 4;
+                parts.push(format!(
+                    "File: {name}\n\n```\n{truncated}\n```\n\
+                     [truncated — aggregate file context limit reached; \
+                     use read_file for the rest]"
+                ));
+            } else {
+                used_file_tokens += file_tokens;
+                parts.push(format!("File: {name}\n\n```\n{content}\n```"));
+            }
+        }
+        if used_file_tokens >= max_file_tokens {
+            warn!(
+                "[ctx] File block budget ({max_file_tokens}t) exhausted — \
+                 some attached files were omitted or truncated. \
+                 Select fewer files or use read_file in your instruction."
+            );
         }
         for (text, _) in &pasted {
             parts.push(text.clone());
@@ -846,7 +897,7 @@ Available tools:\n\
         // Estimate tokens using the chars/4 approximation (1 token ≈ 4 chars).
         // Budget is 80% of the model's context window minus an estimate for the
         // system prompt, so we never approach the hard API limit.
-        let context_limit = self.context_window_size();
+        // context_limit already resolved above (before file-block assembly).
         let system_tokens = (system.len() / 4) as u32;
         let budget = (context_limit * 4 / 5).saturating_sub(system_tokens);
 
@@ -997,10 +1048,15 @@ Available tools:\n\
         self.streaming_reply = Some(String::new());
         self.tasks.clear();
 
-        self.status = AgentStatus::WaitingForResponse { round: 1 };
+        self.status = if self.janitor_compressing {
+            AgentStatus::Compressing
+        } else {
+            AgentStatus::WaitingForResponse { round: 1 }
+        };
 
         let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(rx);
+        self.usage_received_this_round = false;
 
         let (cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
         self.continuation_tx = Some(cont_tx);
@@ -1133,7 +1189,11 @@ Available tools:\n\
                 match rx.try_recv() {
                     Ok(StreamEvent::Token(t)) => {
                         active = true;
-                        self.status = AgentStatus::Streaming { round: self.current_round };
+                        self.status = if self.janitor_compressing {
+                            AgentStatus::Compressing
+                        } else {
+                            AgentStatus::Streaming { round: self.current_round }
+                        };
                         if let Some(r) = self.streaming_reply.as_mut() {
                             r.push_str(&t);
                         }
@@ -1225,6 +1285,7 @@ Available tools:\n\
                         self.last_prompt_tokens = prompt_tokens;
                         self.last_completion_tokens = completion_tokens;
                         self.last_cached_tokens = cached_tokens;
+                        self.usage_received_this_round = true;
                         self.total_session_prompt_tokens =
                             self.total_session_prompt_tokens.saturating_add(prompt_tokens);
                         self.total_session_completion_tokens =
@@ -1295,9 +1356,10 @@ Available tools:\n\
                                 .filter(|m| matches!(m.role, Role::Assistant))
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
-                            // Move live messages to the archive so the user
-                            // can still scroll up to them; don't discard.
-                            self.archived_messages.extend(std::mem::take(&mut self.messages));
+                            // Original messages were already archived in compress_history().
+                            // Discard the janitor round (prompt + response) — it's a
+                            // technical artifact, not a real conversation turn.
+                            self.messages.clear();
                             self.total_session_prompt_tokens = 0;
                             self.total_session_completion_tokens = 0;
                             self.session_rounds = 0;
@@ -1320,15 +1382,31 @@ Available tools:\n\
                             self.code_block_idx = 0;
                             self.mermaid_block_idx = 0;
                             self.scroll = 0;
+                            // Restore any input the user was typing before janitor fired.
+                            self.input = std::mem::take(&mut self.janitor_saved_input);
                             self.stream_rx = None;
                             self.continuation_tx = None;
                             self.question_tx = None;
                             self.asking_user = None;
                             self.awaiting_continuation = false;
                             self.current_round = 0;
-                            self.status = AgentStatus::Idle;
+                            self.status = AgentStatus::JanitorDone;
                             break;
                         }
+                        // ── Token estimation fallback (Ollama + providers without usage events) ──
+                        // If no StreamEvent::Usage arrived this round, estimate from message
+                        // content so the janitor threshold can still fire.
+                        if !self.usage_received_this_round {
+                            let estimated: u32 = self
+                                .messages
+                                .iter()
+                                .map(|m| (m.content.len() / 4 + 4) as u32)
+                                .sum::<u32>()
+                                .max(1);
+                            self.total_session_prompt_tokens =
+                                self.total_session_prompt_tokens.saturating_add(estimated);
+                        }
+                        self.usage_received_this_round = false;
                         // ── Persist invocation metrics ───────────────────────
                         self.session_rounds = self.session_rounds.saturating_add(1);
                         if self.last_prompt_tokens > 0 {
