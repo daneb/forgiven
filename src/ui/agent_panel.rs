@@ -175,7 +175,7 @@ impl UI {
                     //   Ollama       → "╔ 🦙 qwen2.5-coder ▋"  (magenta, model name)
                     //   Auto-Janitor → "╔ 🗜️ Auto-Janitor ▋"   (yellow, distinct)
                     let (stream_label, stream_color) = if panel.janitor_compressing {
-                        (format!("╔ 🗜\u{fe0f} Auto-Janitor "), Color::Yellow)
+                        ("╔ 🗜\u{fe0f} Auto-Janitor ".to_string(), Color::Yellow)
                     } else {
                         let label =
                             format!("╔ {} {} ", panel.provider.ai_emoji(), panel.ai_label_name());

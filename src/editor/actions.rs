@@ -563,7 +563,9 @@ Skip anything already obvious from reading the code.";
                     // second AI call is starting (the janitor, not a duplicate).
                     self.agent_panel.messages.push(ChatMessage {
                         role: Role::System,
-                        content: "🗜\u{fe0f} Auto-Janitor: token budget reached — compressing history…".to_string(),
+                        content:
+                            "🗜\u{fe0f} Auto-Janitor: token budget reached — compressing history…"
+                                .to_string(),
                         images: vec![],
                     });
                     let project_root =
