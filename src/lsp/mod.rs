@@ -881,6 +881,12 @@ impl LspManager {
         &self.diagnostics
     }
 
+    /// Remove diagnostics for a file that has been closed, preventing unbounded
+    /// accumulation across long sessions with many file opens/closes.
+    pub fn clear_diagnostics_for_uri(&mut self, uri: &Uri) {
+        self.diagnostics.remove(uri);
+    }
+
     // -------------------------------------------------------------------------
     // Utility helpers
     // -------------------------------------------------------------------------

@@ -499,6 +499,13 @@ impl AgentPanel {
         // Preserve original conversation in archive so the user can scroll back
         // and see what was there before compression.
         self.archived_messages.extend(std::mem::take(&mut self.messages));
+        // Cap the archive so repeated janitor runs across a long session don't
+        // accumulate unbounded memory.  Drop the oldest messages first.
+        const MAX_ARCHIVED: usize = 400;
+        if self.archived_messages.len() > MAX_ARCHIVED {
+            let drop = self.archived_messages.len() - MAX_ARCHIVED;
+            self.archived_messages.drain(..drop);
+        }
         self.tasks.clear();
         // Save any text the user was typing so it isn't destroyed.
         self.janitor_saved_input = std::mem::take(&mut self.input);
@@ -1045,7 +1052,9 @@ Available tools:\n\
         });
 
         self.scroll = 0;
-        self.streaming_reply = Some(String::new());
+        // Pre-allocate enough capacity for a typical streaming response to avoid
+        // repeated heap reallocations as tokens accumulate via push_str.
+        self.streaming_reply = Some(String::with_capacity(4096));
         self.tasks.clear();
 
         self.status = if self.janitor_compressing {

@@ -897,11 +897,29 @@ impl Editor {
                                 .to_string(),
                         );
                     } else {
-                        let name = self.buffers[self.current_buffer_idx].name.clone();
-                        self.buffers.remove(self.current_buffer_idx);
+                        let closing_idx = self.current_buffer_idx;
+                        let closed_path = self.buffers[closing_idx].file_path.clone();
+                        let closed_uri = closed_path
+                            .as_ref()
+                            .and_then(|p| crate::lsp::LspManager::path_to_uri(p).ok());
+                        let name = self.buffers[closing_idx].name.clone();
+                        self.buffers.remove(closing_idx);
                         if !self.buffers.is_empty() {
                             self.current_buffer_idx =
                                 self.current_buffer_idx.min(self.buffers.len() - 1);
+                        }
+                        self.ts_cache.remove(&closing_idx);
+                        self.ts_versions.remove(&closing_idx);
+                        self.fold_closed.remove(&closing_idx);
+                        if self
+                            .sticky_scroll_cache
+                            .as_ref()
+                            .is_some_and(|c| c.buffer_idx == closing_idx)
+                        {
+                            self.sticky_scroll_cache = None;
+                        }
+                        if let Some(ref uri) = closed_uri {
+                            self.lsp_manager.clear_diagnostics_for_uri(uri);
                         }
                         self.set_status(format!("Closed buffer: {name}"));
                     }
@@ -910,11 +928,29 @@ impl Editor {
             // :bd! / :bdelete! — force-close buffer, discarding unsaved changes
             "bd!" | "bdelete!" => {
                 if !self.buffers.is_empty() {
-                    let name = self.buffers[self.current_buffer_idx].name.clone();
-                    self.buffers.remove(self.current_buffer_idx);
+                    let closing_idx = self.current_buffer_idx;
+                    let closed_path = self.buffers[closing_idx].file_path.clone();
+                    let closed_uri = closed_path
+                        .as_ref()
+                        .and_then(|p| crate::lsp::LspManager::path_to_uri(p).ok());
+                    let name = self.buffers[closing_idx].name.clone();
+                    self.buffers.remove(closing_idx);
                     if !self.buffers.is_empty() {
                         self.current_buffer_idx =
                             self.current_buffer_idx.min(self.buffers.len() - 1);
+                    }
+                    self.ts_cache.remove(&closing_idx);
+                    self.ts_versions.remove(&closing_idx);
+                    self.fold_closed.remove(&closing_idx);
+                    if self
+                        .sticky_scroll_cache
+                        .as_ref()
+                        .is_some_and(|c| c.buffer_idx == closing_idx)
+                    {
+                        self.sticky_scroll_cache = None;
+                    }
+                    if let Some(ref uri) = closed_uri {
+                        self.lsp_manager.clear_diagnostics_for_uri(uri);
                     }
                     self.set_status(format!("Closed buffer: {name} (discarded changes)"));
                 }

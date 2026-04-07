@@ -218,6 +218,104 @@ two large files doubles the per-frame allocation pressure.
 
 ---
 
+---
+
+## 11. Agent Panel Chat History Re-Rendered Every Frame
+
+**File:** `src/ui/agent_panel.rs`, `src/agent/panel.rs`
+
+When the agent panel is visible, every render frame walks the full `messages` +
+`archived_messages` vectors through the markdown pipeline.  After several janitor runs,
+`archived_messages` alone can hold hundreds of messages.  At 10–20 renders/second this
+is measurable CPU even when no new tokens are arriving.
+
+**Fix ideas:**
+- Cache rendered markdown `Line<'static>` vectors per message, keyed on
+  `(message_index, viewport_width)`.  Invalidate only the last (streaming) message on
+  new tokens; archived messages are immutable once compressed so their cache entries
+  never need invalidation.
+- A `Vec<Option<Vec<Line<'static>>>>` indexed by message position would suffice; resize
+  when new messages are appended.
+
+**Expected gain:** Near-zero re-render cost for archived messages; only the actively
+streaming message line is recomputed each frame.
+
+---
+
+## 12. Full Message History Cloned Before Each API Round
+
+**File:** `src/agent/agentic_loop.rs` lines 194–195
+
+```rust
+messages.clone(),
+tool_defs.clone(),
+```
+
+The entire `Vec<ChatMessage>` is deep-cloned before passing to `make_chat_request()` on
+every agentic round.  For a conversation with 50+ messages (post-janitor history plus
+tool results) this is a multi-kilobyte allocation per round.  Ten rounds in a single
+janitor pass = ten full clones.
+
+**Fix ideas:**
+- Wrap the message list in `Arc<Vec<ChatMessage>>`.  Clone the `Arc` (one atomic
+  increment) instead of the `Vec`.  Only replace the `Arc` when a new message is
+  appended.
+- Alternatively, pass `&[ChatMessage]` through the call stack and only allocate owned
+  copies where the API serialisation path requires them.
+
+**Expected gain:** Eliminates the largest per-round allocation in the agentic loop.
+
+---
+
+## 13. `session_snapshots` Not Evicted on `new_conversation()`
+
+**File:** `src/agent/mod.rs`, `src/agent/panel.rs`
+
+`session_snapshots: HashMap<String, String>` stores the original on-disk content of
+every file the agent wrote during the session (one entry per path, captured before the
+first write).  This is used for the session-undo feature.  The map is never cleared
+until the `AgentPanel` itself is dropped.
+
+**Fix:**
+- Drain `session_snapshots` (and `session_created_files`) inside `new_conversation()`.
+  The session-undo feature is scoped to the current conversation; there is no value in
+  retaining snapshots after the user starts a new one.
+
+**Expected gain:** Recovers potentially megabytes of original file content after each
+`new_conversation()` call during a long editing session.
+
+---
+
+## 14. Undo History Stores Full Line-Vector Snapshots
+
+**File:** `src/buffer/history.rs`
+
+Every undo checkpoint clones the entire `lines: Vec<String>` for a buffer:
+
+```rust
+self.past.push_back(BufferSnapshot { lines: lines.to_vec(), cursor_row, cursor_col });
+```
+
+With `MAX_SNAPSHOTS = 100` and a 1 MB source file, the undo ring can consume up to
+100 MB.  The ADR 0119 performance pass converted `past`/`future` from `Vec` to
+`VecDeque` (item 3 in this doc), but the snapshot granularity is unchanged.
+
+**Fix ideas:**
+- Replace full-buffer snapshots with **unified diffs** (e.g. using the `similar` crate).
+  A typical single-character edit produces a one-line diff regardless of file size.
+  Reconstruction (undo/redo) replays the diff in reverse.
+- Alternatively, use a rope data structure (e.g. `ropey`) for `Buffer::lines`, where
+  edits are O(log n) and structural sharing keeps memory proportional to the number of
+  edits rather than the file size × snapshot count.
+
+**Expected gain:** Undo ring memory drops from O(file_size × snapshots) to
+O(edit_size × snapshots) — a 100–1000× reduction for large files with small edits.
+
+**Complexity:** High — requires changing the `Buffer` and `EditHistory` APIs, and
+careful handling of multi-line insertions/deletions and cursor restoration.
+
+---
+
 ## Priority Order (Suggested)
 
 | # | Area | Effort | Impact | Status |
@@ -227,8 +325,12 @@ two large files doubles the per-frame allocation pressure.
 | 7 | Markdown preview cache | Low | Medium | ✓ Done |
 | 4 | Explorer `flat_visible` cache | Medium | Medium | ✓ Done |
 | 2 | Highlight cache `Arc<spans>` | Medium | High | ✓ Done |
+| 13 | `session_snapshots` evict on new_conversation | Low | Low-Med | — |
 | 9 | In-file search debounce | Medium | Medium | — |
 | 6 | `refilter_files` debounce + limit | Medium | Medium | — |
+| 11 | Agent panel chat history render cache | Medium | High | — |
+| 12 | Message history `Arc` clone | Medium | Medium | — |
 | 5 | `scan_files` async offload | Medium | High | — |
 | 1 | Buffer lines `Arc<Vec<String>>` | High | High | — |
 | 10 | Split pane snapshot (follows #1) | — | High | — |
+| 14 | Undo delta-based history | High | High | — |

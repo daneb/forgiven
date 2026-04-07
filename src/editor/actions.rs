@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use super::{ClipboardType, Editor};
+use crate::agent::{ChatMessage, Role};
 use crate::keymap::{Action, Mode};
 use crate::lsp::LspManager;
 use crate::search::SearchState;
@@ -228,6 +229,9 @@ impl Editor {
                         let closing_buf = &self.buffers[closing_idx];
                         let name = closing_buf.name.clone();
                         let closed_path = closing_buf.file_path.clone();
+                        let closed_uri = closed_path
+                            .as_ref()
+                            .and_then(|p| crate::lsp::LspManager::path_to_uri(p).ok());
                         self.buffers.remove(closing_idx);
                         if !self.buffers.is_empty() {
                             self.current_buffer_idx =
@@ -238,6 +242,20 @@ impl Editor {
                             (&mut self.file_watcher, &closed_path)
                         {
                             let _ = watcher.unwatch(p);
+                        }
+                        // Evict per-buffer caches keyed by the closing index.
+                        self.ts_cache.remove(&closing_idx);
+                        self.ts_versions.remove(&closing_idx);
+                        self.fold_closed.remove(&closing_idx);
+                        if self
+                            .sticky_scroll_cache
+                            .as_ref()
+                            .is_some_and(|c| c.buffer_idx == closing_idx)
+                        {
+                            self.sticky_scroll_cache = None;
+                        }
+                        if let Some(ref uri) = closed_uri {
+                            self.lsp_manager.clear_diagnostics_for_uri(uri);
                         }
                         self.set_status(format!("Closed buffer: {}", name));
                     }
@@ -261,6 +279,9 @@ impl Editor {
                     let force_closing_buf = &self.buffers[closing_idx];
                     let name = force_closing_buf.name.clone();
                     let closed_path = force_closing_buf.file_path.clone();
+                    let closed_uri = closed_path
+                        .as_ref()
+                        .and_then(|p| crate::lsp::LspManager::path_to_uri(p).ok());
                     self.buffers.remove(closing_idx);
                     if !self.buffers.is_empty() {
                         self.current_buffer_idx =
@@ -270,6 +291,20 @@ impl Editor {
                         (&mut self.file_watcher, &closed_path)
                     {
                         let _ = watcher.unwatch(p);
+                    }
+                    // Evict per-buffer caches keyed by the closing index.
+                    self.ts_cache.remove(&closing_idx);
+                    self.ts_versions.remove(&closing_idx);
+                    self.fold_closed.remove(&closing_idx);
+                    if self
+                        .sticky_scroll_cache
+                        .as_ref()
+                        .is_some_and(|c| c.buffer_idx == closing_idx)
+                    {
+                        self.sticky_scroll_cache = None;
+                    }
+                    if let Some(ref uri) = closed_uri {
+                        self.lsp_manager.clear_diagnostics_for_uri(uri);
                     }
                     self.set_status(format!("Closed buffer (discarded): {}", name));
                 }
@@ -524,6 +559,13 @@ Skip anything already obvious from reading the code.";
                     self.agent_panel.visible = true;
                     self.mode = Mode::Agent;
                     self.set_status("Janitor: compressing history…".to_string());
+                    // Show a visible marker in the chat so the user knows a
+                    // second AI call is starting (the janitor, not a duplicate).
+                    self.agent_panel.messages.push(ChatMessage {
+                        role: Role::System,
+                        content: "🗜\u{fe0f} Auto-Janitor: token budget reached — compressing history…".to_string(),
+                        images: vec![],
+                    });
                     let project_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let max_rounds = 1; // Summarisation needs only one round.

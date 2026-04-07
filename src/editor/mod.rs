@@ -62,6 +62,19 @@ struct HighlightCache {
     spans: Arc<Vec<Vec<ratatui::text::Span<'static>>>>,
 }
 
+/// Cached sticky-scroll context header.
+///
+/// Keyed on `(buffer_idx, scroll_row, lsp_version)` — the same staleness
+/// signal used by `HighlightCache`.  Walking the tree-sitter CST on every
+/// render frame is measurable (~0.5 ms/frame); this cache drops that to ~0
+/// for the common case where the viewport does not move between frames.
+struct StickyScrollCache {
+    buffer_idx: usize,
+    scroll_row: usize,
+    lsp_version: i32,
+    header: Option<String>,
+}
+
 /// Cached rendered markdown lines for Mode::MarkdownPreview.
 /// Keyed on `(buffer_idx, lsp_version, viewport_width)` — regenerated only when
 /// the active buffer changes, the content changes, or the terminal is resized.
@@ -500,6 +513,11 @@ pub struct Editor {
 
     // ── Agent / Copilot Chat panel ────────────────────────────────────────────
     agent_panel: AgentPanel,
+    /// Timestamp of the last frame triggered exclusively by agent streaming.
+    /// Used to cap agent-only renders to ≤10 Hz (100 ms between frames) so a
+    /// long-running janitor does not spin the render loop at the full 20 Hz
+    /// event-poll rate.
+    last_agent_render: Option<std::time::Instant>,
 
     // ── Clipboard (yank register) ─────────────────────────────────────────────
     /// Last yanked / deleted text + whether it is linewise or charwise.
@@ -565,6 +583,9 @@ pub struct Editor {
     preview_scroll: usize,
     /// Cached rendered markdown lines — avoids re-parsing on every render frame.
     markdown_cache: Option<MarkdownCache>,
+
+    /// Cached sticky-scroll header — avoids walking the tree-sitter CST every frame.
+    sticky_scroll_cache: Option<StickyScrollCache>,
 
     // ── Project-wide text search ──────────────────────────────────────────────
     /// State for the search overlay (Mode::Search).
@@ -748,6 +769,8 @@ impl Editor {
             ),
             preview_scroll: 0,
             markdown_cache: None,
+            sticky_scroll_cache: None,
+            last_agent_render: None,
             search_state: SearchState::new(),
             search_rx: None,
             last_search_instant: None,
@@ -1380,7 +1403,25 @@ impl Editor {
                 self.hooks_firing = false;
             }
             if agent_active {
-                needs_render = true;
+                // Rate-limit agent-only renders to ≤10 Hz (100 ms between frames).
+                // If another source (keyboard, watcher) already set `needs_render`
+                // we render immediately; the cap only kicks in when streaming is
+                // the sole reason to repaint.
+                const AGENT_RENDER_INTERVAL: std::time::Duration =
+                    std::time::Duration::from_millis(100);
+                if needs_render {
+                    // Another source is already dirty — update stamp and render now.
+                    self.last_agent_render = Some(std::time::Instant::now());
+                } else {
+                    let due = self
+                        .last_agent_render
+                        .map(|t| t.elapsed() >= AGENT_RENDER_INTERVAL)
+                        .unwrap_or(true);
+                    if due {
+                        self.last_agent_render = Some(std::time::Instant::now());
+                        needs_render = true;
+                    }
+                }
             }
 
             // ── Inline assist stream polling (ADR 0111) ───────────────────────
@@ -1841,10 +1882,25 @@ impl Editor {
 
         // ── Sticky scroll header (ADR 0107) ───────────────────────────────────
         let scroll_row_for_sticky = self.current_buffer().map(|b| b.scroll_row).unwrap_or(0);
-        let sticky_header_owned: Option<String> = self
-            .ts_cache
-            .get(&buf_idx)
-            .and_then(|s| crate::treesitter::query::sticky_scroll_header(s, scroll_row_for_sticky));
+        let lsp_ver_for_sticky = self.current_buffer().map(|b| b.lsp_version).unwrap_or(0);
+        let cache_hit = self.sticky_scroll_cache.as_ref().is_some_and(|c| {
+            c.buffer_idx == buf_idx
+                && c.scroll_row == scroll_row_for_sticky
+                && c.lsp_version == lsp_ver_for_sticky
+        });
+        if !cache_hit {
+            let header = self.ts_cache.get(&buf_idx).and_then(|s| {
+                crate::treesitter::query::sticky_scroll_header(s, scroll_row_for_sticky)
+            });
+            self.sticky_scroll_cache = Some(StickyScrollCache {
+                buffer_idx: buf_idx,
+                scroll_row: scroll_row_for_sticky,
+                lsp_version: lsp_ver_for_sticky,
+                header,
+            });
+        }
+        let sticky_header_owned: Option<String> =
+            self.sticky_scroll_cache.as_ref().and_then(|c| c.header.clone());
         let sticky_header_ref: Option<&str> = sticky_header_owned.as_deref();
 
         // ── Account for sticky header in viewport height ───────────────────────

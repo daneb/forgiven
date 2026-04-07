@@ -171,17 +171,23 @@ impl UI {
             if cache.streaming_len != cur_streaming_len || cache.streaming_width != content_width {
                 if let Some(ref partial) = panel.streaming_reply {
                     // Provider-aware streaming header:
-                    //   Copilot → "╔ 🤖 Copilot ▋"  (cyan)
-                    //   Ollama  → "╔ 🦙 qwen2.5-coder ▋"  (magenta, model name)
-                    let stream_label =
-                        format!("╔ {} {} ", panel.provider.ai_emoji(), panel.ai_label_name());
-                    let stream_color = match panel.provider {
-                        ProviderKind::Copilot => Color::Cyan,
-                        ProviderKind::Ollama => Color::Magenta,
-                        ProviderKind::Anthropic => Color::LightRed,
-                        ProviderKind::OpenAi => Color::LightGreen,
-                        ProviderKind::Gemini => Color::LightBlue,
-                        ProviderKind::OpenRouter => Color::LightCyan,
+                    //   Copilot      → "╔ 🤖 Copilot ▋"       (cyan)
+                    //   Ollama       → "╔ 🦙 qwen2.5-coder ▋"  (magenta, model name)
+                    //   Auto-Janitor → "╔ 🗜️ Auto-Janitor ▋"   (yellow, distinct)
+                    let (stream_label, stream_color) = if panel.janitor_compressing {
+                        (format!("╔ 🗜\u{fe0f} Auto-Janitor "), Color::Yellow)
+                    } else {
+                        let label =
+                            format!("╔ {} {} ", panel.provider.ai_emoji(), panel.ai_label_name());
+                        let color = match panel.provider {
+                            ProviderKind::Copilot => Color::Cyan,
+                            ProviderKind::Ollama => Color::Magenta,
+                            ProviderKind::Anthropic => Color::LightRed,
+                            ProviderKind::OpenAi => Color::LightGreen,
+                            ProviderKind::Gemini => Color::LightBlue,
+                            ProviderKind::OpenRouter => Color::LightCyan,
+                        };
+                        (label, color)
                     };
                     let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
                         Span::styled(
