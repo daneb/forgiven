@@ -1428,10 +1428,15 @@ impl Editor {
             if self.poll_inline_assist() {
                 needs_render = true;
             }
-            // ── Auto-Janitor trigger ───────────────────────────────────────────
-            if self.agent_panel.pending_janitor {
-                self.agent_panel.pending_janitor = false;
-                let _ = self.execute_action(Action::AgentJanitorCompress);
+            // ── Auto-Janitor: deferred resubmit after compression ─────────────
+            // pending_janitor is now consumed inside submit() when the user sends
+            // their next message, so no immediate tick-loop trigger is needed here.
+            // After the janitor round completes, if the user had already typed a
+            // message, pending_resubmit_after_janitor is set and we fire submit
+            // automatically so the user's message is sent without a second Enter.
+            if self.agent_panel.pending_resubmit_after_janitor {
+                self.agent_panel.pending_resubmit_after_janitor = false;
+                let _ = self.execute_action(Action::AgentSubmitPending);
             }
 
             // Reload any buffers the agent modified on disk this tick.

@@ -128,6 +128,7 @@ impl AgentPanel {
             at_picker: None,
             janitor_compressing: false,
             pending_janitor: false,
+            pending_resubmit_after_janitor: false,
             janitor_saved_input: String::new(),
             usage_received_this_round: false,
             cached_project_tree: None,
@@ -492,7 +493,10 @@ impl AgentPanel {
             "Summarise the technical decisions, key findings, and important context \
              from the conversation below into a concise bulleted list. \
              Discard chit-chat and completed throwaway tasks. \
-             Focus on what would be expensive to re-discover.\n\n\
+             Focus on what would be expensive to re-discover. \
+             IMPORTANT: also preserve verbatim any open questions you posed to the \
+             user, pending decisions, and the immediate next step — the user may be \
+             about to reply to these.\n\n\
              <conversation>\n{history_text}\n</conversation>"
         );
 
@@ -523,6 +527,20 @@ impl AgentPanel {
         preferred_model: &str,
         auto_compress: bool,
     ) -> Result<()> {
+        // ── Deferred Auto-Janitor: fire at submit-time, not at Done-time ──────
+        // If a compression was queued (threshold crossed in a prior round) and the
+        // user now has text to send, run the janitor first.  compress_history()
+        // moves the typed text to `janitor_saved_input` and replaces `self.input`
+        // with the summarisation prompt; the normal submit path below then sends
+        // that prompt.  When the janitor round completes, the Done handler restores
+        // the saved input and sets `pending_resubmit_after_janitor = true` so the
+        // tick-loop re-fires submit automatically with the user's original message.
+        if self.pending_janitor && !self.input.trim().is_empty() {
+            self.pending_janitor = false;
+            self.compress_history();
+            // Fall through — self.input is now the summarisation prompt.
+        }
+
         if self.input.trim().is_empty()
             && self.pasted_blocks.is_empty()
             && self.file_blocks.is_empty()
@@ -1378,11 +1396,19 @@ Available tools:\n\
                                 images: vec![],
                             });
                             if !summary.is_empty() {
+                                // Store as a User/Assistant exchange so the model treats
+                                // the summary as part of its own conversational memory
+                                // rather than as an external system instruction.  This
+                                // prevents "context amnesia" where the model ignores the
+                                // summary and acts as if starting fresh.
                                 self.messages.push(ChatMessage {
-                                    role: Role::System,
-                                    content: format!(
-                                        "**Session summary (Auto-Janitor):**\n\n{summary}"
-                                    ),
+                                    role: Role::User,
+                                    content: "Briefly recap what we accomplished.".to_string(),
+                                    images: vec![],
+                                });
+                                self.messages.push(ChatMessage {
+                                    role: Role::Assistant,
+                                    content: summary,
                                     images: vec![],
                                 });
                             }
@@ -1391,8 +1417,14 @@ Available tools:\n\
                             self.code_block_idx = 0;
                             self.mermaid_block_idx = 0;
                             self.scroll = 0;
-                            // Restore any input the user was typing before janitor fired.
+                            // Restore any input the user was typing / had submitted when the
+                            // deferred janitor fired.  If it's non-empty, signal the tick-loop
+                            // to auto-resubmit it so the user's message is sent without
+                            // requiring a second Enter press.
                             self.input = std::mem::take(&mut self.janitor_saved_input);
+                            if !self.input.trim().is_empty() {
+                                self.pending_resubmit_after_janitor = true;
+                            }
                             self.stream_rx = None;
                             self.continuation_tx = None;
                             self.question_tx = None;

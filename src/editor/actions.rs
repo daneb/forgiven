@@ -604,6 +604,40 @@ Skip anything already obvious from reading the code.";
                     }
                 }
             },
+            // ── Auto-resubmit after deferred janitor compression ─────────────
+            // Fired by the tick-loop when pending_resubmit_after_janitor is set.
+            // The user's original message is already in agent_panel.input (restored
+            // by the janitor Done handler); this just submits it normally.
+            Action::AgentSubmitPending => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let max_rounds = self.config.max_agent_rounds;
+                let warning_threshold = self.config.agent_warning_threshold;
+                let preferred_model = self.config.active_default_model().to_string();
+                let auto_compress = self.config.agent.auto_compress_tool_results;
+                let fut = self.agent_panel.submit(
+                    None,
+                    project_root,
+                    max_rounds,
+                    warning_threshold,
+                    &preferred_model,
+                    auto_compress,
+                );
+                let submit_err = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        match fut.await {
+                            Ok(()) => None,
+                            Err(e) => {
+                                tracing::warn!("Auto-resubmit after janitor error: {}", e);
+                                Some(e.to_string())
+                            },
+                        }
+                    })
+                });
+                if let Some(e) = submit_err {
+                    self.set_status(format!("Resubmit error: {e}"));
+                }
+            },
             // ── Multi-file review / change set view (ADR 0113) ───────────────
             Action::ReviewChangesOpen => {
                 if !self.agent_panel.has_checkpoint() {

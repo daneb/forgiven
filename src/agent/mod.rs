@@ -398,9 +398,15 @@ pub struct AgentPanel {
     /// arrives, after the summary has replaced the message history.
     pub janitor_compressing: bool,
     /// Set by `poll_stream()` when a round completes and `total_session_prompt_tokens`
-    /// exceeds the configured threshold.  The editor tick-loop reads this flag
-    /// and triggers `Action::AgentJanitorCompress` automatically.
+    /// exceeds the configured threshold.  Consumed at the start of the next
+    /// `submit()` call so compression fires together with the user's next message,
+    /// preserving the question→answer pair in the same compression context.
     pub pending_janitor: bool,
+    /// Set by the janitor Done handler when `janitor_saved_input` is non-empty,
+    /// indicating that the user had already typed a message that triggered the
+    /// deferred compression.  The editor tick-loop reads this flag and fires
+    /// `Action::AgentSubmitPending` to automatically re-send the saved message.
+    pub pending_resubmit_after_janitor: bool,
     /// User input that was being typed when auto-janitor fired.  Saved by
     /// `compress_history()` and restored by `poll_stream()` after the
     /// summarisation round completes, so the user never loses typed text.

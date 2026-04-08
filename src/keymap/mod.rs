@@ -163,6 +163,9 @@ pub enum Action {
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
     AgentJanitorCompress, // SPC a j — summarise + compress chat history
+    /// Internal: automatically re-sends the user message that was saved when a
+    /// deferred janitor fired at submit time.  Not bound to any key.
+    AgentSubmitPending,
     // Checkpoints / session undo (ADR 0112)
     AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
     // Multi-file review / change set view (ADR 0113)
