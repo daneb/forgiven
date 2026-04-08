@@ -408,7 +408,7 @@ pub struct AgentConfig {
     /// compression (Auto-Janitor).  When `total_session_prompt_tokens` exceeds
     /// this value after a completed round, the janitor fires automatically.
     /// Set to 0 to disable auto-trigger (manual `SPC a j` still works).
-    /// Default: 10 000 tokens.
+    /// Default: 0 (disabled).  Recommended opt-in value: 50 000.
     #[serde(default = "default_janitor_threshold")]
     pub janitor_threshold_tokens: u32,
     /// Model ID used for the cheap summarisation call made by the Auto-Janitor.
@@ -416,6 +416,13 @@ pub struct AgentConfig {
     /// Example: `"claude-haiku-4-5-20251001"`.
     #[serde(default)]
     pub janitor_model: String,
+    /// Character-length threshold for observation masking in the API payload.
+    /// Any non-recent assistant message longer than this is replaced with a
+    /// one-line stub before the request is sent, keeping token usage down while
+    /// leaving the display history intact.  Set to 0 to disable.
+    /// Default: 2 000 chars (≈ 500 tokens).
+    #[serde(default = "default_observation_mask_threshold")]
+    pub observation_mask_threshold_chars: usize,
     /// Event-driven hooks that fire the agent automatically.
     /// Defined as `[[agent.hooks]]` in the config file.
     #[serde(default)]
@@ -507,7 +514,10 @@ fn default_agent_warning_threshold() -> usize {
     3
 }
 fn default_janitor_threshold() -> u32 {
-    50_000
+    0
+}
+fn default_observation_mask_threshold() -> usize {
+    2000
 }
 
 impl Default for Config {

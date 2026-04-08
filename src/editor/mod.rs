@@ -28,7 +28,7 @@ use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
-use crate::keymap::{Action, KeyHandler, Mode};
+use crate::keymap::{KeyHandler, Mode};
 use crate::lsp::{parse_first_inline_completion, LspManager};
 use crate::mcp::McpManager;
 use crate::search::{SearchState, SearchStatus};
@@ -914,6 +914,17 @@ impl Editor {
             }
         }
 
+        // Dedup: if this file is already open in a buffer, switch to it instead.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(idx) = self.buffers.iter().position(|b| {
+            b.file_path
+                .as_ref()
+                .is_some_and(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == canonical)
+        }) {
+            self.current_buffer_idx = idx;
+            return Ok(());
+        }
+
         let buffer = if path.exists() {
             match Buffer::from_file(path.to_path_buf()) {
                 Ok(buf) => buf,
@@ -1428,17 +1439,6 @@ impl Editor {
             if self.poll_inline_assist() {
                 needs_render = true;
             }
-            // ── Auto-Janitor: deferred resubmit after compression ─────────────
-            // pending_janitor is now consumed inside submit() when the user sends
-            // their next message, so no immediate tick-loop trigger is needed here.
-            // After the janitor round completes, if the user had already typed a
-            // message, pending_resubmit_after_janitor is set and we fire submit
-            // automatically so the user's message is sent without a second Enter.
-            if self.agent_panel.pending_resubmit_after_janitor {
-                self.agent_panel.pending_resubmit_after_janitor = false;
-                let _ = self.execute_action(Action::AgentSubmitPending);
-            }
-
             // Reload any buffers the agent modified on disk this tick.
             let reloads: Vec<String> = std::mem::take(&mut self.agent_panel.pending_reloads);
             for rel_path in reloads {

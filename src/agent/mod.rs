@@ -242,6 +242,22 @@ pub fn metrics_data_path() -> Option<std::path::PathBuf> {
     Some(base.join("forgiven").join("sessions.jsonl"))
 }
 
+/// Resolve the path for the conversation history JSONL file.
+/// `~/.local/share/forgiven/history/<session_start_secs>.jsonl` (XDG_DATA_HOME-aware).
+/// Returns `None` when `session_start_secs` is 0 (not yet set).
+pub fn history_file_path(session_start_secs: u64) -> Option<std::path::PathBuf> {
+    if session_start_secs == 0 {
+        return None;
+    }
+    let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        std::path::PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").ok()?;
+        std::path::PathBuf::from(home).join(".local/share")
+    };
+    Some(base.join("forgiven").join("history").join(format!("{session_start_secs}.jsonl")))
+}
+
 /// Append one JSON line to the persistent session-metrics file.
 /// Creates the directory and file on first use. Silently swallows I/O errors
 /// so a permissions problem never interrupts the agentic loop.
@@ -351,6 +367,10 @@ pub struct AgentPanel {
     /// Number of completed agent invocations in this conversation session.
     /// Incremented on each StreamEvent::Done. Reset by new_conversation().
     pub session_rounds: u32,
+    /// Unix timestamp (seconds) when the current conversation's first submit occurred.
+    /// Set on first submit; reset to 0 by new_conversation().
+    /// Used as the filename for disk-persisted history JSONL files.
+    pub session_start_secs: u64,
     /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
     /// Cycle index for the Ctrl+M view-mermaid-diagram command.
@@ -398,25 +418,20 @@ pub struct AgentPanel {
     /// arrives, after the summary has replaced the message history.
     pub janitor_compressing: bool,
     /// Set by `poll_stream()` when a round completes and `total_session_prompt_tokens`
-    /// exceeds the configured threshold.  Consumed at the start of the next
-    /// `submit()` call so compression fires together with the user's next message,
-    /// preserving the question→answer pair in the same compression context.
+    /// exceeds the configured threshold.  Consumed when the user manually triggers
+    /// `SPC a j` or opts in via config. Set to 0 by default (auto-trigger disabled).
     pub pending_janitor: bool,
-    /// Set by the janitor Done handler when `janitor_saved_input` is non-empty,
-    /// indicating that the user had already typed a message that triggered the
-    /// deferred compression.  The editor tick-loop reads this flag and fires
-    /// `Action::AgentSubmitPending` to automatically re-send the saved message.
-    pub pending_resubmit_after_janitor: bool,
-    /// User input that was being typed when auto-janitor fired.  Saved by
-    /// `compress_history()` and restored by `poll_stream()` after the
-    /// summarisation round completes, so the user never loses typed text.
-    pub janitor_saved_input: String,
     /// True when a `StreamEvent::Usage` has arrived for the current round.
     /// Reset to `false` at submit time and in the Done handler.  If still
     /// false at Done (e.g. Ollama, which doesn't emit usage events), the Done
     /// handler falls back to a character-count token estimate so the janitor
     /// threshold can still fire.
     pub usage_received_this_round: bool,
+    /// Set to `true` after the 90 % context-window warning has been posted to
+    /// the chat for the current conversation.  Prevents the warning from
+    /// firing again every round once the threshold is crossed.
+    /// Reset by `new_conversation()` and `compress_history()`.
+    pub context_near_limit_warned: bool,
     /// Cached project file-tree string (depth 2), rebuilt at most once every 30 s.
     /// Avoids a full filesystem walk on every `submit()` call.
     /// Cleared by `new_conversation()` to force a fresh tree on the next session.

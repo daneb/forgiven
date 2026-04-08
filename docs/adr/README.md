@@ -123,6 +123,14 @@ that motivated it, what was decided, and the consequences.
 | [0113](0113-multi-file-review.md) | Multi-File Review / Change Set View | Accepted |
 | [0114](0114-agent-hooks.md) | Agent Hooks / Background Automation | Accepted |
 | [0115](0115-agent-brevity-constraints.md) | Agent Brevity Constraints | Accepted |
+| [0116](0116-multi-provider-llm-backend.md) | Multi-Provider LLM Backend (Anthropic, OpenAI, Gemini, OpenRouter) | Accepted |
+| [0117](0117-janitor-fixes.md) | Auto-Janitor Fixes: Archive Preservation, Input Save/Restore, Status Variants, Ollama Fallback | Accepted |
+| [0118](0118-aggregate-file-block-token-cap.md) | Aggregate File-Block Token Cap | Accepted |
+| [0119](0119-cpu-memory-performance-pass.md) | CPU & Memory Performance Pass (Janitor / Streaming) | Accepted |
+| [0120](0120-janitor-distinct-streaming-ux.md) | Auto-Janitor Distinct Streaming UX | Accepted |
+| [0121](0121-janitor-deferred-trigger-and-context-grounding.md) | Auto-Janitor: Deferred Trigger and Context Grounding | Accepted |
+| [0122](0122-no-duplicate-file-buffers.md) | No Duplicate File Buffers | Accepted |
+| [0123](0123-context-management-v2-observation-masking-and-disk-persistence.md) | Context Management v2: Observation Masking + Disk Persistence | Implemented |
 
 ## What is an ADR?
 

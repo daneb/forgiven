@@ -35,6 +35,7 @@ impl Editor {
             | Action::InsertNewlineAbove
             // Normal-mode destructive operations
             | Action::DeleteChar
+            | Action::ReplaceChar { .. }
             | Action::DeleteLine
             | Action::DeleteToLineEnd
             | Action::DeleteWord
@@ -526,6 +527,7 @@ Skip anything already obvious from reading the code.";
                 let warning_threshold = self.config.agent_warning_threshold;
                 let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
+                let mask_threshold = self.config.agent.observation_mask_threshold_chars;
                 let fut = self.agent_panel.submit(
                     None,
                     project_root,
@@ -533,6 +535,7 @@ Skip anything already obvious from reading the code.";
                     warning_threshold,
                     &preferred_model,
                     auto_compress,
+                    mask_threshold,
                 );
                 let submit_err = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
@@ -580,6 +583,7 @@ Skip anything already obvious from reading the code.";
                         janitor_model
                     };
                     let auto_compress = false; // Don't compress the summariser's own output.
+                    let mask_threshold = 0; // Don't mask during the summarisation call itself.
                     let fut = self.agent_panel.submit(
                         None,
                         project_root,
@@ -587,6 +591,7 @@ Skip anything already obvious from reading the code.";
                         warning_threshold,
                         &preferred_model,
                         auto_compress,
+                        mask_threshold,
                     );
                     let submit_err = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
@@ -602,40 +607,6 @@ Skip anything already obvious from reading the code.";
                     if let Some(e) = submit_err {
                         self.set_status(format!("Janitor error: {e}"));
                     }
-                }
-            },
-            // ── Auto-resubmit after deferred janitor compression ─────────────
-            // Fired by the tick-loop when pending_resubmit_after_janitor is set.
-            // The user's original message is already in agent_panel.input (restored
-            // by the janitor Done handler); this just submits it normally.
-            Action::AgentSubmitPending => {
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let max_rounds = self.config.max_agent_rounds;
-                let warning_threshold = self.config.agent_warning_threshold;
-                let preferred_model = self.config.active_default_model().to_string();
-                let auto_compress = self.config.agent.auto_compress_tool_results;
-                let fut = self.agent_panel.submit(
-                    None,
-                    project_root,
-                    max_rounds,
-                    warning_threshold,
-                    &preferred_model,
-                    auto_compress,
-                );
-                let submit_err = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        match fut.await {
-                            Ok(()) => None,
-                            Err(e) => {
-                                tracing::warn!("Auto-resubmit after janitor error: {}", e);
-                                Some(e.to_string())
-                            },
-                        }
-                    })
-                });
-                if let Some(e) = submit_err {
-                    self.set_status(format!("Resubmit error: {e}"));
                 }
             },
             // ── Multi-file review / change set view (ADR 0113) ───────────────
@@ -703,6 +674,10 @@ Skip anything already obvious from reading the code.";
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
                 self.with_buffer(|buf| buf.delete_char_at_cursor());
+                self.notify_lsp_change();
+            },
+            Action::ReplaceChar { ch } => {
+                self.with_buffer(|buf| buf.replace_char_at_cursor(ch));
                 self.notify_lsp_change();
             },
             // ── Linewise deletes/yanks (paste creates new rows) ───────────────

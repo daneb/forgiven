@@ -295,6 +295,22 @@ impl Buffer {
         self.delete_char_at();
     }
 
+    /// Replace the character at the cursor position without moving the cursor (Normal-mode `r`).
+    /// No-ops if the cursor is past the end of the line (nothing to replace).
+    pub fn replace_char_at_cursor(&mut self, ch: char) {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let line_len = self.lines[row].chars().count();
+        if col >= line_len {
+            return;
+        }
+        let line = &mut self.lines[row];
+        let byte_idx = char_to_byte_idx(line, col);
+        line.remove(byte_idx);
+        line.insert(byte_idx, ch);
+        self.mark_modified();
+    }
+
     /// Delete the entire current line and return it (Normal-mode `dd`).
     /// Cursor stays on the same row (or the last row if the last line was deleted).
     #[allow(dead_code)]

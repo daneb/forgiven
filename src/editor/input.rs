@@ -489,6 +489,7 @@ impl Editor {
                 let warning_threshold = self.config.agent_warning_threshold;
                 let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
+                let mask_threshold = self.config.agent.observation_mask_threshold_chars;
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
@@ -499,6 +500,7 @@ impl Editor {
                     warning_threshold,
                     &preferred_model,
                     auto_compress,
+                    mask_threshold,
                 );
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process
@@ -518,6 +520,11 @@ impl Editor {
                     self.set_status(format!("Agent error: {e}"));
                 }
                 self.agent_panel.update_slash_menu();
+            },
+            // Ctrl+Backspace — clear all pending input (text, pastes, images, files).
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agent_panel.clear_input();
+                self.set_status("Input cleared".to_string());
             },
             // Backspace — delete last input character.
             KeyCode::Backspace => {

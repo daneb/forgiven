@@ -121,6 +121,7 @@ impl AgentPanel {
             last_breakdown: None,
             last_submit_model: String::new(),
             session_rounds: 0,
+            session_start_secs: 0,
             question_tx: None,
             asking_user: None,
             slash_menu: None,
@@ -128,9 +129,8 @@ impl AgentPanel {
             at_picker: None,
             janitor_compressing: false,
             pending_janitor: false,
-            pending_resubmit_after_janitor: false,
-            janitor_saved_input: String::new(),
             usage_received_this_round: false,
+            context_near_limit_warned: false,
             cached_project_tree: None,
             session_snapshots: std::collections::HashMap::new(),
             session_created_files: Vec::new(),
@@ -318,6 +318,25 @@ impl AgentPanel {
         self.input.push('\n');
     }
 
+    /// Returns true when there is anything to submit: typed text, pasted blocks,
+    /// file attachments, or images.  Used in the submit() early-return guard and
+    /// in the janitor Done handler to decide whether an auto-resubmit is needed.
+    pub fn has_pending_content(&self) -> bool {
+        !self.input.trim().is_empty()
+            || !self.pasted_blocks.is_empty()
+            || !self.file_blocks.is_empty()
+            || !self.image_blocks.is_empty()
+    }
+
+    /// Discard all pending user input (typed text, pastes, file attachments, images).
+    /// Does NOT clear conversation history — use `new_conversation()` for that.
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.pasted_blocks.clear();
+        self.image_blocks.clear();
+        self.file_blocks.clear();
+    }
+
     /// Attempt to read an image from the system clipboard.
     /// Returns `Ok(Some(img))` if an image was captured, `Ok(None)` if no image
     /// was available, and `Err` only on encoding failure.
@@ -445,9 +464,12 @@ impl AgentPanel {
         self.total_session_prompt_tokens = 0;
         self.total_session_completion_tokens = 0;
         self.session_rounds = 0;
+        self.session_start_secs = 0;
         self.cached_project_tree = None;
         self.session_snapshots.clear();
         self.session_created_files.clear();
+        self.pending_janitor = false;
+        self.context_near_limit_warned = false;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -500,6 +522,30 @@ impl AgentPanel {
              <conversation>\n{history_text}\n</conversation>"
         );
 
+        // ── Disk persistence: write full history before archiving ────────────
+        // Appends to ~/.local/share/forgiven/history/<session_start_secs>.jsonl
+        // so the conversation is recoverable after compression.
+        if let Some(path) = super::history_file_path(self.session_start_secs) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                for msg in &self.messages {
+                    let line = serde_json::json!({
+                        "role": msg.role.as_str(),
+                        "content": msg.content,
+                        "ts": now_secs,
+                    });
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+
         // Preserve original conversation in archive so the user can scroll back
         // and see what was there before compression.
         self.archived_messages.extend(std::mem::take(&mut self.messages));
@@ -511,13 +557,14 @@ impl AgentPanel {
             self.archived_messages.drain(..drop);
         }
         self.tasks.clear();
-        // Save any text the user was typing so it isn't destroyed.
-        self.janitor_saved_input = std::mem::take(&mut self.input);
         self.input = prompt;
         self.janitor_compressing = true;
+        // Reset so the warning can fire again if the next session also approaches the limit.
+        self.context_near_limit_warned = false;
     }
 
     /// Submit input, launching the agentic tool-calling loop in the background.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit(
         &mut self,
         context: Option<String>,
@@ -526,27 +573,18 @@ impl AgentPanel {
         warning_threshold: usize,
         preferred_model: &str,
         auto_compress: bool,
+        observation_mask_threshold_chars: usize,
     ) -> Result<()> {
-        // ── Deferred Auto-Janitor: fire at submit-time, not at Done-time ──────
-        // If a compression was queued (threshold crossed in a prior round) and the
-        // user now has text to send, run the janitor first.  compress_history()
-        // moves the typed text to `janitor_saved_input` and replaces `self.input`
-        // with the summarisation prompt; the normal submit path below then sends
-        // that prompt.  When the janitor round completes, the Done handler restores
-        // the saved input and sets `pending_resubmit_after_janitor = true` so the
-        // tick-loop re-fires submit automatically with the user's original message.
-        if self.pending_janitor && !self.input.trim().is_empty() {
-            self.pending_janitor = false;
-            self.compress_history();
-            // Fall through — self.input is now the summarisation prompt.
+        if !self.has_pending_content() {
+            return Ok(());
         }
 
-        if self.input.trim().is_empty()
-            && self.pasted_blocks.is_empty()
-            && self.file_blocks.is_empty()
-            && self.image_blocks.is_empty()
-        {
-            return Ok(());
+        // Record the conversation start time on the first submit.
+        if self.session_start_secs == 0 {
+            self.session_start_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
         }
 
         let typed_text = std::mem::take(&mut self.input);
@@ -1002,6 +1040,9 @@ Available tools:\n\
         }
 
         // Emit messages in original order (older included + recent).
+        // Apply observation masking: non-recent assistant messages longer than
+        // the threshold are replaced with a stub to reduce re-send token cost.
+        // The display history (self.messages) is never modified.
         for (i, msg) in self.messages.iter().enumerate() {
             if matches!(msg.role, Role::System) {
                 continue;
@@ -1009,9 +1050,22 @@ Available tools:\n\
             if !included.contains(&i) && !recent_indices.contains(&i) {
                 continue;
             }
+            let content = if observation_mask_threshold_chars > 0
+                && !recent_indices.contains(&i)
+                && matches!(msg.role, Role::Assistant)
+                && msg.content.len() > observation_mask_threshold_chars
+            {
+                let tok_est = msg.content.len() / 4;
+                format!(
+                    "[assistant output: ~{tok_est} tokens — \
+                     truncated for re-send; call the relevant tool again if needed]"
+                )
+            } else {
+                msg.content.clone()
+            };
             send_messages.push(serde_json::json!({
                 "role": msg.role.as_str(),
-                "content": msg.content
+                "content": content
             }));
         }
         // When images are attached, use the OpenAI content-array format so the
@@ -1417,14 +1471,6 @@ Available tools:\n\
                             self.code_block_idx = 0;
                             self.mermaid_block_idx = 0;
                             self.scroll = 0;
-                            // Restore any input the user was typing / had submitted when the
-                            // deferred janitor fired.  If it's non-empty, signal the tick-loop
-                            // to auto-resubmit it so the user's message is sent without
-                            // requiring a second Enter press.
-                            self.input = std::mem::take(&mut self.janitor_saved_input);
-                            if !self.input.trim().is_empty() {
-                                self.pending_resubmit_after_janitor = true;
-                            }
                             self.stream_rx = None;
                             self.continuation_tx = None;
                             self.question_tx = None;
@@ -1482,6 +1528,28 @@ Available tools:\n\
                             && self.total_session_prompt_tokens >= janitor_threshold
                         {
                             self.pending_janitor = true;
+                        }
+                        // ── 90 % context-window warning ──────────────────────
+                        // Post a visible chat message the first time a round's prompt
+                        // reaches 90 % of the model's context window.  The fuel gauge
+                        // in the panel title already turns red at 80 %; this fires a
+                        // more actionable in-chat nudge at the higher threshold so the
+                        // user knows to run SPC a j before the session hits the limit.
+                        if self.last_prompt_tokens > 0 && !self.context_near_limit_warned {
+                            let window = self.context_window_size();
+                            let pct = self.last_prompt_tokens * 100 / window.max(1);
+                            if pct >= 90 {
+                                self.context_near_limit_warned = true;
+                                self.messages.push(ChatMessage {
+                                    role: Role::System,
+                                    content: format!(
+                                        "⚠\u{fe0f}  Context {pct}% full — \
+                                         press SPC a j to compress history \
+                                         before your next message."
+                                    ),
+                                    images: vec![],
+                                });
+                            }
                         }
                         self.code_block_idx = 0;
                         self.mermaid_block_idx = 0;

@@ -85,10 +85,13 @@ pub enum Action {
     Command,
     Visual,
     // Edit operations
-    DeleteChar,      // x — delete char at cursor
-    DeleteLine,      // dd — delete current line into clipboard
+    DeleteChar, // x — delete char at cursor
+    ReplaceChar {
+        ch: char,
+    }, // r{char} — replace char at cursor
+    DeleteLine, // dd — delete current line into clipboard
     DeleteToLineEnd, // D  — delete from cursor to EOL
-    DeleteWord,      // dw — delete from cursor to end of word
+    DeleteWord, // dw — delete from cursor to end of word
     DeleteToChar {
         ch: char,
         inclusive: bool,
@@ -109,17 +112,17 @@ pub enum Action {
         ch: char,
         inclusive: bool,
     }, // F{c}/T{c}
-    YankLine,        // yy — yank whole line
-    YankWord,        // yw — yank to end of word
-    YankToLineEnd,   // y$ — yank to end of line
-    YankSelection,   // y in Visual mode — yank selection
+    YankLine,   // yy — yank whole line
+    YankWord,   // yw — yank to end of word
+    YankToLineEnd, // y$ — yank to end of line
+    YankSelection, // y in Visual mode — yank selection
     DeleteSelection, // d/x in Visual mode — delete selection into clipboard
-    ChangeLine,      // cc — delete line + enter Insert
-    ChangeWord,      // cw — delete word + enter Insert
-    PasteAfter,      // p
-    PasteBefore,     // P
-    Undo,            // u
-    Redo,            // Ctrl+R
+    ChangeLine, // cc — delete line + enter Insert
+    ChangeWord, // cw — delete word + enter Insert
+    PasteAfter, // p
+    PasteBefore, // P
+    Undo,       // u
+    Redo,       // Ctrl+R
     // Leader key actions
     BufferList,
     BufferNext,
@@ -163,9 +166,6 @@ pub enum Action {
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
     AgentJanitorCompress, // SPC a j — summarise + compress chat history
-    /// Internal: automatically re-sends the user message that was saved when a
-    /// deferred janitor fired at submit time.  Not bound to any key.
-    AgentSubmitPending,
     // Checkpoints / session undo (ADR 0112)
     AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
     // Multi-file review / change set view (ADR 0113)
@@ -565,6 +565,11 @@ impl KeyHandler {
             return Action::Noop; // non-char key cancels
         }
 
+        // ── Ctrl+R — redo (must be checked before pending-key dispatch catches 'r') ──
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Action::Redo;
+        }
+
         // ── Resolve pending double-key prefixes (dd, gg, yy, ft, …) ──────────
         if let Some(pk) = self.pending_key.take() {
             if let KeyCode::Char(ch) = key.code {
@@ -615,6 +620,8 @@ impl KeyHandler {
                     ('z', 'a') => Action::FoldToggle,
                     ('z', 'M') => Action::FoldCloseAll,
                     ('z', 'R') => Action::FoldOpenAll,
+                    // r — replace single char under cursor
+                    ('r', _) => Action::ReplaceChar { ch },
                     _ => Action::Noop, // unknown combo — discard
                 };
             }
@@ -678,7 +685,7 @@ impl KeyHandler {
             KeyCode::Char('P') => Action::PasteBefore,
 
             // Double-key prefixes: store first key, resolve on next keypress
-            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)  f/t/F/T(char)  z(a/M/R)
+            // d(d/w/$)  g(g)  y(y/w/$)  c(c/w/$)  f/t/F/T(char)  z(a/M/R)  r(char)
             KeyCode::Char('d')
             | KeyCode::Char('g')
             | KeyCode::Char('y')
@@ -687,15 +694,13 @@ impl KeyHandler {
             | KeyCode::Char('t')
             | KeyCode::Char('F')
             | KeyCode::Char('T')
-            | KeyCode::Char('z') => {
+            | KeyCode::Char('z')
+            | KeyCode::Char('r') => {
                 if let KeyCode::Char(ch) = key.code {
                     self.pending_key = Some(ch);
                 }
                 Action::Noop
             },
-
-            // Ctrl+R — redo
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Redo,
 
             // Visual modes
             KeyCode::Char('v') => Action::Visual,
