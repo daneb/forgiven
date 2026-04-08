@@ -128,7 +128,6 @@ impl AgentPanel {
             file_blocks: Vec::new(),
             at_picker: None,
             janitor_compressing: false,
-            pending_janitor: false,
             usage_received_this_round: false,
             context_near_limit_warned: false,
             cached_project_tree: None,
@@ -468,7 +467,6 @@ impl AgentPanel {
         self.cached_project_tree = None;
         self.session_snapshots.clear();
         self.session_created_files.clear();
-        self.pending_janitor = false;
         self.context_near_limit_warned = false;
         self.messages.push(ChatMessage {
             role: Role::System,
@@ -1259,7 +1257,7 @@ Available tools:\n\
         Ok((rx, abort_tx))
     }
 
-    pub fn poll_stream(&mut self, janitor_threshold: u32) -> bool {
+    pub fn poll_stream(&mut self) -> bool {
         // Process at most this many tokens per frame to avoid stalling the render loop
         // when the LLM is streaming a large response at high speed.
         const MAX_TOKENS_PER_FRAME: usize = 64;
@@ -1519,15 +1517,6 @@ Available tools:\n\
                                 "session_completion_total": self.total_session_completion_tokens,
                                 "pct": pct,
                             }));
-                        }
-                        // ── Auto-Janitor threshold check ─────────────────────
-                        // Require at least 2 completed rounds before auto-triggering:
-                        // a single-round session has almost no history worth compressing.
-                        if janitor_threshold > 0
-                            && self.session_rounds >= 2
-                            && self.total_session_prompt_tokens >= janitor_threshold
-                        {
-                            self.pending_janitor = true;
                         }
                         // ── 90 % context-window warning ──────────────────────
                         // Post a visible chat message the first time a round's prompt

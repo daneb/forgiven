@@ -1404,8 +1404,7 @@ impl Editor {
             // ──────────────────────────────────────────────────────────────────
 
             // ── Agent panel stream polling ─────────────────────────────────────
-            let agent_active =
-                self.agent_panel.poll_stream(self.config.agent.janitor_threshold_tokens);
+            let agent_active = self.agent_panel.poll_stream();
             if let Some(err) = self.agent_panel.last_error.take() {
                 self.set_status(format!("Agent error: {err}"));
             }

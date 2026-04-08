@@ -417,10 +417,6 @@ pub struct AgentPanel {
     /// janitor summarisation round.  Cleared in `poll_stream()` when `Done`
     /// arrives, after the summary has replaced the message history.
     pub janitor_compressing: bool,
-    /// Set by `poll_stream()` when a round completes and `total_session_prompt_tokens`
-    /// exceeds the configured threshold.  Consumed when the user manually triggers
-    /// `SPC a j` or opts in via config. Set to 0 by default (auto-trigger disabled).
-    pub pending_janitor: bool,
     /// True when a `StreamEvent::Usage` has arrived for the current round.
     /// Reset to `false` at submit time and in the Done handler.  If still
     /// false at Done (e.g. Ollama, which doesn't emit usage events), the Done

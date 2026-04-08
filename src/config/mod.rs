@@ -404,13 +404,6 @@ pub struct AgentConfig {
     /// Recommended for heavy sessions where context pressure is the bottleneck.
     #[serde(default)]
     pub auto_compress_tool_results: bool,
-    /// Cumulative prompt-token threshold that triggers an automatic history
-    /// compression (Auto-Janitor).  When `total_session_prompt_tokens` exceeds
-    /// this value after a completed round, the janitor fires automatically.
-    /// Set to 0 to disable auto-trigger (manual `SPC a j` still works).
-    /// Default: 0 (disabled).  Recommended opt-in value: 50 000.
-    #[serde(default = "default_janitor_threshold")]
-    pub janitor_threshold_tokens: u32,
     /// Model ID used for the cheap summarisation call made by the Auto-Janitor.
     /// Falls back to the active default model when empty.
     /// Example: `"claude-haiku-4-5-20251001"`.
@@ -512,9 +505,6 @@ fn default_max_agent_rounds() -> usize {
 }
 fn default_agent_warning_threshold() -> usize {
     3
-}
-fn default_janitor_threshold() -> u32 {
-    0
 }
 fn default_observation_mask_threshold() -> usize {
     2000
