@@ -1,8 +1,8 @@
+use super::state::{InlineAssistPhase, InlineAssistState};
+use super::Editor;
+use crate::keymap::{Action, Mode};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
-use super::Editor;
-use super::state::{InlineAssistPhase, InlineAssistState};
-use crate::keymap::{Action, Mode};
 
 impl Editor {
     /// Poll the inline assist stream for new tokens.

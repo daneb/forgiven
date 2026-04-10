@@ -1065,5 +1065,4 @@ impl Editor {
 
         Ok(())
     }
-
 }
