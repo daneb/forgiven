@@ -944,3 +944,57 @@ pub fn unified_diff(path: &str, old: &str, new: &str, max_lines: usize) -> Strin
     }
     out.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{execute_tool, safe_path, ToolCall};
+
+    fn make_call(name: &str, args: &str) -> ToolCall {
+        ToolCall { id: "test".into(), name: name.into(), arguments: args.into() }
+    }
+
+    #[test]
+    fn safe_path_traversal_rejected() {
+        let root = std::env::temp_dir();
+        assert!(safe_path(&root, "../etc/passwd").is_err());
+        assert!(safe_path(&root, "foo/../../etc").is_err());
+    }
+
+    #[test]
+    fn safe_path_valid() {
+        let root = std::env::temp_dir();
+        let result = safe_path(&root, "src/main.rs");
+        assert!(result.is_ok());
+        assert!(result.unwrap().starts_with(&root));
+    }
+
+    #[test]
+    fn execute_tool_unknown() {
+        let root = std::env::temp_dir();
+        let call = make_call("bogus_tool", "{}");
+        let result = execute_tool(&call, &root);
+        assert!(result.contains("unknown tool") || result.contains("bogus"));
+    }
+
+    #[test]
+    fn execute_tool_read_missing() {
+        let root = std::env::temp_dir();
+        let args = r#"{"path":"__nonexistent_file_xyz__.txt"}"#;
+        let call = make_call("read_file", args);
+        let result = execute_tool(&call, &root);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn execute_tool_write_then_read() {
+        let root = std::env::temp_dir();
+        let filename = format!("forgiven_test_{}.txt", std::process::id());
+        let content = "hello from test";
+        let write_args = serde_json::json!({"path": &filename, "content": content}).to_string();
+        execute_tool(&make_call("write_file", &write_args), &root);
+        let read_args = serde_json::json!({"path": &filename}).to_string();
+        let result = execute_tool(&make_call("read_file", &read_args), &root);
+        assert!(result.contains(content));
+        let _ = std::fs::remove_file(root.join(&filename));
+    }
+}

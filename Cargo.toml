@@ -1,6 +1,6 @@
 [package]
 name = "forgiven"
-version = "0.9.0-alpha.30"
+version = "0.9.0-alpha.31"
 edition = "2021"
 authors = ["Dane Balia"]
 description = "An AI-first, terminal-based code editor with GitHub Copilot agent integration"

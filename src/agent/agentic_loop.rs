@@ -15,6 +15,64 @@ use super::tools;
 use super::StreamEvent;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SSE line classification (pure, no I/O — tested below)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum SseLine {
+    Done,
+    Token(String),
+    ToolDelta { index: usize, id: Option<String>, name: Option<String>, args_fragment: String },
+    Skip,
+}
+
+/// Classify a single SSE line into a strongly-typed variant.
+/// Lines that carry model-switch or usage events return `Skip` — the caller
+/// is responsible for handling those via the full parsed JSON value.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn parse_sse_line(line: &str) -> SseLine {
+    if line == "data: [DONE]" {
+        return SseLine::Done;
+    }
+    let Some(json_str) = line.strip_prefix("data: ") else {
+        return SseLine::Skip;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        return SseLine::Skip;
+    };
+    // Token content delta
+    if let Some(content) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+        if !content.is_empty() {
+            return SseLine::Token(content.to_string());
+        }
+    }
+    // Tool call delta — take first entry only (loop caller iterates the rest)
+    if let Some(tc_arr) = val.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array()) {
+        if let Some(tc_val) = tc_arr.first() {
+            let index = tc_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let id = tc_val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let name = tc_val
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let args_fragment = tc_val
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            return SseLine::ToolDelta { index, id, name, args_fragment };
+        }
+    }
+    SseLine::Skip
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LLMLingua transparent compression helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -862,5 +920,31 @@ pub(super) async fn start_chat_stream_with_tools(
         let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts, max: max_retries });
         tokio::time::sleep(delay).await;
         delay *= 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_sse_line, SseLine};
+
+    #[test]
+    fn sse_done() {
+        assert_eq!(parse_sse_line("data: [DONE]"), SseLine::Done);
+    }
+
+    #[test]
+    fn sse_token() {
+        let line = r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#;
+        assert_eq!(parse_sse_line(line), SseLine::Token("hi".to_string()));
+    }
+
+    #[test]
+    fn sse_keepalive() {
+        assert_eq!(parse_sse_line(": keepalive"), SseLine::Skip);
+    }
+
+    #[test]
+    fn sse_empty() {
+        assert_eq!(parse_sse_line(""), SseLine::Skip);
     }
 }

@@ -1213,3 +1213,44 @@ Skip anything already obvious from reading the code.";
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Editor;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn surround_pair_parens() {
+        assert_eq!(Editor::surround_pair('('), ('(', ')'));
+        assert_eq!(Editor::surround_pair(')'), ('(', ')'));
+    }
+
+    #[test]
+    fn surround_pair_braces() {
+        assert_eq!(Editor::surround_pair('{'), ('{', '}'));
+    }
+
+    #[test]
+    fn surround_pair_symmetric() {
+        assert_eq!(Editor::surround_pair('"'), ('"', '"'));
+        assert_eq!(Editor::surround_pair('\''), ('\'', '\''));
+    }
+
+    #[test]
+    fn find_surround_basic() {
+        let chars: Vec<char> = "(hello)".chars().collect();
+        assert_eq!(Editor::find_surround_on_line(&chars, 3, '(', ')'), Some((0, 6)));
+    }
+
+    #[test]
+    fn find_surround_none() {
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(Editor::find_surround_on_line(&chars, 2, '(', ')'), None);
+    }
+
+    #[test]
+    fn find_surround_cursor_at_open() {
+        let chars: Vec<char> = "(hi)".chars().collect();
+        assert_eq!(Editor::find_surround_on_line(&chars, 0, '(', ')'), Some((0, 3)));
+    }
+}

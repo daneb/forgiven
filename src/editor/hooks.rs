@@ -431,4 +431,34 @@ mod tests {
         assert!(glob_matches("src/?.rs", "src/a.rs"));
         assert!(!glob_matches("src/?.rs", "src/ab.rs"));
     }
+
+    #[test]
+    fn no_separator_deep_path() {
+        // Pattern without `/` uses gitignore semantics: matched against filename only.
+        assert!(glob_matches("*.rs", "a/b/c/foo.rs"));
+    }
+
+    #[test]
+    fn anchored_prefix() {
+        // Pattern with `/` matched against full path; `*` won't cross separators.
+        assert!(!glob_matches("src/*.rs", "src/a/b.rs"));
+        assert!(glob_matches("src/*.rs", "src/main.rs"));
+    }
+
+    #[test]
+    fn double_star_root() {
+        // `**` alone matches any path.
+        assert!(glob_matches("**", "anything/deep/foo.rs"));
+        assert!(glob_matches("**", "top.txt"));
+    }
+
+    #[test]
+    fn empty_pattern_empty_path() {
+        assert!(glob_matches("", ""));
+    }
+
+    #[test]
+    fn empty_pattern_non_empty_path() {
+        assert!(!glob_matches("", "foo"));
+    }
 }

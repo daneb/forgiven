@@ -1390,4 +1390,52 @@ mod tests {
         assert_eq!(buf.line_count(), 1);
         assert_eq!(buf.line(0), Some("A"));
     }
+
+    #[test]
+    fn test_move_cursor_right_at_eol() {
+        let mut buf = Buffer::new("test");
+        buf.insert_char('A');
+        let col_before = buf.cursor.col;
+        buf.move_cursor_right();
+        assert_eq!(buf.cursor.col, col_before); // stays put at EOL
+    }
+
+    #[test]
+    fn test_move_cursor_left_at_bol_wraps() {
+        let mut buf = Buffer::new("test");
+        buf.insert_char('A');
+        buf.insert_newline();
+        buf.insert_char('B');
+        buf.cursor.col = 0;
+        buf.move_cursor_left(); // col 0 row 1 → wraps to end of row 0
+        assert_eq!(buf.cursor.row, 0);
+        assert_eq!(buf.cursor.col, 1); // "A" has len 1
+    }
+
+    #[test]
+    fn test_delete_char_at_empty_line_merges() {
+        let mut buf = Buffer::new("test");
+        buf.insert_char('A');
+        buf.insert_newline(); // row 1, empty
+        buf.delete_char_before(); // merges empty line with prev
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.line(0), Some("A"));
+    }
+
+    #[test]
+    fn test_visual_rows_wrap() {
+        assert_eq!(visual_rows_for_len(160, 80), 2);
+        assert_eq!(visual_rows_for_len(80, 80), 1);
+        assert_eq!(visual_rows_for_len(0, 80), 1);
+    }
+
+    #[test]
+    fn test_undo_roundtrip() {
+        let mut buf = Buffer::new("test");
+        buf.insert_char('X');
+        buf.save_undo_snapshot();
+        buf.insert_char('Y');
+        buf.undo();
+        assert_eq!(buf.line(0), Some("X"));
+    }
 }
