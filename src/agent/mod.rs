@@ -14,14 +14,20 @@
 
 mod agentic_loop;
 mod auth;
+pub mod context;
 mod models;
 mod panel;
 pub mod provider;
+pub mod session;
+mod streaming;
 pub mod token_count;
+mod tool_dispatch;
 pub mod tools;
 pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
+pub use context::{message_importance, ContextBreakdown, SubmitCtx};
 pub use provider::ProviderKind;
+pub use session::{append_session_metric, history_file_path};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,30 +47,6 @@ pub struct ChatMessage {
     /// Image attachment placeholders: `(width, height)`.
     /// The base64 data is NOT stored in history to avoid unbounded memory growth.
     pub images: Vec<(u32, u32)>,
-}
-
-/// Score a message's importance for history retention (higher = keep longer).
-///
-/// Scores are additive weights used by the importance-scored truncation in
-/// `send_message()` to prefer dropping large low-value messages before small
-/// high-value ones when the context budget is tight.
-fn message_importance(msg: &ChatMessage) -> u32 {
-    let mut score: u32 = match msg.role {
-        Role::User => 3,      // user instructions define the task
-        Role::Assistant => 2, // model replies carry context
-        Role::System => 0,    // display-only dividers, never sent to API
-    };
-    let c = &msg.content;
-    // Messages containing errors or failures are highly valuable to retain.
-    if c.contains("error") || c.contains("Error") || c.contains("failed") || c.contains("panic") {
-        score += 3;
-    }
-    // Large messages that look like raw file reads (line-numbered output) or batch
-    // results are low-value once the model has already acted on them.
-    if c.len() > 2000 && (c.contains(" | ") || c.starts_with("=== ")) {
-        score = score.saturating_sub(2);
-    }
-    score
 }
 
 /// An image captured from the system clipboard via Ctrl+V.
@@ -189,92 +171,6 @@ pub struct SlashMenuState {
 /// Maximum number of lines included from a file attached via the Ctrl+P picker.
 /// Files exceeding this limit are truncated and a warning is appended.
 pub const AT_PICKER_MAX_LINES: usize = 500;
-
-/// Per-segment token breakdown captured at `submit()` time.
-/// Shown in the `SPC d` diagnostics overlay and the status-bar fuel gauge.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ContextBreakdown {
-    /// Tokens used by the system-prompt rules + preamble (without the open file).
-    pub sys_rules_t: u32,
-    /// Tokens used by the open-file snippet injected into the system prompt.
-    pub ctx_file_t: u32,
-    /// Tokens used by the chat history sent this round (after truncation).
-    pub history_t: u32,
-    /// Tokens used by the new user message.
-    pub user_msg_t: u32,
-    /// Model context window size in tokens.
-    pub ctx_window: u32,
-}
-
-impl ContextBreakdown {
-    pub fn total(&self) -> u32 {
-        self.sys_rules_t + self.ctx_file_t + self.history_t + self.user_msg_t
-    }
-
-    /// Percentage of the context window consumed (0–100).
-    pub fn used_pct(&self) -> u32 {
-        self.total() * 100 / self.ctx_window.max(1)
-    }
-}
-
-/// Context-budget snapshot captured at `submit()` time, correlated with the
-/// `StreamEvent::Usage` that arrives after the round completes.
-/// Used to write per-invocation metrics to `~/.local/share/forgiven/sessions.jsonl`.
-#[derive(Debug, Clone, Copy)]
-pub struct SubmitCtx {
-    /// Model context window in tokens (from the /models API, or 128k fallback).
-    pub ctx_window: u32,
-    /// Estimated system-prompt tokens (system.len() / 4).
-    pub sys_tokens: u32,
-    /// Tokens remaining for history after system-prompt deduction (80% of window − sys).
-    pub budget_for_history: u32,
-}
-
-/// Resolve the path for the persistent session-metrics JSONL file.
-/// `~/.local/share/forgiven/sessions.jsonl` (XDG_DATA_HOME-aware).
-pub fn metrics_data_path() -> Option<std::path::PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        std::path::PathBuf::from(xdg)
-    } else {
-        let home = std::env::var("HOME").ok()?;
-        std::path::PathBuf::from(home).join(".local/share")
-    };
-    Some(base.join("forgiven").join("sessions.jsonl"))
-}
-
-/// Resolve the path for the conversation history JSONL file.
-/// `~/.local/share/forgiven/history/<session_start_secs>.jsonl` (XDG_DATA_HOME-aware).
-/// Returns `None` when `session_start_secs` is 0 (not yet set).
-pub fn history_file_path(session_start_secs: u64) -> Option<std::path::PathBuf> {
-    if session_start_secs == 0 {
-        return None;
-    }
-    let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        std::path::PathBuf::from(xdg)
-    } else {
-        let home = std::env::var("HOME").ok()?;
-        std::path::PathBuf::from(home).join(".local/share")
-    };
-    Some(base.join("forgiven").join("history").join(format!("{session_start_secs}.jsonl")))
-}
-
-/// Append one JSON line to the persistent session-metrics file.
-/// Creates the directory and file on first use. Silently swallows I/O errors
-/// so a permissions problem never interrupts the agentic loop.
-pub fn append_session_metric(record: &serde_json::Value) {
-    let Some(path) = metrics_data_path() else { return };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut line = record.to_string();
-    line.push('\n');
-    use std::io::Write as _;
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-}
 
 /// Transient state for the Ctrl+P file-context picker overlay in the agent panel.
 /// `None` when the picker is closed; `Some` while it is open.

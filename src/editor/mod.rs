@@ -12,6 +12,8 @@ mod pickers;
 mod render;
 mod search;
 mod state;
+mod surround;
+mod text_objects;
 pub(crate) use state::{
     apply_hunk_verdicts, ClipboardType, CommitMsgState, HighlightCache, MarkdownCache,
     ReleaseNotesState, SplitState, StickyScrollCache,
