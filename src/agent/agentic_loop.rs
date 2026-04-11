@@ -38,7 +38,7 @@ pub(super) async fn agentic_loop(
     // unverified model), send an empty list so the model never attempts to
     // output tool calls — many local models emit calls as raw JSON text rather
     // than the structured OpenAI tool_calls delta, which would pollute the panel.
-    let tool_defs = if provider.supports_tool_calls {
+    let tool_defs = Arc::new(if provider.supports_tool_calls {
         let mut defs = tools::tool_definitions();
         if let Some(ref mcp) = mcp_manager {
             let mcp_tools = mcp.tool_definitions();
@@ -73,7 +73,7 @@ pub(super) async fn agentic_loop(
             provider.kind.display_name()
         );
         serde_json::Value::Array(vec![])
-    };
+    });
 
     // Use a manual counter so we can extend the limit when the user approves
     // continuation. A `for round in 0..max_rounds` loop cannot be extended
@@ -122,7 +122,7 @@ pub(super) async fn agentic_loop(
             res = start_chat_stream_with_tools(
                 &provider,
                 messages.clone(),
-                tool_defs.clone(),
+                Arc::clone(&tool_defs),
                 &model_id,
                 &tx,
             ) => res,
@@ -142,7 +142,7 @@ pub(super) async fn agentic_loop(
                             start_chat_stream_with_tools(
                                 &provider,
                                 messages.clone(),
-                                tool_defs.clone(),
+                                Arc::clone(&tool_defs),
                                 &model_id,
                                 &tx,
                             )
@@ -249,7 +249,7 @@ pub(super) async fn agentic_loop(
 pub(super) async fn start_chat_stream_with_tools(
     provider: &ProviderSettings,
     messages: Vec<serde_json::Value>,
-    tools: serde_json::Value,
+    tools: Arc<serde_json::Value>,
     model_id: &str,
     tx: &mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<reqwest::Response> {
@@ -271,7 +271,7 @@ pub(super) async fn start_chat_stream_with_tools(
     // Only attach tool definitions and tool_choice when the provider can use them.
     // Sending an empty tools array with tool_choice="auto" can confuse some models.
     if provider.supports_tool_calls {
-        body["tools"] = tools;
+        body["tools"] = (*tools).clone();
         body["tool_choice"] = serde_json::json!("auto");
     }
 
