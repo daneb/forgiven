@@ -121,7 +121,7 @@ pub(super) async fn agentic_loop(
             }
             res = start_chat_stream_with_tools(
                 &provider,
-                messages.clone(),
+                &messages,
                 Arc::clone(&tool_defs),
                 &model_id,
                 &tx,
@@ -141,7 +141,7 @@ pub(super) async fn agentic_loop(
                             provider.api_token = new_tok.token;
                             start_chat_stream_with_tools(
                                 &provider,
-                                messages.clone(),
+                                &messages,
                                 Arc::clone(&tool_defs),
                                 &model_id,
                                 &tx,
@@ -248,7 +248,7 @@ pub(super) async fn agentic_loop(
 
 pub(super) async fn start_chat_stream_with_tools(
     provider: &ProviderSettings,
-    messages: Vec<serde_json::Value>,
+    messages: &[serde_json::Value],
     tools: Arc<serde_json::Value>,
     model_id: &str,
     tx: &mpsc::UnboundedSender<StreamEvent>,
