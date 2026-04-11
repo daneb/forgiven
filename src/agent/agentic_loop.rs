@@ -23,7 +23,7 @@ pub(super) async fn agentic_loop(
     mut provider: ProviderSettings,
     mut messages: Vec<serde_json::Value>,
     project_root: PathBuf,
-    tx: mpsc::UnboundedSender<StreamEvent>,
+    tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     max_rounds: usize,
     warning_threshold: usize,
@@ -94,12 +94,12 @@ pub(super) async fn agentic_loop(
             let _ = tx.send(StreamEvent::Error(format!(
                 "Agent reached maximum rounds ({effective_max}) without completing. \
                  Consider increasing max_agent_rounds in config."
-            )));
+            ))).await;
             return;
         }
 
         // Report progress
-        let _ = tx.send(StreamEvent::RoundProgress { current: round + 1, max: effective_max });
+        let _ = tx.send(StreamEvent::RoundProgress { current: round + 1, max: effective_max }).await;
 
         // Warn once when approaching the limit
         let remaining = effective_max.saturating_sub(round + 1);
@@ -109,14 +109,14 @@ pub(super) async fn agentic_loop(
                 current: round + 1,
                 max: effective_max,
                 remaining,
-            });
+            }).await;
         }
 
         // ── Call the API (cancellable) ────────────────────────────────────────
         let api_result = tokio::select! {
             // User pressed Ctrl+C — abort immediately, no error shown.
             _ = &mut abort_rx => {
-                let _ = tx.send(StreamEvent::Done);
+                let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
             res = start_chat_stream_with_tools(
@@ -159,7 +159,7 @@ pub(super) async fn agentic_loop(
         let response = match api_result {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                let _ = tx.send(StreamEvent::Error(format!("{e}"))).await;
                 return;
             },
         };
@@ -180,7 +180,7 @@ pub(super) async fn agentic_loop(
             if !text_buf.is_empty() {
                 messages.push(serde_json::json!({ "role": "assistant", "content": text_buf }));
             }
-            let _ = tx.send(StreamEvent::Done);
+            let _ = tx.send(StreamEvent::Done).await;
             return;
         }
 
@@ -209,13 +209,13 @@ pub(super) async fn agentic_loop(
         // A single \n is only a soft break in CommonMark — the LLM text would
         // merge into the ⚙ paragraph and render as dim-gray.  Two newlines
         // create a proper paragraph boundary so the response renders normally.
-        let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
+        let _ = tx.send(StreamEvent::Token("\n\n".to_string())).await;
 
         round += 1;
 
         // Check if we've hit the limit and need user approval to continue
         if round >= effective_max {
-            let _ = tx.send(StreamEvent::AwaitingContinuation);
+            let _ = tx.send(StreamEvent::AwaitingContinuation).await;
 
             // Wait for user decision (with timeout to avoid hanging forever)
             let decision = tokio::time::timeout(
@@ -233,7 +233,7 @@ pub(super) async fn agentic_loop(
                 },
                 Ok(Some(false)) | Ok(None) | Err(_) => {
                     // User denied, channel closed, or 5-minute timeout.
-                    let _ = tx.send(StreamEvent::Done);
+                    let _ = tx.send(StreamEvent::Done).await;
                     return;
                 },
             }
@@ -251,7 +251,7 @@ pub(super) async fn start_chat_stream_with_tools(
     messages: &[serde_json::Value],
     tools: Arc<serde_json::Value>,
     model_id: &str,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<reqwest::Response> {
     info!(
         "Sending completion request model={model_id:?} provider={}",
@@ -367,7 +367,7 @@ pub(super) async fn start_chat_stream_with_tools(
                     let _ = tx.send(StreamEvent::Retrying {
                         attempt: retry_attempts + 1,
                         max: max_retries,
-                    });
+                    }).await;
                     tokio::time::sleep(delay).await;
                     retry_attempts += 1;
                     if retry_attempts >= max_retries {
@@ -404,7 +404,7 @@ pub(super) async fn start_chat_stream_with_tools(
             ));
         }
 
-        let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts, max: max_retries });
+        let _ = tx.send(StreamEvent::Retrying { attempt: retry_attempts, max: max_retries }).await;
         tokio::time::sleep(delay).await;
         delay *= 2;
     }

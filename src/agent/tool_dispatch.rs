@@ -38,7 +38,7 @@ pub(super) async fn dispatch_tools(
     messages: &mut Vec<serde_json::Value>,
     text_buf: String,
     project_root: &Path,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
     snapshotted: &mut HashSet<String>,
     mcp_manager: Option<Arc<McpManager>>,
     auto_compress: bool,
@@ -72,7 +72,7 @@ pub(super) async fn dispatch_tools(
         let _ = tx.send(StreamEvent::ToolStart {
             name: call.name.clone(),
             args_summary: call.args_summary(),
-        });
+        }).await;
 
         // ── Pre-snapshot: capture original content before first mutating edit ──
         if matches!(call.name.as_str(), "write_file" | "edit_file") {
@@ -86,11 +86,11 @@ pub(super) async fn dispatch_tools(
                             let _ = tx.send(StreamEvent::FileSnapshot {
                                 path: path_str.to_string(),
                                 original,
-                            });
+                            }).await;
                         } else {
                             // New file — record it so revert_session() can delete it.
                             let _ =
-                                tx.send(StreamEvent::FileCreated { path: path_str.to_string() });
+                                tx.send(StreamEvent::FileCreated { path: path_str.to_string() }).await;
                         }
                     }
                 }
@@ -117,12 +117,12 @@ pub(super) async fn dispatch_tools(
             let _ = tx.send(StreamEvent::AskingUser {
                 question: question.clone(),
                 options: options.clone(),
-            });
+            }).await;
 
             let answer = tokio::select! {
                 // Ctrl+C while the dialog is open — abort the whole loop.
                 _ = &mut *abort_rx => {
-                    let _ = tx.send(StreamEvent::Done);
+                    let _ = tx.send(StreamEvent::Done).await;
                     return DispatchOutcome::Abort;
                 }
                 res = tokio::time::timeout(
@@ -151,7 +151,7 @@ pub(super) async fn dispatch_tools(
         {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
                 if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                    let _ = tx.send(StreamEvent::FileModified { path: p.to_string() });
+                    let _ = tx.send(StreamEvent::FileModified { path: p.to_string() }).await;
                 }
             }
         }
@@ -167,7 +167,7 @@ pub(super) async fn dispatch_tools(
                     } else {
                         StreamEvent::TaskCompleted { title: title.to_string() }
                     };
-                    let _ = tx.send(event);
+                    let _ = tx.send(event).await;
                 }
             }
         }
@@ -224,7 +224,7 @@ pub(super) async fn dispatch_tools(
                 s.to_string()
             }
         };
-        let _ = tx.send(StreamEvent::ToolDone { name: call.name.clone(), result_summary });
+        let _ = tx.send(StreamEvent::ToolDone { name: call.name.clone(), result_summary }).await;
 
         messages.push(serde_json::json!({
             "role": "tool",

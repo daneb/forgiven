@@ -162,7 +162,7 @@ pub(super) enum StreamOutcome {
 /// Returns the accumulated text and partial tool calls on success.
 pub(super) async fn parse_sse_stream(
     response: reqwest::Response,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
     model_id: &str,
     chunk_timeout_secs: u64,
 ) -> StreamOutcome {
@@ -184,7 +184,7 @@ pub(super) async fn parse_sse_stream(
             Err(_) => {
                 warn!("Stream timeout after {chunk_timeout_secs}s with no data");
                 let _ =
-                    tx.send(StreamEvent::Error("Stream stalled — no data received".to_string()));
+                    tx.send(StreamEvent::Error("Stream stalled — no data received".to_string())).await;
                 break 'sse;
             },
         };
@@ -196,8 +196,7 @@ pub(super) async fn parse_sse_stream(
                 // rather than once per newline (O(n) copies → O(1) per line).
                 let mut cursor = 0usize;
                 let mut stream_done = false;
-                loop {
-                    let Some(rel) = sse_buf[cursor..].find('\n') else { break };
+                while let Some(rel) = sse_buf[cursor..].find('\n') {
                     let line = sse_buf[cursor..cursor + rel].trim();
                     cursor += rel + 1;
 
@@ -225,7 +224,7 @@ pub(super) async fn parse_sse_stream(
                                         let _ = tx.send(StreamEvent::ModelSwitched {
                                             from: model_id.to_string(),
                                             to: actual.to_string(),
-                                        });
+                                        }).await;
                                     }
                                 }
                             }
@@ -235,7 +234,7 @@ pub(super) async fn parse_sse_stream(
                             {
                                 if !content.is_empty() {
                                     text_buf.push_str(content);
-                                    let _ = tx.send(StreamEvent::Token(content.to_string()));
+                                    let _ = tx.send(StreamEvent::Token(content.to_string())).await;
                                 }
                             }
 
@@ -294,7 +293,7 @@ pub(super) async fn parse_sse_stream(
                                         prompt_tokens: p,
                                         completion_tokens: c,
                                         cached_tokens: cached,
-                                    });
+                                    }).await;
                                 }
                             }
                         }
@@ -310,8 +309,7 @@ pub(super) async fn parse_sse_stream(
                 warn!("Stream error, attempting to process buffered data: {e}");
                 // Try to salvage any complete lines from the buffer using cursor drain.
                 let mut cursor = 0usize;
-                loop {
-                    let Some(rel) = sse_buf[cursor..].find('\n') else { break };
+                while let Some(rel) = sse_buf[cursor..].find('\n') {
                     let line = sse_buf[cursor..cursor + rel].trim();
                     cursor += rel + 1;
                     if line == "data: [DONE]" {
@@ -331,7 +329,7 @@ pub(super) async fn parse_sse_stream(
                     }
                 }
                 sse_buf.drain(..cursor);
-                let _ = tx.send(StreamEvent::Error(format!("{e}")));
+                let _ = tx.send(StreamEvent::Error(format!("{e}"))).await;
                 return StreamOutcome::Error;
             },
         }
@@ -354,7 +352,7 @@ pub(super) async fn parse_sse_stream(
                     {
                         if !content.is_empty() {
                             text_buf.push_str(content);
-                            let _ = tx.send(StreamEvent::Token(content.to_string()));
+                            let _ = tx.send(StreamEvent::Token(content.to_string())).await;
                         }
                     }
                     // Process tool call deltas

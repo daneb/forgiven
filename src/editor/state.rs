@@ -114,7 +114,7 @@ pub struct InlineAssistState {
     pub response: String,
     pub phase: InlineAssistPhase,
     /// Populated when the LLM request is launched (Input → Generating).
-    pub stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::agent::StreamEvent>>,
+    pub stream_rx: Option<tokio::sync::mpsc::Receiver<crate::agent::StreamEvent>>,
     /// Kept alive to abort on cancel; dropped (fires abort) when `inline_assist` is set to None.
     #[allow(dead_code)]
     pub abort_tx: Option<tokio::sync::oneshot::Sender<()>>,

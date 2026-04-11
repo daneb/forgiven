@@ -1047,7 +1047,7 @@ Available tools:\n\
             AgentStatus::WaitingForResponse { round: 1 }
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let (tx, rx) = mpsc::channel::<StreamEvent>(128);
         self.stream_rx = Some(rx);
         self.usage_received_this_round = false;
 
@@ -1089,7 +1089,7 @@ Available tools:\n\
         prompt: String,
         project_root: PathBuf,
         language: Option<String>,
-    ) -> Result<(mpsc::UnboundedReceiver<StreamEvent>, oneshot::Sender<()>)> {
+    ) -> Result<(mpsc::Receiver<StreamEvent>, oneshot::Sender<()>)> {
         let api_token = self.ensure_token().await?;
         let model_id = self.selected_model_id().to_string();
 
@@ -1147,7 +1147,7 @@ Available tools:\n\
             serde_json::json!({ "role": "user", "content": user_content }),
         ];
 
-        let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let (tx, rx) = mpsc::channel::<StreamEvent>(128);
         let (abort_tx, abort_rx) = oneshot::channel::<()>();
         // Dummy continuation + question channels — inline assist never uses them.
         let (_cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();

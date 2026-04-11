@@ -224,7 +224,7 @@ pub struct AgentPanel {
     pub scroll: usize,
     token: Option<CopilotApiToken>,
     pub streaming_reply: Option<String>,
-    pub stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    pub stream_rx: Option<mpsc::Receiver<StreamEvent>>,
     /// Channel to send continuation decisions back to the agentic loop.
     /// When the loop hits max rounds, it sends AwaitingContinuation and waits on this channel.
     pub continuation_tx: Option<mpsc::UnboundedSender<bool>>,
