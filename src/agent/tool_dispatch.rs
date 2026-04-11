@@ -69,10 +69,12 @@ pub(super) async fn dispatch_tools(
             arguments: partial.arguments.clone(),
         };
 
-        let _ = tx.send(StreamEvent::ToolStart {
-            name: call.name.clone(),
-            args_summary: call.args_summary(),
-        }).await;
+        let _ = tx
+            .send(StreamEvent::ToolStart {
+                name: call.name.clone(),
+                args_summary: call.args_summary(),
+            })
+            .await;
 
         // ── Pre-snapshot: capture original content before first mutating edit ──
         if matches!(call.name.as_str(), "write_file" | "edit_file") {
@@ -82,15 +84,19 @@ pub(super) async fn dispatch_tools(
                         let abs = project_root.join(path_str);
                         if abs.exists() {
                             // Existing file — snapshot its current content.
-                            let original = tokio::fs::read_to_string(&abs).await.unwrap_or_default();
-                            let _ = tx.send(StreamEvent::FileSnapshot {
-                                path: path_str.to_string(),
-                                original,
-                            }).await;
+                            let original =
+                                tokio::fs::read_to_string(&abs).await.unwrap_or_default();
+                            let _ = tx
+                                .send(StreamEvent::FileSnapshot {
+                                    path: path_str.to_string(),
+                                    original,
+                                })
+                                .await;
                         } else {
                             // New file — record it so revert_session() can delete it.
-                            let _ =
-                                tx.send(StreamEvent::FileCreated { path: path_str.to_string() }).await;
+                            let _ = tx
+                                .send(StreamEvent::FileCreated { path: path_str.to_string() })
+                                .await;
                         }
                     }
                 }
@@ -114,10 +120,12 @@ pub(super) async fn dispatch_tools(
                 .filter(|v: &Vec<String>| !v.is_empty())
                 .unwrap_or_else(|| vec!["Yes".to_string(), "No".to_string()]);
 
-            let _ = tx.send(StreamEvent::AskingUser {
-                question: question.clone(),
-                options: options.clone(),
-            }).await;
+            let _ = tx
+                .send(StreamEvent::AskingUser {
+                    question: question.clone(),
+                    options: options.clone(),
+                })
+                .await;
 
             let answer = tokio::select! {
                 // Ctrl+C while the dialog is open — abort the whole loop.

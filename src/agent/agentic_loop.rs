@@ -91,25 +91,30 @@ pub(super) async fn agentic_loop(
     loop {
         if round >= effective_max {
             // Only reached if we exhausted all rounds without the model stopping.
-            let _ = tx.send(StreamEvent::Error(format!(
-                "Agent reached maximum rounds ({effective_max}) without completing. \
+            let _ = tx
+                .send(StreamEvent::Error(format!(
+                    "Agent reached maximum rounds ({effective_max}) without completing. \
                  Consider increasing max_agent_rounds in config."
-            ))).await;
+                )))
+                .await;
             return;
         }
 
         // Report progress
-        let _ = tx.send(StreamEvent::RoundProgress { current: round + 1, max: effective_max }).await;
+        let _ =
+            tx.send(StreamEvent::RoundProgress { current: round + 1, max: effective_max }).await;
 
         // Warn once when approaching the limit
         let remaining = effective_max.saturating_sub(round + 1);
         if !warned && remaining <= warning_threshold && remaining > 0 {
             warned = true;
-            let _ = tx.send(StreamEvent::MaxRoundsWarning {
-                current: round + 1,
-                max: effective_max,
-                remaining,
-            }).await;
+            let _ = tx
+                .send(StreamEvent::MaxRoundsWarning {
+                    current: round + 1,
+                    max: effective_max,
+                    remaining,
+                })
+                .await;
         }
 
         // ── Call the API (cancellable) ────────────────────────────────────────
@@ -364,10 +369,12 @@ pub(super) async fn start_chat_stream_with_tools(
                         delay = tokio::time::Duration::from_secs(secs);
                     }
                     warn!("Rate limited (429), retrying after {}s: {body_text}", delay.as_secs());
-                    let _ = tx.send(StreamEvent::Retrying {
-                        attempt: retry_attempts + 1,
-                        max: max_retries,
-                    }).await;
+                    let _ = tx
+                        .send(StreamEvent::Retrying {
+                            attempt: retry_attempts + 1,
+                            max: max_retries,
+                        })
+                        .await;
                     tokio::time::sleep(delay).await;
                     retry_attempts += 1;
                     if retry_attempts >= max_retries {

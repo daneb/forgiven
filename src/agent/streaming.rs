@@ -183,8 +183,9 @@ pub(super) async fn parse_sse_stream(
             Ok(None) => break 'sse, // Stream ended normally
             Err(_) => {
                 warn!("Stream timeout after {chunk_timeout_secs}s with no data");
-                let _ =
-                    tx.send(StreamEvent::Error("Stream stalled — no data received".to_string())).await;
+                let _ = tx
+                    .send(StreamEvent::Error("Stream stalled — no data received".to_string()))
+                    .await;
                 break 'sse;
             },
         };
@@ -221,10 +222,12 @@ pub(super) async fn parse_sse_stream(
                                             .get(model_id.len()..)
                                             .is_some_and(|s| s.starts_with('-'));
                                     if actual != model_id && !is_alias {
-                                        let _ = tx.send(StreamEvent::ModelSwitched {
-                                            from: model_id.to_string(),
-                                            to: actual.to_string(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(StreamEvent::ModelSwitched {
+                                                from: model_id.to_string(),
+                                                to: actual.to_string(),
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -289,11 +292,13 @@ pub(super) async fn parse_sse_stream(
                                     .unwrap_or(0)
                                     as u32;
                                 if p > 0 || c > 0 {
-                                    let _ = tx.send(StreamEvent::Usage {
-                                        prompt_tokens: p,
-                                        completion_tokens: c,
-                                        cached_tokens: cached,
-                                    }).await;
+                                    let _ = tx
+                                        .send(StreamEvent::Usage {
+                                            prompt_tokens: p,
+                                            completion_tokens: c,
+                                            cached_tokens: cached,
+                                        })
+                                        .await;
                                 }
                             }
                         }
