@@ -128,4 +128,18 @@ mod tests {
         let chars: Vec<char> = "(hi)".chars().collect();
         assert_eq!(find_surround_on_line(&chars, 0, '(', ')'), Some((0, 3)));
     }
+
+    #[test]
+    fn find_surround_cursor_at_close() {
+        // cursor sitting on the ')' itself (col=3) — should still find the pair
+        let chars: Vec<char> = "(hi)".chars().collect();
+        assert_eq!(find_surround_on_line(&chars, 3, '(', ')'), Some((0, 3)));
+    }
+
+    #[test]
+    fn find_surround_multichar_line() {
+        // "((foo))" with cursor at col=3 (inner 'o') — finds innermost pair (1,5)
+        let chars: Vec<char> = "((foo))".chars().collect();
+        assert_eq!(find_surround_on_line(&chars, 3, '(', ')'), Some((1, 5)));
+    }
 }

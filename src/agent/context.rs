@@ -161,3 +161,52 @@ impl AgentPanel {
         self.context_near_limit_warned = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{ChatMessage, Role};
+
+    fn msg(role: Role, content: &str) -> ChatMessage {
+        ChatMessage { role, content: content.to_string(), images: vec![] }
+    }
+
+    #[test]
+    fn test_message_importance_user_error() {
+        // user (3) + error keyword (+3) = 6
+        let m = msg(Role::User, "command failed with error: exit code 1");
+        assert_eq!(message_importance(&m), 6);
+    }
+
+    #[test]
+    fn test_message_importance_plain_assistant() {
+        // assistant with no special content = 2
+        let m = msg(Role::Assistant, "Here is the result.");
+        assert_eq!(message_importance(&m), 2);
+    }
+
+    #[test]
+    fn test_context_breakdown_total() {
+        let b = ContextBreakdown {
+            sys_rules_t: 100,
+            ctx_file_t: 200,
+            history_t: 300,
+            user_msg_t: 400,
+            ctx_window: 10_000,
+        };
+        assert_eq!(b.total(), 1000);
+    }
+
+    #[test]
+    fn test_context_breakdown_used_pct() {
+        let b = ContextBreakdown {
+            sys_rules_t: 1000,
+            ctx_file_t: 0,
+            history_t: 0,
+            user_msg_t: 0,
+            ctx_window: 10_000,
+        };
+        // 1000 / 10000 * 100 = 10%
+        assert_eq!(b.used_pct(), 10);
+    }
+}

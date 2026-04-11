@@ -423,4 +423,32 @@ mod tests {
     fn sse_empty() {
         assert_eq!(parse_sse_line(""), SseLine::Skip);
     }
+
+    #[test]
+    fn sse_tool_call_delta() {
+        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#;
+        assert_eq!(
+            parse_sse_line(line),
+            SseLine::ToolDelta {
+                index: 0,
+                id: Some("tc_1".to_string()),
+                name: Some("read_file".to_string()),
+                args_fragment: "{\"path\"".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sse_model_switched() {
+        // model-switch JSON returns Skip — handled by full stream parser, not parse_sse_line
+        let line = r#"data: {"model":"gpt-4o-mini","choices":[]}"#;
+        assert_eq!(parse_sse_line(line), SseLine::Skip);
+    }
+
+    #[test]
+    fn sse_usage_event() {
+        // usage JSON returns Skip — handled by full stream parser, not parse_sse_line
+        let line = r#"data: {"usage":{"prompt_tokens":100,"completion_tokens":50},"choices":[]}"#;
+        assert_eq!(parse_sse_line(line), SseLine::Skip);
+    }
 }

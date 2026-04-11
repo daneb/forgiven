@@ -101,3 +101,55 @@ impl AgentPanel {
         (restored, deleted)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{history_file_path, metrics_data_path};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // Serialize all env-var-mutating tests so they don't race each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_metrics_data_path_xdg() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let orig = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", "/tmp/test_xdg_forgiven");
+        let path = metrics_data_path().unwrap();
+        match orig {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        assert_eq!(path, PathBuf::from("/tmp/test_xdg_forgiven/forgiven/sessions.jsonl"));
+    }
+
+    #[test]
+    fn test_metrics_data_path_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let orig_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::remove_var("XDG_DATA_HOME");
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let path = metrics_data_path().unwrap();
+        if let Some(v) = orig_xdg {
+            std::env::set_var("XDG_DATA_HOME", v);
+        }
+        assert_eq!(path, PathBuf::from(&home).join(".local/share/forgiven/sessions.jsonl"));
+    }
+
+    #[test]
+    fn test_history_file_path_nonzero() {
+        // zero → None (no env mutation needed)
+        assert!(history_file_path(0).is_none());
+        // non-zero → filename is "<ts>.jsonl" under history/
+        let _guard = ENV_LOCK.lock().unwrap();
+        let orig = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", "/tmp/test_xdg_forgiven");
+        let path = history_file_path(12345).unwrap();
+        match orig {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        assert_eq!(path, PathBuf::from("/tmp/test_xdg_forgiven/forgiven/history/12345.jsonl"));
+    }
+}
