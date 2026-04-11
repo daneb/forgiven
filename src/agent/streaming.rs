@@ -192,12 +192,18 @@ pub(super) async fn parse_sse_stream(
         match item {
             Ok(bytes) => {
                 sse_buf.push_str(&String::from_utf8_lossy(&bytes));
-                while let Some(pos) = sse_buf.find('\n') {
-                    let line = sse_buf[..pos].trim().to_string();
-                    sse_buf.drain(..=pos);
+                // Use an index cursor so we drain the buffer once per chunk
+                // rather than once per newline (O(n) copies → O(1) per line).
+                let mut cursor = 0usize;
+                let mut stream_done = false;
+                loop {
+                    let Some(rel) = sse_buf[cursor..].find('\n') else { break };
+                    let line = sse_buf[cursor..cursor + rel].trim();
+                    cursor += rel + 1;
 
                     if line == "data: [DONE]" {
-                        break 'sse;
+                        stream_done = true;
+                        break;
                     }
 
                     if let Some(json_str) = line.strip_prefix("data: ") {
@@ -294,13 +300,20 @@ pub(super) async fn parse_sse_stream(
                         }
                     }
                 }
+                // Single drain per chunk instead of one per newline.
+                sse_buf.drain(..cursor);
+                if stream_done {
+                    break 'sse;
+                }
             },
             Err(e) => {
                 warn!("Stream error, attempting to process buffered data: {e}");
-                // Try to salvage any complete lines from the buffer
-                while let Some(pos) = sse_buf.find('\n') {
-                    let line = sse_buf[..pos].trim().to_string();
-                    sse_buf.drain(..=pos);
+                // Try to salvage any complete lines from the buffer using cursor drain.
+                let mut cursor = 0usize;
+                loop {
+                    let Some(rel) = sse_buf[cursor..].find('\n') else { break };
+                    let line = sse_buf[cursor..cursor + rel].trim();
+                    cursor += rel + 1;
                     if line == "data: [DONE]" {
                         break;
                     }
@@ -317,6 +330,7 @@ pub(super) async fn parse_sse_stream(
                         }
                     }
                 }
+                sse_buf.drain(..cursor);
                 let _ = tx.send(StreamEvent::Error(format!("{e}")));
                 return StreamOutcome::Error;
             },
