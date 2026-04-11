@@ -82,7 +82,7 @@ pub(super) async fn dispatch_tools(
                         let abs = project_root.join(path_str);
                         if abs.exists() {
                             // Existing file — snapshot its current content.
-                            let original = std::fs::read_to_string(&abs).unwrap_or_default();
+                            let original = tokio::fs::read_to_string(&abs).await.unwrap_or_default();
                             let _ = tx.send(StreamEvent::FileSnapshot {
                                 path: path_str.to_string(),
                                 original,
@@ -139,10 +139,10 @@ pub(super) async fn dispatch_tools(
             if mcp.is_mcp_tool(&call.name) {
                 mcp.call_tool(&call.name, &call.arguments).await
             } else {
-                tools::execute_tool(&call, project_root)
+                tools::execute_tool(&call, project_root).await
             }
         } else {
-            tools::execute_tool(&call, project_root)
+            tools::execute_tool(&call, project_root).await
         };
 
         // If a file was successfully written or edited, notify the editor

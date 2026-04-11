@@ -306,7 +306,7 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Execute `call` against `root` and return a result string for the model.
-pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
+pub async fn execute_tool(call: &ToolCall, root: &Path) -> String {
     let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => return format!("error parsing tool arguments: {e}"),
@@ -323,7 +323,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Ok(p) => p,
                 Err(e) => return format!("error: {e}"),
             };
-            match std::fs::read_to_string(&path) {
+            match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
                     let lines: Vec<String> = content
                         .lines()
@@ -355,7 +355,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                         continue;
                     },
                 };
-                match std::fs::read_to_string(&path) {
+                match tokio::fs::read_to_string(&path).await {
                     Ok(content) => {
                         let lines: Vec<String> = content
                             .lines()
@@ -434,8 +434,8 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                     return format!("error creating parent directories for {path_str}: {e}");
                 }
             }
-            let old_content = std::fs::read_to_string(&path).unwrap_or_default();
-            match std::fs::write(&path, content) {
+            let old_content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            match tokio::fs::write(&path, content).await {
                 Ok(()) => unified_diff(path_str, &old_content, content, 120),
                 Err(e) => format!("error writing {path_str}: {e}"),
             }
@@ -459,7 +459,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Ok(p) => p,
                 Err(e) => return format!("error: {e}"),
             };
-            let content = match std::fs::read_to_string(&path) {
+            let content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) => return format!("error reading {path_str}: {e}"),
             };
@@ -479,7 +479,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 );
             }
             let new_content = content.replacen(old_str, new_str, 1);
-            match std::fs::write(&path, &new_content) {
+            match tokio::fs::write(&path, &new_content).await {
                 Ok(()) => unified_diff(path_str, &content, &new_content, 120),
                 Err(e) => format!("error writing {path_str}: {e}"),
             }
@@ -495,7 +495,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Ok(p) => p,
                 Err(e) => return format!("error: {e}"),
             };
-            match std::fs::read_to_string(&path) {
+            match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
                     let symbols = extract_symbols(&content);
                     if symbols.is_empty() {
@@ -526,7 +526,7 @@ pub fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Ok(p) => p,
                 Err(e) => return format!("error: {e}"),
             };
-            match std::fs::read_to_string(&path) {
+            match tokio::fs::read_to_string(&path).await {
                 Ok(content) => symbol_context(path_str, &content, symbol),
                 Err(e) => format!("error reading {path_str}: {e}"),
             }
@@ -968,33 +968,33 @@ mod tests {
         assert!(result.unwrap().starts_with(&root));
     }
 
-    #[test]
-    fn execute_tool_unknown() {
+    #[tokio::test]
+    async fn execute_tool_unknown() {
         let root = std::env::temp_dir();
         let call = make_call("bogus_tool", "{}");
-        let result = execute_tool(&call, &root);
+        let result = execute_tool(&call, &root).await;
         assert!(result.contains("unknown tool") || result.contains("bogus"));
     }
 
-    #[test]
-    fn execute_tool_read_missing() {
+    #[tokio::test]
+    async fn execute_tool_read_missing() {
         let root = std::env::temp_dir();
         let args = r#"{"path":"__nonexistent_file_xyz__.txt"}"#;
         let call = make_call("read_file", args);
-        let result = execute_tool(&call, &root);
+        let result = execute_tool(&call, &root).await;
         assert!(!result.is_empty());
     }
 
-    #[test]
-    fn execute_tool_write_then_read() {
+    #[tokio::test]
+    async fn execute_tool_write_then_read() {
         let root = std::env::temp_dir();
         let filename = format!("forgiven_test_{}.txt", std::process::id());
         let content = "hello from test";
         let write_args = serde_json::json!({"path": &filename, "content": content}).to_string();
-        execute_tool(&make_call("write_file", &write_args), &root);
+        execute_tool(&make_call("write_file", &write_args), &root).await;
         let read_args = serde_json::json!({"path": &filename}).to_string();
-        let result = execute_tool(&make_call("read_file", &read_args), &root);
+        let result = execute_tool(&make_call("read_file", &read_args), &root).await;
         assert!(result.contains(content));
-        let _ = std::fs::remove_file(root.join(&filename));
+        let _ = tokio::fs::remove_file(root.join(&filename)).await;
     }
 }
