@@ -61,16 +61,33 @@ async fn one_shot_with_provider(
         ),
     };
 
-    let body = serde_json::json!({
-        "model": model_id,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user",   "content": user   }
-        ],
-        "stream": false,
-        "temperature": 0.3,
-        "max_tokens": max_tokens
-    });
+    // For Ollama reasoning models (e.g. gemma4:e4b), disable the thinking/reasoning
+    // chain for one-shot tasks — it adds minutes of latency for no benefit on simple,
+    // well-defined prompts like commit message generation.
+    let body = if matches!(provider, ProviderKind::Ollama) {
+        serde_json::json!({
+            "model": model_id,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user",   "content": user   }
+            ],
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+            "think": false
+        })
+    } else {
+        serde_json::json!({
+            "model": model_id,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user",   "content": user   }
+            ],
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": max_tokens
+        })
+    };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -102,18 +119,27 @@ async fn one_shot_with_provider(
         }
     }
 
+    tracing::info!(provider = %provider.display_name(), model = model_id, "one_shot request sending");
+
     let resp =
         req.json(&body).send().await.map_err(|e| anyhow::anyhow!("one_shot_with_provider: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
+        tracing::warn!(provider = %provider.display_name(), %status, "one_shot API error: {text}");
         return Err(anyhow::anyhow!("{} API error ({status}): {text}", provider.display_name()));
     }
 
     let val: serde_json::Value =
         resp.json().await.context("one_shot_with_provider: response not JSON")?;
+    tracing::debug!("one_shot raw response: {val}");
     let content = val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        tracing::warn!(provider = %provider.display_name(), model = model_id, "one_shot returned empty content; full response: {val}");
+    } else {
+        tracing::info!(provider = %provider.display_name(), model = model_id, len = content.len(), "one_shot completed");
+    }
     Ok(content)
 }
 
@@ -352,7 +378,7 @@ impl Editor {
                 &model_id,
                 system,
                 &user,
-                256,
+                2048,
             )
             .await;
             let _ = tx.send(result);
@@ -475,7 +501,7 @@ impl Editor {
                 &model_id,
                 system,
                 &user,
-                1024,
+                4096,
             )
             .await;
             let _ = tx.send(result);

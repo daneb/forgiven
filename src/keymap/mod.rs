@@ -182,7 +182,7 @@ pub enum Action {
     WindowClose,     // SPC w c — close split
     // Diagnostics
     DiagnosticsOpen,    // SPC d d — open diagnostics overlay
-    DiagnosticsOpenLog, // SPC d l — open /tmp/forgiven.log in editor
+    DiagnosticsOpenLog, // SPC d l — open the log file in editor
     // Tree-sitter text objects (ADR 0105)
     /// `v` + `i`/`a` + `f`/`c`/`b` — enter Visual and select the text object
     SelectTextObject {
