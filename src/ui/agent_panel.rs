@@ -340,9 +340,9 @@ impl UI {
 
         // ── Input box ─────────────────────────────────────────────────────────
         let hint = if panel.messages.is_empty() {
-            " Ask Copilot… ".to_string()
+            " Ask LLM… ".to_string()
         } else {
-            " Message Copilot… ".to_string()
+            " Message LLM… ".to_string()
         };
         let hint = hint.as_str();
         let input_block =
@@ -374,7 +374,14 @@ impl UI {
             let label = format!("⎘  Pasted {} line{}", n, if *n == 1 { "" } else { "s" });
             Line::from(Span::styled(label, paste_style))
         }));
-        let typed = if focused { format!("{}_", panel.input) } else { panel.input.clone() };
+        let typed = if focused {
+            let cursor = panel.input_cursor.min(panel.input.len());
+            let before = &panel.input[..cursor];
+            let after = &panel.input[cursor..];
+            format!("{before}_{after}")
+        } else {
+            panel.input.clone()
+        };
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
         }

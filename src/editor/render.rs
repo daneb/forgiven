@@ -380,6 +380,9 @@ impl Editor {
             None
         };
 
+        let log_path_buf = crate::config::Config::log_path()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
+        let log_path_str = log_path_buf.to_string_lossy().into_owned();
         let mcp_failed_empty: Vec<(String, String)> = Vec::new();
         let recent_logs_owned: Vec<(String, String)> =
             self.log_buffer.lock().map(|g| g.iter().cloned().collect()).unwrap_or_default();
@@ -408,7 +411,7 @@ impl Editor {
                 mcp_connected,
                 mcp_failed,
                 lsp_servers,
-                log_path: "~/.local/share/forgiven/forgiven.log",
+                log_path: &log_path_str,
                 recent_logs: recent_logs_owned.as_slice(),
                 agent_session_tokens,
                 agent_ctx_breakdown: self.agent_panel.last_breakdown,

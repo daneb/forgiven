@@ -531,9 +531,27 @@ impl Editor {
                 self.agent_panel.input_backspace();
                 self.agent_panel.update_slash_menu();
             },
-            // Scroll history.
-            KeyCode::Up => self.agent_panel.scroll_up(),
-            KeyCode::Down => self.agent_panel.scroll_down(),
+            // Left/Right — move cursor within the input field.
+            KeyCode::Left => self.agent_panel.cursor_left(),
+            KeyCode::Right => self.agent_panel.cursor_right(),
+            // Up — navigate input history (falls back to message scroll when no history).
+            KeyCode::Up => {
+                if !self.agent_panel.input_history.is_empty()
+                    || self.agent_panel.history_idx.is_some()
+                {
+                    self.agent_panel.history_up();
+                } else {
+                    self.agent_panel.scroll_up();
+                }
+            },
+            // Down — navigate input history forward (falls back to message scroll).
+            KeyCode::Down => {
+                if self.agent_panel.history_idx.is_some() {
+                    self.agent_panel.history_down();
+                } else {
+                    self.agent_panel.scroll_down();
+                }
+            },
             // Ctrl+T — cycle through available models.
             // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
             // Ctrl+T (0x14) is safe in raw mode and not used by this editor.

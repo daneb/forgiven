@@ -662,7 +662,9 @@ Skip anything already obvious from reading the code.";
                 self.mode = Mode::Diagnostics;
             },
             Action::DiagnosticsOpenLog => {
-                self.open_file(std::path::Path::new("/tmp/forgiven.log"))?;
+                let path = crate::config::Config::log_path()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
+                self.open_file(&path)?;
             },
             // ── Project-wide text search ──────────────────────────────────────
             Action::SearchOpen => {

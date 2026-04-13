@@ -221,6 +221,14 @@ pub struct AgentPanel {
     /// Cleared by `new_conversation()`.
     pub archived_messages: Vec<ChatMessage>,
     pub input: String,
+    /// Submitted-input history (oldest first). Capped at 50 entries.
+    pub input_history: Vec<String>,
+    /// Index into `input_history` while browsing (None = at live input).
+    pub history_idx: Option<usize>,
+    /// Draft input saved when history navigation begins, restored on return.
+    pub input_saved: String,
+    /// Byte offset of the cursor within `self.input`.
+    pub input_cursor: usize,
     pub scroll: usize,
     token: Option<CopilotApiToken>,
     pub streaming_reply: Option<String>,

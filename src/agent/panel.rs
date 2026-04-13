@@ -91,6 +91,10 @@ impl AgentPanel {
             messages: Vec::new(),
             archived_messages: Vec::new(),
             input: String::new(),
+            input_history: Vec::new(),
+            history_idx: None,
+            input_saved: String::new(),
+            input_cursor: 0,
             scroll: 0,
             token: None,
             streaming_reply: None,
@@ -306,15 +310,81 @@ impl AgentPanel {
     }
 
     pub fn input_char(&mut self, ch: char) {
-        self.input.push(ch);
+        self.input.insert(self.input_cursor, ch);
+        self.input_cursor += ch.len_utf8();
     }
 
     pub fn input_backspace(&mut self) {
-        self.input.pop();
+        if self.input_cursor == 0 {
+            return;
+        }
+        let prev = self.input[..self.input_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.input.remove(prev);
+        self.input_cursor = prev;
     }
 
     pub fn input_newline(&mut self) {
-        self.input.push('\n');
+        self.input.insert(self.input_cursor, '\n');
+        self.input_cursor += 1;
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        self.input_cursor = self.input[..self.input_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let ch = self.input[self.input_cursor..].chars().next().unwrap();
+        self.input_cursor += ch.len_utf8();
+    }
+
+    pub fn history_up(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        match self.history_idx {
+            None => {
+                self.input_saved = self.input.clone();
+                let idx = self.input_history.len() - 1;
+                self.history_idx = Some(idx);
+                self.input = self.input_history[idx].clone();
+            },
+            Some(0) => {},
+            Some(i) => {
+                self.history_idx = Some(i - 1);
+                self.input = self.input_history[i - 1].clone();
+            },
+        }
+        self.input_cursor = self.input.len();
+    }
+
+    pub fn history_down(&mut self) {
+        match self.history_idx {
+            None => {},
+            Some(i) if i + 1 >= self.input_history.len() => {
+                self.history_idx = None;
+                self.input = std::mem::take(&mut self.input_saved);
+                self.input_cursor = self.input.len();
+            },
+            Some(i) => {
+                self.history_idx = Some(i + 1);
+                self.input = self.input_history[i + 1].clone();
+                self.input_cursor = self.input.len();
+            },
+        }
     }
 
     /// Returns true when there is anything to submit: typed text, pasted blocks,
@@ -331,6 +401,9 @@ impl AgentPanel {
     /// Does NOT clear conversation history — use `new_conversation()` for that.
     pub fn clear_input(&mut self) {
         self.input.clear();
+        self.input_cursor = 0;
+        self.history_idx = None;
+        self.input_saved.clear();
         self.pasted_blocks.clear();
         self.image_blocks.clear();
         self.file_blocks.clear();
@@ -498,6 +571,18 @@ impl AgentPanel {
                 .unwrap_or_default()
                 .as_secs();
         }
+
+        // Save non-empty input to history before consuming it.
+        let trimmed = self.input.trim().to_string();
+        if !trimmed.is_empty() {
+            self.input_history.push(trimmed);
+            if self.input_history.len() > 50 {
+                self.input_history.remove(0);
+            }
+        }
+        self.input_cursor = 0;
+        self.history_idx = None;
+        self.input_saved.clear();
 
         let typed_text = std::mem::take(&mut self.input);
         let pasted = std::mem::take(&mut self.pasted_blocks);
