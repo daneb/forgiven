@@ -2,7 +2,7 @@ use anyhow::Result;
 use ratatui::text::Span;
 use std::sync::Arc;
 
-use super::{Editor, HighlightCache, MarkdownCache, StickyScrollCache};
+use super::{CsvCache, Editor, HighlightCache, JsonCache, MarkdownCache, StickyScrollCache};
 use crate::highlight::Highlighter;
 use crate::keymap::Mode;
 use crate::ui::{RenderContext, UI};
@@ -263,6 +263,60 @@ impl Editor {
                 }
             };
             // Cap scroll so we can't scroll past the end.
+            let max_scroll = all_lines.len().saturating_sub(1);
+            let scroll = self.preview_scroll.min(max_scroll);
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else if mode == Mode::CsvPreview {
+            // ── CSV preview lines ──────────────────────────────────────────────
+            let all_lines = {
+                let buf_idx = self.current_buffer_idx;
+                let key = self.current_buffer().map(|buf| buf.lsp_version);
+                let cache_hit = self
+                    .csv_cache
+                    .as_ref()
+                    .is_some_and(|c| c.buffer_idx == buf_idx && Some(c.lsp_version) == key);
+                if cache_hit {
+                    self.csv_cache.as_ref().unwrap().lines.clone()
+                } else {
+                    let ver = key.unwrap_or(0);
+                    let content =
+                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+                    let rendered = crate::csv_preview::render(&content);
+                    self.csv_cache = Some(CsvCache {
+                        buffer_idx: buf_idx,
+                        lsp_version: ver,
+                        lines: rendered.clone(),
+                    });
+                    rendered
+                }
+            };
+            let max_scroll = all_lines.len().saturating_sub(1);
+            let scroll = self.preview_scroll.min(max_scroll);
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else if mode == Mode::JsonPreview {
+            // ── JSON preview lines ─────────────────────────────────────────────
+            let all_lines = {
+                let buf_idx = self.current_buffer_idx;
+                let key = self.current_buffer().map(|buf| buf.lsp_version);
+                let cache_hit = self
+                    .json_cache
+                    .as_ref()
+                    .is_some_and(|c| c.buffer_idx == buf_idx && Some(c.lsp_version) == key);
+                if cache_hit {
+                    self.json_cache.as_ref().unwrap().lines.clone()
+                } else {
+                    let ver = key.unwrap_or(0);
+                    let content =
+                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+                    let rendered = crate::json_preview::render(&content);
+                    self.json_cache = Some(JsonCache {
+                        buffer_idx: buf_idx,
+                        lsp_version: ver,
+                        lines: rendered.clone(),
+                    });
+                    rendered
+                }
+            };
             let max_scroll = all_lines.len().saturating_sub(1);
             let scroll = self.preview_scroll.min(max_scroll);
             Some(all_lines.into_iter().skip(scroll).collect())

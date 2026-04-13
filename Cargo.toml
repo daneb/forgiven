@@ -73,6 +73,9 @@ base64 = "0.22"
 # Markdown rendering (agent panel + editor preview)
 pulldown-cmark = "0.12"
 
+# CSV parsing (CSV preview mode)
+csv = "1"
+
 # Diff computation for multi-file review overlay (ADR 0113)
 similar = "2"
 

@@ -156,9 +156,14 @@ See [docs/reference.md](docs/reference.md#file-explorer-modeexplorer) for full k
 ### In-file search (`/`)
 - `/` enters search mode; `Enter` highlights all matches; `n`/`N` jump between them
 
-### Markdown (`SPC m p` / `SPC m b`)
-- `SPC m p` — toggle a read-only rendered preview (CommonMark + Mermaid hints)
-- `SPC m b` — render to HTML and open in the system browser with Mermaid.js
+### File preview (`SPC m …`)
+- `SPC m p` — Markdown: toggle a read-only rendered preview (CommonMark + Mermaid hints)
+- `SPC m b` — Markdown: render to HTML and open in the system browser with Mermaid.js
+- `SPC m c` — CSV: column-aligned table view with highlighted header row
+- `SPC m j` — JSON: pretty-printed view with token-level syntax colouring
+
+All preview modes share the same scroll keys: `j/k` (line), `Ctrl+D/U` (half-page),
+`g/G` (top/bottom), `Esc`/`q` (exit).
 
 ### Other
 - lazygit full-screen overlay (`SPC g g`)
