@@ -318,11 +318,8 @@ impl AgentPanel {
         if self.input_cursor == 0 {
             return;
         }
-        let prev = self.input[..self.input_cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let prev =
+            self.input[..self.input_cursor].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
         self.input.remove(prev);
         self.input_cursor = prev;
     }
@@ -336,11 +333,8 @@ impl AgentPanel {
         if self.input_cursor == 0 {
             return;
         }
-        self.input_cursor = self.input[..self.input_cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        self.input_cursor =
+            self.input[..self.input_cursor].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
     }
 
     pub fn cursor_right(&mut self) {

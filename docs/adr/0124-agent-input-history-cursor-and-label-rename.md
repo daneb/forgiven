@@ -30,15 +30,14 @@ pub input_cursor:  usize,         // byte offset (shared with cursor feature)
 
 On each successful `submit()` call the trimmed input is appended to `input_history`. If the vec exceeds 50 entries, the oldest is dropped.
 
-`Up` in agent mode calls `history_up()`:
+`Alt+Up` in agent mode calls `history_up()`:
 - First press: saves the current draft to `input_saved`, loads the most-recent history entry.
 - Subsequent presses: walk backwards through history; no-op at the oldest entry.
 
-`Down` calls `history_down()`:
+`Alt+Down` calls `history_down()`:
 - While browsing: walk forwards; on the final press restore `input_saved` and clear `history_idx`.
-- When not browsing: falls through to the existing `scroll_down()` (message list scroll).
 
-`Up` also falls through to `scroll_up()` when `input_history` is empty and no browsing is in progress, preserving the pre-existing scroll behaviour.
+Plain `Up`/`Down` continue to scroll the session message list unchanged, avoiding any keybinding conflict.
 
 `clear_input()` and the `submit()` hot-path both reset `history_idx` and `input_saved` so a partially-typed message never gets confused with history state.
 
@@ -105,5 +104,5 @@ No new dependencies. No config schema changes. No breaking changes to existing k
 - **Positive**: Shell-style history navigation dramatically reduces re-typing for iterative prompts.
 - **Positive**: Mid-line editing eliminates the need to delete-to-cursor to fix a typo anywhere in a message.
 - **Positive**: "LLM" label is provider-agnostic and accurate regardless of backend.
-- **Neutral**: `Up` no longer scrolls the message list when history is non-empty. Users who relied on `Up` for scrolling must use `Up` only once (to exhaust the history) before it reverts to scroll, or use Page Up / the existing scroll bindings.
+- **Neutral**: Input history requires `Alt+Up`/`Alt+Down`, consistent with the existing `Alt+Enter` for newline. Plain `Up`/`Down` scroll the session as before.
 - **Neutral**: History is in-memory only and does not persist across sessions. A future ADR could address JSONL persistence alongside session metrics.

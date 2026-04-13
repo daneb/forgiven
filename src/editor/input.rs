@@ -534,24 +534,16 @@ impl Editor {
             // Left/Right — move cursor within the input field.
             KeyCode::Left => self.agent_panel.cursor_left(),
             KeyCode::Right => self.agent_panel.cursor_right(),
-            // Up — navigate input history (falls back to message scroll when no history).
-            KeyCode::Up => {
-                if !self.agent_panel.input_history.is_empty()
-                    || self.agent_panel.history_idx.is_some()
-                {
-                    self.agent_panel.history_up();
-                } else {
-                    self.agent_panel.scroll_up();
-                }
+            // Alt+Up / Alt+Down — navigate input history.
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agent_panel.history_up();
             },
-            // Down — navigate input history forward (falls back to message scroll).
-            KeyCode::Down => {
-                if self.agent_panel.history_idx.is_some() {
-                    self.agent_panel.history_down();
-                } else {
-                    self.agent_panel.scroll_down();
-                }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agent_panel.history_down();
             },
+            // Up / Down — scroll the session message list.
+            KeyCode::Up => self.agent_panel.scroll_up(),
+            KeyCode::Down => self.agent_panel.scroll_down(),
             // Ctrl+T — cycle through available models.
             // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
             // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
