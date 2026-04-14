@@ -83,7 +83,8 @@ fn build_structural_map(root: &std::path::Path) -> String {
     const MAX_NAMES: usize = 8;
 
     let src_root = root.join("src");
-    let mut lines = vec!["Structural map (src/ — call get_file_outline for full details):".to_string()];
+    let mut lines =
+        vec!["Structural map (src/ — call get_file_outline for full details):".to_string()];
 
     // Collect all .rs files under src/ (depth-unlimited but src/ is small).
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
@@ -100,8 +101,7 @@ fn build_structural_map(root: &std::path::Path) -> String {
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         let shown = &names[..names.len().min(MAX_NAMES)];
         let extra = names.len().saturating_sub(MAX_NAMES);
-        let suffix =
-            if extra > 0 { format!(" … +{extra}") } else { String::new() };
+        let suffix = if extra > 0 { format!(" … +{extra}") } else { String::new() };
         lines.push(format!("  {} — {}{}", rel.display(), shown.join(", "), suffix));
     }
     lines.join("\n")
@@ -579,8 +579,7 @@ impl AgentPanel {
     pub fn new_conversation(&mut self, model_name: &str) {
         // Write a session-end efficiency record for the conversation that is ending.
         if self.session_rounds > 0 {
-            let files_changed =
-                self.session_snapshots.len() + self.session_created_files.len();
+            let files_changed = self.session_snapshots.len() + self.session_created_files.len();
             super::append_session_end_record(
                 &self.last_submit_model,
                 self.total_session_prompt_tokens,
@@ -883,9 +882,8 @@ impl AgentPanel {
         // rounds keep the snippet for passive orientation.
         const MAX_CTX_LINES: usize = 150;
         let ctx_total_lines = context.as_ref().map(|c| c.lines().count()).unwrap_or(0);
-        let suppress_ctx = spec_cmd_ctx.as_ref()
-            .map(|(cmd, _)| cmd.starts_with("speckit."))
-            .unwrap_or(false);
+        let suppress_ctx =
+            spec_cmd_ctx.as_ref().map(|(cmd, _)| cmd.starts_with("speckit.")).unwrap_or(false);
         let context_snippet: Option<String> = if suppress_ctx {
             None
         } else {
@@ -1493,8 +1491,8 @@ Available tools:\n\
             project_root,
             tx,
             model_id,
-            1,     // max_rounds — single exploration pass
-            0,     // warning_threshold
+            1, // max_rounds — single exploration pass
+            0, // warning_threshold
             cont_rx,
             question_rx,
             abort_rx,
@@ -1688,8 +1686,8 @@ Available tools:\n\
                                 .unwrap_or_default();
                             // Write session-end record before clearing counters.
                             if self.session_rounds > 0 {
-                                let files_changed = self.session_snapshots.len()
-                                    + self.session_created_files.len();
+                                let files_changed =
+                                    self.session_snapshots.len() + self.session_created_files.len();
                                 super::append_session_end_record(
                                     &self.last_submit_model,
                                     self.total_session_prompt_tokens,
@@ -1757,7 +1755,7 @@ Available tools:\n\
                         }
                         self.usage_received_this_round = false;
                         self.round_hint = None; // hint served its purpose after first round
-                        // ── Persist invocation metrics ───────────────────────
+                                                // ── Persist invocation metrics ───────────────────────
                         self.session_rounds = self.session_rounds.saturating_add(1);
                         if self.last_prompt_tokens > 0 {
                             let ts = std::time::SystemTime::now()
@@ -1869,7 +1867,7 @@ Available tools:\n\
                         active = true;
                         self.investigation_buf.push_str(&t);
                     },
-                    Ok(StreamEvent::Done { .. }) => {
+                    Ok(StreamEvent::Done) => {
                         let summary = std::mem::take(&mut self.investigation_buf);
                         if !summary.trim().is_empty() {
                             self.messages.push(ChatMessage {

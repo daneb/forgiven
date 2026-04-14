@@ -645,9 +645,8 @@ Skip anything already obvious from reading the code.";
                     let project_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let preferred_model = self.config.active_default_model().to_string();
-                    let fut = self
-                        .agent_panel
-                        .start_investigation_agent(project_root, &preferred_model);
+                    let fut =
+                        self.agent_panel.start_investigation_agent(project_root, &preferred_model);
                     let err = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
                             match fut.await {

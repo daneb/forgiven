@@ -540,16 +540,33 @@ pub fn suggest_model_for_task(
     let t = text.to_lowercase();
 
     let is_complex = [
-        "architect", "refactor all", "redesign", "why does", "why is",
-        "explain", "debug", "subtle", "complex", "investigate", "deep dive",
-        "performance", "deadlock", "race condition", "memory leak",
+        "architect",
+        "refactor all",
+        "redesign",
+        "why does",
+        "why is",
+        "explain",
+        "debug",
+        "subtle",
+        "complex",
+        "investigate",
+        "deep dive",
+        "performance",
+        "deadlock",
+        "race condition",
+        "memory leak",
     ]
     .iter()
     .any(|kw| t.contains(kw));
 
     let is_simple = [
-        "fix typo", "rename", "add comment", "format", "update import",
-        "bump version", "add newline",
+        "fix typo",
+        "rename",
+        "add comment",
+        "format",
+        "update import",
+        "bump version",
+        "add newline",
     ]
     .iter()
     .any(|kw| t.contains(kw));

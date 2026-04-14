@@ -26,9 +26,11 @@ pub mod tools;
 pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
 pub use context::{message_importance, ContextBreakdown, SubmitCtx};
-pub use provider::ProviderKind;
 pub use models::suggest_model_for_task;
-pub use session::{append_session_end_record, append_session_metric, history_file_path, suggest_max_rounds};
+pub use provider::ProviderKind;
+pub use session::{
+    append_session_end_record, append_session_metric, history_file_path, suggest_max_rounds,
+};
 
 use std::path::PathBuf;
 use std::sync::Arc;
