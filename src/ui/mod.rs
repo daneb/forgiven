@@ -114,6 +114,8 @@ pub struct DiagnosticsData<'a> {
     /// Per-segment context breakdown from the most recent agent invocation.
     /// Drives the Context Breakdown section in this overlay.
     pub agent_ctx_breakdown: Option<crate::agent::ContextBreakdown>,
+    /// Current observation-masking threshold in characters (0 = disabled).
+    pub observation_mask_threshold_chars: usize,
     /// Recent MCP tool calls this session (newest-last).
     pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
 }

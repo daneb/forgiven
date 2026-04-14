@@ -587,15 +587,15 @@ pub async fn execute_tool(call: &ToolCall, root: &Path) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single top-level definition detected by heuristic line scanning.
-struct SymbolDef {
+pub(crate) struct SymbolDef {
     /// 0-indexed line where the definition starts.
-    line: usize,
+    pub(crate) line: usize,
     /// Signature text (the definition line, trimmed).
-    signature: String,
+    pub(crate) signature: String,
     /// Name of the symbol extracted from the signature.
-    name: String,
+    pub(crate) name: String,
     /// 0-indexed line where the body ends (best-effort brace/indent matching).
-    end_line: usize,
+    pub(crate) end_line: usize,
 }
 
 /// Heuristic patterns that identify the start of a top-level definition across
@@ -700,7 +700,7 @@ fn name_from_signature(sig: &str) -> &str {
 }
 
 /// Extract all top-level symbol definitions from `source`.
-fn extract_symbols(source: &str) -> Vec<SymbolDef> {
+pub(crate) fn extract_symbols(source: &str) -> Vec<SymbolDef> {
     let lines: Vec<&str> = source.lines().collect();
     let mut symbols: Vec<SymbolDef> = Vec::new();
 

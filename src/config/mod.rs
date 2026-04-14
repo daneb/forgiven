@@ -501,7 +501,7 @@ fn default_copilot_model() -> String {
     "claude-sonnet-4".to_string()
 }
 fn default_max_agent_rounds() -> usize {
-    20
+    10
 }
 fn default_agent_warning_threshold() -> usize {
     3

@@ -517,3 +517,62 @@ pub(super) async fn fetch_models_for_provider(
         ProviderKind::OpenRouter => fetch_models_openrouter(api_token).await,
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task-complexity model suggestion (Phase 2.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the index into `models` of the suggested model given the task
+/// described by `text`, or `None` when:
+/// - fewer than two models are available,
+/// - the current selection already matches the suggestion, or
+/// - the text doesn't contain enough signal to distinguish complexity.
+///
+/// The heuristic is intentionally coarse — a dim UI hint, not an auto-switch.
+pub fn suggest_model_for_task(
+    text: &str,
+    models: &[ModelVersion],
+    current_idx: usize,
+) -> Option<usize> {
+    if models.len() < 2 {
+        return None;
+    }
+    let t = text.to_lowercase();
+
+    let is_complex = [
+        "architect", "refactor all", "redesign", "why does", "why is",
+        "explain", "debug", "subtle", "complex", "investigate", "deep dive",
+        "performance", "deadlock", "race condition", "memory leak",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw));
+
+    let is_simple = [
+        "fix typo", "rename", "add comment", "format", "update import",
+        "bump version", "add newline",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw));
+
+    if !is_complex && !is_simple {
+        return None;
+    }
+
+    // Prefer a "gpt-5" / "opus" / "pro" tier model for complex, "gpt-4" /
+    // "sonnet" / "flash" tier for simple.  Match on the model `id` field.
+    let tier_markers: &[&str] = if is_complex {
+        &["gpt-5", "opus", "-pro", "ultra"]
+    } else {
+        &["gpt-4", "sonnet", "flash", "haiku", "mini"]
+    };
+
+    let idx = models.iter().position(|m| {
+        let id = m.id.to_lowercase();
+        tier_markers.iter().any(|marker| id.contains(marker))
+    })?;
+
+    if idx == current_idx {
+        return None;
+    }
+    Some(idx)
+}

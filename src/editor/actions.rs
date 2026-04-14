@@ -634,6 +634,36 @@ Skip anything already obvious from reading the code.";
                     }
                 }
             },
+            // ── Investigation subagent (Phase 3.3) ──────────────────────────
+            Action::AgentInvestigate => {
+                if self.agent_panel.input.trim().is_empty() {
+                    self.set_status("Type a query first, then press SPC a v".to_string());
+                } else {
+                    self.agent_panel.visible = true;
+                    self.mode = Mode::Agent;
+                    self.set_status("Investigation running…".to_string());
+                    let project_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let preferred_model = self.config.active_default_model().to_string();
+                    let fut = self
+                        .agent_panel
+                        .start_investigation_agent(project_root, &preferred_model);
+                    let err = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            match fut.await {
+                                Ok(()) => None,
+                                Err(e) => {
+                                    tracing::warn!("Investigation error: {e}");
+                                    Some(e.to_string())
+                                },
+                            }
+                        })
+                    });
+                    if let Some(e) = err {
+                        self.set_status(format!("Investigation error: {e}"));
+                    }
+                }
+            },
             // ── Multi-file review / change set view (ADR 0113) ───────────────
             Action::ReviewChangesOpen => {
                 if !self.agent_panel.has_checkpoint() {

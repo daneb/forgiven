@@ -71,6 +71,55 @@ fn tree_recursive(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Structural project map builder (Phase 2.1 — Aider pattern)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a compact structural map of `src/` files: one line per file listing
+/// up to `MAX_NAMES` top-level symbol names.  Gives the model symbol-level
+/// orientation at ≈200–400 tokens instead of 300–500 for the filename tree,
+/// saving 1–2 `read_file` discovery round-trips per session.
+fn build_structural_map(root: &std::path::Path) -> String {
+    use super::tools::extract_symbols;
+    const MAX_NAMES: usize = 8;
+
+    let src_root = root.join("src");
+    let mut lines = vec!["Structural map (src/ — call get_file_outline for full details):".to_string()];
+
+    // Collect all .rs files under src/ (depth-unlimited but src/ is small).
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    collect_rs_files_recursive(&src_root, &mut paths);
+    paths.sort();
+
+    for path in paths {
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let symbols = extract_symbols(&src);
+        if symbols.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        let shown = &names[..names.len().min(MAX_NAMES)];
+        let extra = names.len().saturating_sub(MAX_NAMES);
+        let suffix =
+            if extra > 0 { format!(" … +{extra}") } else { String::new() };
+        lines.push(format!("  {} — {}{}", rel.display(), shown.join(", "), suffix));
+    }
+    lines.join("\n")
+}
+
+fn collect_rs_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files_recursive(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AgentPanel impl
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -105,7 +154,7 @@ impl AgentPanel {
             available_models: Vec::new(),
             selected_model: 0,
             current_round: 0,
-            max_rounds: 20,
+            max_rounds: 10,
             awaiting_continuation: false,
             status: AgentStatus::Idle,
             last_error: None,
@@ -134,9 +183,14 @@ impl AgentPanel {
             janitor_compressing: false,
             usage_received_this_round: false,
             context_near_limit_warned: false,
+            session_total_100k_warned: false,
             cached_project_tree: None,
+            cached_structural_map: None,
             session_snapshots: std::collections::HashMap::new(),
             session_created_files: Vec::new(),
+            investigation_rx: None,
+            investigation_buf: String::new(),
+            round_hint: None,
         }
     }
 
@@ -523,6 +577,22 @@ impl AgentPanel {
     /// Called when the user switches models via Ctrl+T so the new model receives a
     /// clean context — not the prior conversation from a different model.
     pub fn new_conversation(&mut self, model_name: &str) {
+        // Write a session-end efficiency record for the conversation that is ending.
+        if self.session_rounds > 0 {
+            let files_changed =
+                self.session_snapshots.len() + self.session_created_files.len();
+            super::append_session_end_record(
+                &self.last_submit_model,
+                self.total_session_prompt_tokens,
+                self.total_session_completion_tokens,
+                self.session_rounds,
+                files_changed,
+                "new_conversation",
+            );
+        }
+        // Compute adaptive round-limit hint for the incoming session.
+        self.round_hint = super::suggest_max_rounds(self.selected_model_id());
+
         self.messages.clear();
         self.archived_messages.clear();
         self.tasks.clear();
@@ -532,9 +602,11 @@ impl AgentPanel {
         self.session_rounds = 0;
         self.session_start_secs = 0;
         self.cached_project_tree = None;
+        self.cached_structural_map = None;
         self.session_snapshots.clear();
         self.session_created_files.clear();
         self.context_near_limit_warned = false;
+        self.session_total_100k_warned = false;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -805,27 +877,47 @@ impl AgentPanel {
         // tens-of-thousands of tokens on every round (even unrelated rounds)
         // is the primary driver of context bloat (ADR 0087).
         // Cap to MAX_CTX_LINES; the model can call read_file for the rest.
+        //
+        // Phase 3.1: suppress injection entirely for specKit sessions — the
+        // model works from TASKS.md/SPEC.md, not the active buffer.  Chat-mode
+        // rounds keep the snippet for passive orientation.
         const MAX_CTX_LINES: usize = 150;
         let ctx_total_lines = context.as_ref().map(|c| c.lines().count()).unwrap_or(0);
-        let context_snippet: Option<String> = context.as_ref().map(|raw| {
-            if ctx_total_lines > MAX_CTX_LINES {
-                raw.lines().take(MAX_CTX_LINES).collect::<Vec<_>>().join("\n")
-            } else {
-                raw.clone()
-            }
-        });
+        let suppress_ctx = spec_cmd_ctx.as_ref()
+            .map(|(cmd, _)| cmd.starts_with("speckit."))
+            .unwrap_or(false);
+        let context_snippet: Option<String> = if suppress_ctx {
+            None
+        } else {
+            context.as_ref().map(|raw| {
+                if ctx_total_lines > MAX_CTX_LINES {
+                    raw.lines().take(MAX_CTX_LINES).collect::<Vec<_>>().join("\n")
+                } else {
+                    raw.clone()
+                }
+            })
+        };
 
-        // Build a shallow file tree so the model knows the project layout upfront
-        // and never needs to burn rounds on list_directory exploration.
-        // The tree is cached for up to 30 s to avoid a full filesystem walk on
-        // every submit (the tree rarely changes within a single session).
+        // Build a structural map of src/ symbols (Phase 2.1).  On round 1 this
+        // replaces the old filename tree and gives the model symbol-level
+        // orientation without extra read_file discovery round-trips.
+        // Cached for 30 s alongside cached_project_tree.
         const TREE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-        let project_tree = match self.cached_project_tree.as_ref() {
+        // Keep project_tree around for the round-2+ stub hint (no filesystem cost).
+        let _project_tree = match self.cached_project_tree.as_ref() {
             Some((tree, ts)) if ts.elapsed() < TREE_TTL => tree.clone(),
             _ => {
                 let tree = build_project_tree(&project_root, 2);
                 self.cached_project_tree = Some((tree.clone(), std::time::Instant::now()));
                 tree
+            },
+        };
+        let structural_map = match self.cached_structural_map.as_ref() {
+            Some((map, ts)) if ts.elapsed() < TREE_TTL => map.clone(),
+            _ => {
+                let map = build_structural_map(&project_root);
+                self.cached_structural_map = Some((map.clone(), std::time::Instant::now()));
+                map
             },
         };
 
@@ -895,12 +987,14 @@ FILE EDITING RULES:\n\
    read_file calls. Use search_files(pattern, [...]) instead of read_file + scan.\n\
 \n\
 MEMORY RULES (only when memory tools are available):\n\
-- At the START of a new session, call search_nodes with query 'project context'\n\
-  to retrieve any facts stored from prior sessions before asking the user.\n\
-- During work, call add_observations when you discover non-obvious facts about\n\
+- FIRST CALL on any new session: search_nodes(query='project context') BEFORE\n\
+  responding to the user. This surfaces prior architecture decisions and key file\n\
+  locations so you avoid re-discovering them.\n\
+  Example: search_nodes({{\"query\": \"project context\"}})\n\
+- During work: call add_observations when you discover non-obvious facts about\n\
   the codebase (architecture decisions, gotchas, key file locations).\n\
-- At the END of a significant session, call create_entities + add_observations\n\
-  to persist what you learned for future sessions.\n\
+- At the END of a significant session: create_entities + add_observations to\n\
+  persist what you learned for future sessions.\n\
 \n\
 Available tools:\n\
 {planning_tool_entries}\
@@ -916,6 +1010,17 @@ Available tools:\n\
 - list_directory       List a directory's contents.\n"
         );
 
+        // Only include the full project tree on round 1 (session_rounds == 0).
+        // Round 1: inject structural map (symbol names per file) instead of the
+        // old filename-only tree.  Gives the model symbol-level orientation
+        // (≈200–400 t) so it can skip discovery read_file calls.
+        // Subsequent rounds: one-line stub saves 300–500 tokens per round.
+        let tree_block = if self.session_rounds == 0 {
+            format!("{structural_map}\n\n")
+        } else {
+            String::from("[Project tree omitted after round 1 — call list_directory if needed]\n\n")
+        };
+
         let system = if let Some(ref ctx) = context_snippet {
             let truncation_note = if ctx_total_lines > MAX_CTX_LINES {
                 format!(
@@ -928,8 +1033,7 @@ Available tools:\n\
             format!(
                 "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
                  Project root: {root_display}\n\n\
-                 Project file tree (depth 2 — use read_file to see contents):\n\
-                 ```\n{project_tree}```\n\n\
+                 {tree_block}\
                  {tool_rules}\n\
                  Currently open file (use read_file for full content):\n\
                  ```\n{ctx}{truncation_note}\n```"
@@ -938,14 +1042,65 @@ Available tools:\n\
             format!(
                 "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
                  Project root: {root_display}\n\n\
-                 Project file tree (depth 2 — use read_file to see contents):\n\
-                 ```\n{project_tree}```\n\n\
+                 {tree_block}\
                  {tool_rules}"
             )
         };
 
-        let mut send_messages: Vec<serde_json::Value> =
-            vec![serde_json::json!({ "role": "system", "content": system })];
+        // For the Anthropic provider, split the system prompt into a stable
+        // prefix (preamble + structural map + tool_rules) and the volatile
+        // context_snippet so that the stable prefix is eligible for prompt
+        // caching.  Other providers (Copilot, OpenAI) cache automatically on
+        // the prefix — plain string content is correct for them.
+        let system_message = if self.provider == ProviderKind::Anthropic {
+            if let Some(ref _ctx) = context_snippet {
+                // Find where context_snippet starts in the assembled system
+                // string and split there.
+                let ctx_marker = "Currently open file";
+                if let Some(split_pos) = system.find(ctx_marker) {
+                    let stable = &system[..split_pos];
+                    let volatile = &system[split_pos..];
+                    serde_json::json!({
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": stable,
+                                "cache_control": { "type": "ephemeral" }
+                            },
+                            { "type": "text", "text": volatile }
+                        ]
+                    })
+                } else {
+                    // Couldn't find split point — cache the whole thing.
+                    serde_json::json!({
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": system,
+                                "cache_control": { "type": "ephemeral" }
+                            }
+                        ]
+                    })
+                }
+            } else {
+                // No context_snippet — entire system prompt is stable.
+                serde_json::json!({
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": system,
+                            "cache_control": { "type": "ephemeral" }
+                        }
+                    ]
+                })
+            }
+        } else {
+            serde_json::json!({ "role": "system", "content": system })
+        };
+        let mut send_messages: Vec<serde_json::Value> = vec![system_message];
 
         // ── Token-aware history truncation with importance scoring ───────────
         // Estimate tokens using the chars/4 approximation (1 token ≈ 4 chars).
@@ -1250,6 +1405,109 @@ Available tools:\n\
         Ok((rx, abort_tx))
     }
 
+    /// Spin up a single-round, tool-enabled investigation subagent (Phase 3.3).
+    ///
+    /// The query comes from `self.input`.  The agentic loop runs for at most one
+    /// round with all tools available so the model can explore the codebase.
+    /// Tokens are collected in `self.investigation_buf`; when `Done` arrives in
+    /// `poll_stream()` the summary is injected as a System message into the main
+    /// session and `investigation_rx` is cleared.
+    ///
+    /// Callers must ensure `self.input` is non-empty before calling.
+    pub async fn start_investigation_agent(
+        &mut self,
+        project_root: PathBuf,
+        preferred_model: &str,
+    ) -> Result<()> {
+        if self.input.trim().is_empty() {
+            return Ok(());
+        }
+
+        let api_token = self.ensure_token().await?;
+        let model_id = self.selected_model_id_with_fallback(preferred_model).to_string();
+
+        let chat_endpoint = match &self.provider {
+            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
+            ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
+            ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
+            ProviderKind::OpenAi => format!("{}/chat/completions", self.openai_base_url),
+            ProviderKind::Gemini => {
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string()
+            },
+            ProviderKind::OpenRouter => "https://openrouter.ai/api/v1/chat/completions".to_string(),
+        };
+        let effective_token = match self.provider {
+            ProviderKind::Copilot => api_token,
+            ProviderKind::Ollama => String::new(),
+            _ => self.api_key.clone(),
+        };
+
+        let provider_settings = super::provider::ProviderSettings {
+            kind: self.provider.clone(),
+            api_token: effective_token,
+            chat_endpoint,
+            num_ctx: if self.provider == ProviderKind::Ollama {
+                self.ollama_context_length
+            } else {
+                None
+            },
+            supports_tool_calls: true,
+            planning_tools: false, // investigation doesn't create tasks
+            openrouter_site_url: self.openrouter_site_url.clone(),
+            openrouter_app_name: self.openrouter_app_name.clone(),
+        };
+
+        let root_display = project_root.display().to_string();
+        let system_prompt = format!(
+            "You are a code investigator for the 'forgiven' terminal editor.\n\
+             Project root: {root_display}\n\n\
+             INVESTIGATION RULES:\n\
+             - Explore the codebase using get_file_outline, get_symbol_context, search_files, \
+               and read_file as needed.\n\
+             - Make NO edits — this is read-only exploration.\n\
+             - After exploring, output a COMPACT SUMMARY (max 200 words) covering:\n\
+               * Which files/functions are involved\n\
+               * Key call paths or data flow\n\
+               * Any non-obvious facts the developer should know\n\
+             - No preamble, no pleasantries. Start directly with the findings."
+        );
+
+        let query = std::mem::take(&mut self.input);
+        self.input_cursor = 0;
+
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": system_prompt }),
+            serde_json::json!({ "role": "user", "content": query }),
+        ];
+
+        let (tx, rx) = mpsc::channel::<StreamEvent>(128);
+        let (_abort_tx, abort_rx) = oneshot::channel::<()>();
+        let (_cont_tx, cont_rx) = mpsc::unbounded_channel::<bool>();
+        let (_question_tx, question_rx) = mpsc::unbounded_channel::<String>();
+
+        let mcp = self.mcp_manager.clone();
+        tokio::spawn(agentic_loop(
+            provider_settings,
+            messages,
+            project_root,
+            tx,
+            model_id,
+            1,     // max_rounds — single exploration pass
+            0,     // warning_threshold
+            cont_rx,
+            question_rx,
+            abort_rx,
+            mcp,
+            false, // auto_compress
+        ));
+
+        self.investigation_rx = Some(rx);
+        self.investigation_buf.clear();
+        self.status = AgentStatus::Investigating;
+        Ok(())
+    }
+
     pub fn poll_stream(&mut self) -> bool {
         // Process at most this many tokens per frame to avoid stalling the render loop
         // when the LLM is streaming a large response at high speed.
@@ -1428,6 +1686,19 @@ Available tools:\n\
                                 .filter(|m| matches!(m.role, Role::Assistant))
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
+                            // Write session-end record before clearing counters.
+                            if self.session_rounds > 0 {
+                                let files_changed = self.session_snapshots.len()
+                                    + self.session_created_files.len();
+                                super::append_session_end_record(
+                                    &self.last_submit_model,
+                                    self.total_session_prompt_tokens,
+                                    self.total_session_completion_tokens,
+                                    self.session_rounds,
+                                    files_changed,
+                                    "janitor",
+                                );
+                            }
                             // Original messages were already archived in compress_history().
                             // Discard the janitor round (prompt + response) — it's a
                             // technical artifact, not a real conversation turn.
@@ -1485,6 +1756,7 @@ Available tools:\n\
                                 self.total_session_prompt_tokens.saturating_add(estimated);
                         }
                         self.usage_received_this_round = false;
+                        self.round_hint = None; // hint served its purpose after first round
                         // ── Persist invocation metrics ───────────────────────
                         self.session_rounds = self.session_rounds.saturating_add(1);
                         if self.last_prompt_tokens > 0 {
@@ -1510,6 +1782,24 @@ Available tools:\n\
                                 "session_completion_total": self.total_session_completion_tokens,
                                 "pct": pct,
                             }));
+                        }
+                        // ── 100 k session-total warning ──────────────────────
+                        // Fires once per conversation when cumulative re-send cost
+                        // crosses 100k tokens — earlier than the 90% per-round check,
+                        // giving the user a softer nudge to run the janitor soon.
+                        if self.total_session_prompt_tokens > 100_000
+                            && !self.session_total_100k_warned
+                        {
+                            self.session_total_100k_warned = true;
+                            self.messages.push(ChatMessage {
+                                role: Role::System,
+                                content: format!(
+                                    "\u{2139}  Session total: {}k tokens. \
+                                     Consider running SPC a j before your next task.",
+                                    self.total_session_prompt_tokens / 1_000
+                                ),
+                                images: vec![],
+                            });
                         }
                         // ── 90 % context-window warning ──────────────────────
                         // Post a visible chat message the first time a round's prompt
@@ -1567,6 +1857,49 @@ Available tools:\n\
                 }
             }
         }
+
+        // ── Investigation subagent drain ─────────────────────────────────────
+        // Drain the investigation stream independently of the main stream.
+        // On Done, inject the collected summary as a System message so the user
+        // can see it and the main session has it in context for the next round.
+        if let Some(rx) = self.investigation_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(StreamEvent::Token(t)) => {
+                        active = true;
+                        self.investigation_buf.push_str(&t);
+                    },
+                    Ok(StreamEvent::Done { .. }) => {
+                        let summary = std::mem::take(&mut self.investigation_buf);
+                        if !summary.trim().is_empty() {
+                            self.messages.push(ChatMessage {
+                                role: Role::System,
+                                content: format!("🔍 Investigation result:\n{summary}"),
+                                images: vec![],
+                            });
+                        }
+                        self.investigation_rx = None;
+                        self.status = AgentStatus::Idle;
+                        active = true;
+                        break;
+                    },
+                    Ok(StreamEvent::Error(e)) => {
+                        self.messages.push(ChatMessage {
+                            role: Role::System,
+                            content: format!("🔍 Investigation error: {e}"),
+                            images: vec![],
+                        });
+                        self.investigation_rx = None;
+                        self.status = AgentStatus::Idle;
+                        active = true;
+                        break;
+                    },
+                    Ok(_) => {}, // tool events — investigation is read-only; ignore
+                    Err(_) => break,
+                }
+            }
+        }
+
         active
     }
 

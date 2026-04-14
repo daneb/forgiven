@@ -386,6 +386,16 @@ impl UI {
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
+            let mask = data.observation_mask_threshold_chars;
+            let (mask_text, mask_color) = if mask == 0 {
+                ("obs mask   disabled".to_string(), Color::Yellow)
+            } else {
+                (format!("obs mask   {mask} chars  (~{} t)", mask / 4), Color::DarkGray)
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {mask_text}"),
+                Style::default().fg(mask_color),
+            )]));
         }
 
         // ── MCP Activity ──────────────────────────────────────────────────────

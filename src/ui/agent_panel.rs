@@ -1,5 +1,6 @@
 use super::markdown::render_message_content;
 use super::*;
+use crate::agent::suggest_model_for_task;
 
 impl UI {
     /// Render the Copilot Chat / agent panel on the right side.
@@ -384,6 +385,34 @@ impl UI {
         };
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
+        }
+        // Adaptive round-limit hint — shown before the first submit of a new
+        // conversation when sessions.jsonl has enough history to make a suggestion.
+        if panel.session_rounds == 0 {
+            if let Some(hint_rounds) = panel.round_hint {
+                input_lines.push(Line::from(Span::styled(
+                    format!(
+                        " → typical sessions: {hint_rounds} rounds  \
+                         (current limit: {}, adjust via max_rounds in config) ",
+                        panel.max_rounds
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        // Model suggestion hint — shown when the typed text contains complexity
+        // signals and the current model differs from the suggested tier.
+        if !panel.input.trim().is_empty() {
+            if let Some(sug_idx) =
+                suggest_model_for_task(&panel.input, &panel.available_models, panel.selected_model)
+            {
+                let sug_name = &panel.available_models[sug_idx].id;
+                let cur_name = &panel.available_models[panel.selected_model].id;
+                input_lines.push(Line::from(Span::styled(
+                    format!(" → {sug_name} suggested (Ctrl+T, current: {cur_name}) "),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
         // When the input content exceeds the visible area, scroll so the cursor
         // (last line) stays visible.  The badges (file/image/paste) count as

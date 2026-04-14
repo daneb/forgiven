@@ -27,7 +27,8 @@ pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
 pub use context::{message_importance, ContextBreakdown, SubmitCtx};
 pub use provider::ProviderKind;
-pub use session::{append_session_metric, history_file_path};
+pub use models::suggest_model_for_task;
+pub use session::{append_session_end_record, append_session_metric, history_file_path, suggest_max_rounds};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -332,10 +333,17 @@ pub struct AgentPanel {
     /// firing again every round once the threshold is crossed.
     /// Reset by `new_conversation()` and `compress_history()`.
     pub context_near_limit_warned: bool,
+    /// Set to `true` after the 100 k session-total warning has been posted.
+    /// Fires once per conversation regardless of model window size.
+    /// Reset by `new_conversation()` and `compress_history()`.
+    pub session_total_100k_warned: bool,
     /// Cached project file-tree string (depth 2), rebuilt at most once every 30 s.
     /// Avoids a full filesystem walk on every `submit()` call.
     /// Cleared by `new_conversation()` to force a fresh tree on the next session.
     pub cached_project_tree: Option<(String, std::time::Instant)>,
+    /// Cached structural map (top-level symbol names per src/ file), rebuilt at
+    /// most once every 30 s alongside `cached_project_tree`.
+    pub cached_structural_map: Option<(String, std::time::Instant)>,
     /// Original file contents captured before the agent first modifies each file in
     /// the current session.  Used by `revert_session()` (`SPC a u`) to restore all
     /// agent-touched files to their pre-session state.
@@ -347,6 +355,17 @@ pub struct AgentPanel {
     /// `revert_session()` deletes these files rather than restoring content.
     /// Cleared by `new_conversation()`.
     pub session_created_files: Vec<String>,
+    /// Receiver for the in-flight investigation subagent stream.
+    /// `None` when no investigation is running.
+    pub investigation_rx: Option<mpsc::Receiver<StreamEvent>>,
+    /// Accumulates tokens from the investigation round until `Done`.
+    pub investigation_buf: String,
+    /// Adaptive round-limit hint computed from `sessions.jsonl` history at
+    /// the start of each conversation (Phase 4.2).  `Some(n)` is shown as a
+    /// dim hint in the input area before the first submit; `None` means not
+    /// enough historical data yet (< 3 matching sessions).
+    /// Cleared to `None` after the first submit so it doesn't clutter later rounds.
+    pub round_hint: Option<usize>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -380,6 +399,8 @@ pub enum AgentStatus {
     Compressing,
     /// Auto-Janitor completed; shown until the next submit clears it.
     JanitorDone,
+    /// Investigation subagent round is running.
+    Investigating,
 }
 
 impl AgentStatus {
@@ -397,6 +418,7 @@ impl AgentStatus {
             AgentStatus::Retrying { attempt, max } => Some(format!("retrying ({attempt}/{max})…")),
             AgentStatus::Compressing => Some("auto-janitor: compressing…".to_string()),
             AgentStatus::JanitorDone => Some("auto-janitor: context compressed ✓".to_string()),
+            AgentStatus::Investigating => Some("investigating…".to_string()),
         }
     }
 }

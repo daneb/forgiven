@@ -110,13 +110,21 @@ impl AgentPanel {
         }
 
         let prompt = format!(
-            "Summarise the technical decisions, key findings, and important context \
-             from the conversation below into a concise bulleted list. \
-             Discard chit-chat and completed throwaway tasks. \
-             Focus on what would be expensive to re-discover. \
-             IMPORTANT: also preserve verbatim any open questions you posed to the \
-             user, pending decisions, and the immediate next step — the user may be \
-             about to reply to these.\n\n\
+            "Summarise the conversation below into the following fixed sections.\n\
+             Use EXACTLY these headers — no others.\n\n\
+             ## Files changed\n\
+             One line per file: `path/to/file — what changed` (omit section if none).\n\n\
+             ## Key decisions\n\
+             Bullet each architecture or design decision made. Include ADR references if mentioned.\n\n\
+             ## Open questions\n\
+             Verbatim copy of any question posed to the user that has not yet been answered.\n\n\
+             ## Next step\n\
+             One sentence: the immediate next action when the session resumes.\n\n\
+             ## Context notes\n\
+             Any non-obvious facts (gotchas, key file locations, invariants) that would be \
+             expensive to re-discover.\n\n\
+             Discard completed throwaway tasks, status narration, and tool-call transcripts. \
+             Be maximally concise in every section.\n\n\
              <conversation>\n{history_text}\n</conversation>"
         );
 
@@ -157,8 +165,9 @@ impl AgentPanel {
         self.tasks.clear();
         self.input = prompt;
         self.janitor_compressing = true;
-        // Reset so the warning can fire again if the next session also approaches the limit.
+        // Reset so the warnings can fire again if the next session also approaches the limit.
         self.context_near_limit_warned = false;
+        self.session_total_100k_warned = false;
     }
 }
 

@@ -170,6 +170,8 @@ pub enum Action {
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
     AgentJanitorCompress, // SPC a j — summarise + compress chat history
+    // Investigation subagent (Phase 3.3)
+    AgentInvestigate, // SPC a v — run input as a single-round investigation query
     // Checkpoints / session undo (ADR 0112)
     AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
     // Multi-file review / change set view (ADR 0113)
@@ -357,6 +359,9 @@ impl KeyHandler {
         agent_node
             .children
             .insert('u', KeyNode::leaf("revert session (undo agent)", Action::AgentSessionRevert));
+        agent_node
+            .children
+            .insert('v', KeyNode::leaf("investigate (single-round)", Action::AgentInvestigate));
         agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
         tree.insert('a', agent_node);
 

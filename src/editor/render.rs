@@ -469,6 +469,10 @@ impl Editor {
                 recent_logs: recent_logs_owned.as_slice(),
                 agent_session_tokens,
                 agent_ctx_breakdown: self.agent_panel.last_breakdown,
+                observation_mask_threshold_chars: self
+                    .config
+                    .agent
+                    .observation_mask_threshold_chars,
                 mcp_call_log: self
                     .mcp_manager
                     .as_ref()

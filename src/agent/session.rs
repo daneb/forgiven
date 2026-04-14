@@ -53,6 +53,79 @@ pub fn append_session_metric(record: &serde_json::Value) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Session-end efficiency record (Phase 4.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write a `"session_end"` record to `sessions.jsonl` capturing the efficiency
+/// signal for this conversation boundary.
+///
+/// `ended_by` is either `"new_conversation"` or `"janitor"`.
+/// Only call when `session_rounds > 0` — skip empty sessions.
+pub fn append_session_end_record(
+    model: &str,
+    session_prompt_total: u32,
+    session_completion_total: u32,
+    session_rounds: u32,
+    files_changed: usize,
+    ended_by: &str,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    append_session_metric(&serde_json::json!({
+        "type": "session_end",
+        "ts": ts,
+        "model": model,
+        "session_prompt_total": session_prompt_total,
+        "session_completion_total": session_completion_total,
+        "session_rounds": session_rounds,
+        "files_changed": files_changed,
+        "ended_by": ended_by,
+    }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adaptive round-limit hint (Phase 4.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read the last 200 `"session_end"` records from `sessions.jsonl` for `model`
+/// and return the median `session_rounds + 2` as a suggested round ceiling.
+///
+/// Returns `None` when:
+/// - the file doesn't exist or can't be read,
+/// - fewer than 3 matching records are found (not enough history),
+/// - or the median would equal the default (no change needed).
+pub fn suggest_max_rounds(model: &str) -> Option<usize> {
+    let path = metrics_data_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+
+    let mut rounds: Vec<u64> = content
+        .lines()
+        .rev()
+        .take(200)
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if v.get("type")?.as_str()? != "session_end" {
+                return None;
+            }
+            if v.get("model")?.as_str()? != model {
+                return None;
+            }
+            v.get("session_rounds")?.as_u64()
+        })
+        .collect();
+
+    if rounds.len() < 3 {
+        return None;
+    }
+
+    rounds.sort_unstable();
+    let median = rounds[rounds.len() / 2] as usize;
+    Some(median + 2)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Session checkpoint / revert
 // ─────────────────────────────────────────────────────────────────────────────
 
