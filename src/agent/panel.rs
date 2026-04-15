@@ -2082,7 +2082,7 @@ Available tools:\n\
 
     /// Cancel the ask_user_input dialog; sends an empty string to the agentic loop.
     pub fn cancel_user_input(&mut self) {
-        if let Some(_) = self.asking_user_input.take() {
+        if self.asking_user_input.take().is_some() {
             if let Some(ref tx) = self.question_tx {
                 let echo = "\n\n→ *(cancelled)*".to_string();
                 match self.streaming_reply.as_mut() {
