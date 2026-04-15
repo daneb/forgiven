@@ -143,6 +143,41 @@ pub(super) async fn dispatch_tools(
                 Ok(Some(ans)) => ans,
                 Ok(None) | Err(_) => options.last().cloned().unwrap_or_else(|| "No".to_string()),
             }
+        } else if call.name == "ask_user_input" {
+            // Parse question + placeholder, emit an AskingUserInput event, and block until
+            // the user types and confirms (or the 5-minute timeout fires).
+            let args_val =
+                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+            let question = args_val
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Please provide input")
+                .to_string();
+            let placeholder =
+                args_val.get("placeholder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let _ = tx
+                .send(StreamEvent::AskingUserInput {
+                    question: question.clone(),
+                    placeholder: placeholder.clone(),
+                })
+                .await;
+
+            let answer = tokio::select! {
+                _ = &mut *abort_rx => {
+                    let _ = tx.send(StreamEvent::Done).await;
+                    return DispatchOutcome::Abort;
+                }
+                res = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(300),
+                    question_rx.recv(),
+                ) => res,
+            };
+
+            match answer {
+                Ok(Some(ans)) => ans,
+                Ok(None) | Err(_) => String::new(),
+            }
         } else if let Some(ref mcp) = mcp_manager {
             if mcp.is_mcp_tool(&call.name) {
                 mcp.call_tool(&call.name, &call.arguments).await

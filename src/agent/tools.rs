@@ -230,6 +230,27 @@ pub fn tool_definitions() -> serde_json::Value {
                     "required": ["question"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_user_input",
+                "description": "Pause and ask the user for free-text input before proceeding. Use when you need the user to type something (e.g. a name, a slug, a path, a description). The user sees a text input field and types their answer.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question to display to the user."
+                        },
+                        "placeholder": {
+                            "type": "string",
+                            "description": "Optional hint text shown inside the empty input field (e.g. \"my-feature\")."
+                        }
+                    },
+                    "required": ["question"]
+                }
+            }
         }
     ])
 }

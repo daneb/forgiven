@@ -637,7 +637,9 @@ Skip anything already obvious from reading the code.";
             // ── Investigation subagent (Phase 3.3) ──────────────────────────
             Action::AgentInvestigate => {
                 if self.agent_panel.input.trim().is_empty() {
-                    self.set_status("Type a query first, then press SPC a v".to_string());
+                    self.set_status(
+                        "Clear input first (Ctrl+Bksp), type a query, then SPC a v".to_string(),
+                    );
                 } else {
                     self.agent_panel.visible = true;
                     self.mode = Mode::Agent;

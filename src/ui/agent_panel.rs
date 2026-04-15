@@ -453,6 +453,10 @@ impl UI {
         if let Some(ref state) = panel.asking_user {
             Self::render_ask_user_dialog(frame, state, area);
         }
+
+        if let Some(ref state) = panel.asking_user_input {
+            Self::render_ask_user_input_dialog(frame, state, area);
+        }
     }
 
     /// Render the slash-command autocomplete dropdown just above the input box.
@@ -802,6 +806,114 @@ impl UI {
         // always visible at the bottom (question text scrolls off the top).
         let scroll_row = content_height.saturating_sub(inner.height);
 
+        let para = Paragraph::new(all_lines).wrap(Wrap { trim: false }).scroll((scroll_row, 0));
+        frame.render_widget(para, inner);
+    }
+
+    /// Render the ask_user_input free-text dialog anchored to the bottom of the agent panel.
+    pub(super) fn render_ask_user_input_dialog(
+        frame: &mut Frame,
+        state: &AskUserInputState,
+        area: Rect,
+    ) {
+        let dialog_width = ((area.width * 92) / 100).max(20);
+        let inner_w = dialog_width.saturating_sub(2) as usize;
+
+        // ── Build question lines ─────────────────────────────────────────────
+        let q_style = Style::default().fg(Color::White);
+        let mut q_display_rows: u16 = 0;
+        let q_lines: Vec<Line> = state
+            .question
+            .lines()
+            .flat_map(|raw_line| {
+                let trimmed = raw_line.trim();
+                if trimmed.is_empty() {
+                    q_display_rows += 1;
+                    return vec![Line::from("")];
+                }
+                let wrapped = if inner_w == 0 {
+                    1u16
+                } else {
+                    (trimmed.chars().count() as u16).div_ceil(inner_w as u16).max(1)
+                };
+                q_display_rows += wrapped;
+                vec![Line::from(Span::styled(trimmed.to_string(), q_style))]
+            })
+            .collect();
+
+        // ── Build the single-line text input field ───────────────────────────
+        // Show typed text with a block-cursor character at the insertion point.
+        let display_text = if state.input.is_empty() {
+            // Show placeholder in dark gray when nothing has been typed yet.
+            let ph = if state.placeholder.is_empty() { "type here…" } else { &state.placeholder };
+            Span::styled(ph.to_string(), Style::default().fg(Color::DarkGray))
+        } else {
+            // Split at cursor to insert a highlighted cursor block.
+            let before = &state.input[..state.cursor];
+            let cursor_char = state.input[state.cursor..]
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            let after_start = state.cursor + cursor_char.len();
+            let after = &state.input[after_start.min(state.input.len())..];
+            // Build as a multi-span line below; return a placeholder span here.
+            let _ = (before, cursor_char, after); // used in input_line below
+            Span::styled(String::new(), Style::default()) // placeholder, replaced below
+        };
+
+        let input_line = if state.input.is_empty() {
+            Line::from(display_text)
+        } else {
+            let before = &state.input[..state.cursor];
+            let cursor_ch = state.input[state.cursor..]
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            let after_start = state.cursor
+                + state.input[state.cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+            let after = &state.input[after_start.min(state.input.len())..];
+            Line::from(vec![
+                Span::styled(before.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    cursor_ch,
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(after.to_string(), Style::default().fg(Color::White)),
+            ])
+        };
+
+        let hint_line = Line::from(Span::styled(
+            "Type · Enter = confirm   Esc = cancel",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        // Height: question rows + blank + input + blank + hint + 2 borders.
+        let content_height = q_display_rows + 4; // blank + input + blank + hint
+        let dialog_height = (content_height + 2).min(area.height.saturating_sub(2));
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + area.height.saturating_sub(dialog_height);
+        let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .title(" ❓ Question ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let mut all_lines = q_lines;
+        all_lines.push(Line::from(""));
+        all_lines.push(input_line);
+        all_lines.push(Line::from(""));
+        all_lines.push(hint_line);
+
+        let scroll_row = (all_lines.len() as u16).saturating_sub(inner.height);
         let para = Paragraph::new(all_lines).wrap(Wrap { trim: false }).scroll((scroll_row, 0));
         frame.render_widget(para, inner);
     }

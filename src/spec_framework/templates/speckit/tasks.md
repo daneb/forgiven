@@ -8,7 +8,9 @@ an implementation agent can follow step-by-step without ambiguity.
 The user context below begins with the feature name (the same slug used in the earlier
 phases). All files for this feature live under `docs/spec/features/<feature-name>/`.
 
-If no feature name is provided, ask the user for one before proceeding.
+If no feature name is provided, call `ask_user_input` with question
+"Provide the feature name (slug) under `docs/spec/features/<feature-name>/` (e.g. `user-auth`)."
+and placeholder `"my-feature"` before proceeding.
 
 ## Steps
 

@@ -160,6 +160,16 @@ pub struct AskUserState {
     pub selected: usize,
 }
 
+/// State for the ask_user_input free-text dialog while the agent is waiting for a response.
+#[derive(Debug, Clone)]
+pub struct AskUserInputState {
+    pub question: String,
+    pub placeholder: String,
+    pub input: String,
+    /// Byte index of the cursor within `input`.
+    pub cursor: usize,
+}
+
 /// State for the slash-command autocomplete dropdown.
 #[derive(Debug, Clone)]
 pub struct SlashMenuState {
@@ -299,6 +309,8 @@ pub struct AgentPanel {
     pub question_tx: Option<mpsc::UnboundedSender<String>>,
     /// Set when the agent has asked a question and is waiting for the user to respond.
     pub asking_user: Option<AskUserState>,
+    /// Set when the agent has requested free-text input and is waiting for the user to type.
+    pub asking_user_input: Option<AskUserInputState>,
     /// Slash-command autocomplete dropdown state. Some while the user is typing a `/` command.
     pub slash_menu: Option<SlashMenuState>,
     /// Context-budget snapshot from the most recent `submit()` call.
@@ -481,6 +493,12 @@ pub enum StreamEvent {
     AskingUser {
         question: String,
         options: Vec<String>,
+    },
+    /// Agent is asking the user for free-text input and waiting for them to type.
+    /// The loop is paused; the typed string is returned via the question channel.
+    AskingUserInput {
+        question: String,
+        placeholder: String,
     },
     Done,
     Error(String),

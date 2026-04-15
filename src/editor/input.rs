@@ -409,6 +409,47 @@ impl Editor {
     /// Handle keys in PickBuffer mode
     /// Handle keys while the agent panel is focused.
     pub(super) fn handle_agent_mode(&mut self, key: KeyEvent) -> Result<()> {
+        // ── Leader key sequences (e.g. SPC a v) from Agent mode ──────────────
+        // Forward Space (when input is empty, so it can't corrupt typed text)
+        // and any already-in-progress leader sequence to the normal-mode handler.
+        // This mirrors the same forwarding in Visual / VisualLine mode.
+        let input_empty = self.agent_panel.input.is_empty();
+        if (key.code == KeyCode::Char(' ') && input_empty) || self.key_handler.leader_active() {
+            let action = self.key_handler.handle_normal(key);
+            if !matches!(action, Action::Noop) {
+                return self.execute_action(action);
+            }
+            if self.key_handler.leader_active() {
+                return Ok(()); // sequence still in-flight — don't fall through to input_char
+            }
+        }
+
+        // If the agent is waiting for free-text input, intercept all keys for the input dialog.
+        if self.agent_panel.asking_user_input.is_some() {
+            match key.code {
+                KeyCode::Char(c) if key.modifiers.is_empty() => {
+                    self.agent_panel.type_char_to_input(c);
+                },
+                KeyCode::Backspace => {
+                    self.agent_panel.backspace_input();
+                },
+                KeyCode::Left => {
+                    self.agent_panel.move_input_cursor(-1);
+                },
+                KeyCode::Right => {
+                    self.agent_panel.move_input_cursor(1);
+                },
+                KeyCode::Enter => {
+                    self.agent_panel.confirm_user_input();
+                },
+                KeyCode::Esc => {
+                    self.agent_panel.cancel_user_input();
+                },
+                _ => {},
+            }
+            return Ok(());
+        }
+
         // If the agent is waiting for a question answer, intercept all keys for the dialog.
         if self.agent_panel.asking_user.is_some() {
             match key.code {

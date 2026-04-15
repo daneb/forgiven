@@ -10,8 +10,8 @@ use super::auth::{exchange_token, load_oauth_token};
 use super::models::fetch_models_for_provider;
 use super::provider::{ProviderKind, ProviderSettings};
 use super::{
-    append_session_metric, AgentPanel, AgentStatus, AgentTask, AskUserState, ChatMessage,
-    ClipboardImage, ModelVersion, Role, SlashMenuState, StreamEvent, SubmitCtx,
+    append_session_metric, AgentPanel, AgentStatus, AgentTask, AskUserInputState, AskUserState,
+    ChatMessage, ClipboardImage, ModelVersion, Role, SlashMenuState, StreamEvent, SubmitCtx,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +177,7 @@ impl AgentPanel {
             session_start_secs: 0,
             question_tx: None,
             asking_user: None,
+            asking_user_input: None,
             slash_menu: None,
             file_blocks: Vec::new(),
             at_picker: None,
@@ -1605,6 +1606,15 @@ Available tools:\n\
                         active = true;
                         self.asking_user = Some(AskUserState { question, options, selected: 0 });
                     },
+                    Ok(StreamEvent::AskingUserInput { question, placeholder }) => {
+                        active = true;
+                        self.asking_user_input = Some(AskUserInputState {
+                            question,
+                            placeholder,
+                            input: String::new(),
+                            cursor: 0,
+                        });
+                    },
                     Ok(StreamEvent::Retrying { attempt, max }) => {
                         active = true;
                         self.status = AgentStatus::Retrying { attempt, max };
@@ -1735,6 +1745,7 @@ Available tools:\n\
                             self.continuation_tx = None;
                             self.question_tx = None;
                             self.asking_user = None;
+                            self.asking_user_input = None;
                             self.awaiting_continuation = false;
                             self.current_round = 0;
                             self.status = AgentStatus::JanitorDone;
@@ -1828,6 +1839,7 @@ Available tools:\n\
                         self.continuation_tx = None;
                         self.question_tx = None;
                         self.asking_user = None;
+                        self.asking_user_input = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
                         self.status = AgentStatus::Idle;
@@ -1846,6 +1858,7 @@ Available tools:\n\
                         self.continuation_tx = None;
                         self.question_tx = None;
                         self.asking_user = None;
+                        self.asking_user_input = None;
                         self.awaiting_continuation = false;
                         self.current_round = 0;
                         self.status = AgentStatus::Idle;
@@ -1977,6 +1990,7 @@ Available tools:\n\
         self.continuation_tx = None;
         self.question_tx = None;
         self.asking_user = None;
+        self.asking_user_input = None;
         self.awaiting_continuation = false;
         self.current_round = 0;
         self.status = AgentStatus::Idle;
@@ -2003,6 +2017,79 @@ Available tools:\n\
             let n = state.options.len();
             if n > 0 {
                 state.selected = (state.selected as i32 + delta).rem_euclid(n as i32) as usize;
+            }
+        }
+    }
+
+    /// Insert a character at the current cursor position in the ask_user_input field.
+    pub fn type_char_to_input(&mut self, c: char) {
+        if let Some(ref mut state) = self.asking_user_input {
+            state.input.insert(state.cursor, c);
+            state.cursor += c.len_utf8();
+        }
+    }
+
+    /// Delete the character immediately before the cursor in the ask_user_input field.
+    pub fn backspace_input(&mut self) {
+        if let Some(ref mut state) = self.asking_user_input {
+            if state.cursor > 0 {
+                // Find the start of the previous character (handles multi-byte).
+                let prev =
+                    state.input[..state.cursor].char_indices().last().map(|(i, _)| i).unwrap_or(0);
+                state.input.remove(prev);
+                state.cursor = prev;
+            }
+        }
+    }
+
+    /// Move the cursor left or right in the ask_user_input field.
+    pub fn move_input_cursor(&mut self, delta: i32) {
+        if let Some(ref mut state) = self.asking_user_input {
+            if delta < 0 {
+                // Move left: find previous char boundary.
+                if state.cursor > 0 {
+                    state.cursor = state.input[..state.cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
+            } else {
+                // Move right: advance by next char length.
+                if state.cursor < state.input.len() {
+                    let ch = state.input[state.cursor..].chars().next().unwrap();
+                    state.cursor += ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// Confirm the typed text and send it back to the agentic loop.
+    pub fn confirm_user_input(&mut self) {
+        if let Some(ref state) = self.asking_user_input.take() {
+            if let Some(ref tx) = self.question_tx {
+                let answer = state.input.trim().to_string();
+                let echo =
+                    format!("\n\n→ **{}**", if answer.is_empty() { "(empty)" } else { &answer });
+                match self.streaming_reply.as_mut() {
+                    Some(r) => r.push_str(&echo),
+                    None => self.streaming_reply = Some(echo),
+                }
+                let _ = tx.send(answer);
+            }
+        }
+    }
+
+    /// Cancel the ask_user_input dialog; sends an empty string to the agentic loop.
+    pub fn cancel_user_input(&mut self) {
+        if let Some(_) = self.asking_user_input.take() {
+            if let Some(ref tx) = self.question_tx {
+                let echo = "\n\n→ *(cancelled)*".to_string();
+                match self.streaming_reply.as_mut() {
+                    Some(r) => r.push_str(&echo),
+                    None => self.streaming_reply = Some(echo),
+                }
+                let _ = tx.send(String::new());
             }
         }
     }
