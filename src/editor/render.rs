@@ -582,6 +582,11 @@ impl Editor {
                 } else {
                     None
                 },
+                insights_dashboard: if mode == Mode::InsightsDashboard {
+                    self.insights_dashboard.as_ref()
+                } else {
+                    None
+                },
                 soft_wrap: self.config.soft_wrap,
             };
             UI::render(frame, &ctx);

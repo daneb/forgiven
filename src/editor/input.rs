@@ -122,6 +122,7 @@ impl Editor {
             Mode::LspRename => self.handle_lsp_rename_mode(key)?,
             Mode::InlineAssist => self.handle_inline_assist_mode(key)?,
             Mode::ReviewChanges => self.handle_review_changes_mode(key)?,
+            Mode::InsightsDashboard => self.handle_insights_dashboard_mode(key)?,
         }
 
         Ok(())
@@ -1103,6 +1104,31 @@ impl Editor {
                             self.set_status("Pattern not found".to_string());
                         }
                     }
+                }
+            },
+            // :insights summarize — generate LLM narrative (Phase 4, ADR 0129)
+            "insights summarize" => {
+                self.generate_insights_narrative(20);
+            },
+            // :insights — show collaboration analytics from forgiven.log
+            "insights" => {
+                let log_path = crate::config::Config::log_path()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
+                match crate::insights::parse_log_file(&log_path) {
+                    Some(summary) => {
+                        let report = summary.format_report();
+                        self.agent_panel.visible = true;
+                        self.agent_panel.messages.push(crate::agent::ChatMessage {
+                            role: crate::agent::Role::Assistant,
+                            content: report,
+                            images: vec![],
+                        });
+                        self.agent_panel.scroll_to_bottom();
+                        self.set_status("Insights loaded".to_string());
+                    },
+                    None => {
+                        self.set_status(format!("No log found at {}", log_path.display()));
+                    },
                 }
             },
             // :12 — jump to line 12 (1-based), same as vim

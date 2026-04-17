@@ -146,6 +146,7 @@ impl AgentPanel {
                         "role": msg.role.as_str(),
                         "content": msg.content,
                         "ts": now_secs,
+                        "char_count": msg.content.len(),
                     });
                     let _ = writeln!(f, "{}", line);
                 }

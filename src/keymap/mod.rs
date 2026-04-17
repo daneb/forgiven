@@ -8,29 +8,30 @@ pub enum Mode {
     Normal,
     Insert,
     Command,
-    Visual,          // character-wise visual selection (v)
-    VisualLine,      // line-wise visual selection (V)
-    PickBuffer,      // For buffer selection UI
-    PickFile,        // For file finder UI
-    Agent,           // Copilot Chat / agent panel focused
-    Explorer,        // File explorer tree focused
-    MarkdownPreview, // Read-only rendered markdown view (SPC m p toggle)
-    CsvPreview,      // Read-only column-aligned CSV table view (SPC m c toggle)
-    JsonPreview,     // Read-only pretty-printed JSON view (SPC m j toggle)
-    Search,          // Project-wide ripgrep search overlay (SPC s g)
-    InFileSearch,    // In-file search mode (/)
-    RenameFile,      // Rename popup: user edits a filename from the explorer
-    DeleteFile,      // Confirmation popup: y=delete, n/Esc=cancel
-    NewFolder,       // New folder popup: user types a folder name from the explorer
-    CommitMsg,       // Editable commit message popup (SPC g s / SPC g l)
-    ReleaseNotes,    // Release notes generation popup (SPC g n)
-    Diagnostics,     // Read-only diagnostics overlay (SPC d)
-    BinaryFile,      // Unsupported binary file popup: o=open default app, Esc=dismiss
-    LocationList,    // LSP location list overlay (goto-definition / references / symbols)
-    LspHover,        // Read-only hover info popup (K / SPC l h)
-    LspRename,       // LSP rename input popup (SPC l r)
-    InlineAssist,    // Inline AI transform overlay (SPC a i)
-    ReviewChanges,   // Multi-file review / change set view (SPC a r, ADR 0113)
+    Visual,            // character-wise visual selection (v)
+    VisualLine,        // line-wise visual selection (V)
+    PickBuffer,        // For buffer selection UI
+    PickFile,          // For file finder UI
+    Agent,             // Copilot Chat / agent panel focused
+    Explorer,          // File explorer tree focused
+    MarkdownPreview,   // Read-only rendered markdown view (SPC m p toggle)
+    CsvPreview,        // Read-only column-aligned CSV table view (SPC m c toggle)
+    JsonPreview,       // Read-only pretty-printed JSON view (SPC m j toggle)
+    Search,            // Project-wide ripgrep search overlay (SPC s g)
+    InFileSearch,      // In-file search mode (/)
+    RenameFile,        // Rename popup: user edits a filename from the explorer
+    DeleteFile,        // Confirmation popup: y=delete, n/Esc=cancel
+    NewFolder,         // New folder popup: user types a folder name from the explorer
+    CommitMsg,         // Editable commit message popup (SPC g s / SPC g l)
+    ReleaseNotes,      // Release notes generation popup (SPC g n)
+    Diagnostics,       // Read-only diagnostics overlay (SPC d)
+    BinaryFile,        // Unsupported binary file popup: o=open default app, Esc=dismiss
+    LocationList,      // LSP location list overlay (goto-definition / references / symbols)
+    LspHover,          // Read-only hover info popup (K / SPC l h)
+    LspRename,         // LSP rename input popup (SPC l r)
+    InlineAssist,      // Inline AI transform overlay (SPC a i)
+    ReviewChanges,     // Multi-file review / change set view (SPC a r, ADR 0113)
+    InsightsDashboard, // Collaboration analytics overlay (SPC a I, ADR 0129)
 }
 
 /// The semantic kind of a tree-sitter text object.
@@ -176,6 +177,8 @@ pub enum Action {
     AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
     // Multi-file review / change set view (ADR 0113)
     ReviewChangesOpen, // SPC a r — open review overlay for all agent-touched files
+    // Insights dashboard (ADR 0129 Phase 3)
+    InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -363,6 +366,9 @@ impl KeyHandler {
             .children
             .insert('v', KeyNode::leaf("investigate (single-round)", Action::AgentInvestigate));
         agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
+        agent_node
+            .children
+            .insert('I', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

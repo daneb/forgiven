@@ -131,6 +131,12 @@ that motivated it, what was decided, and the consequences.
 | [0121](0121-janitor-deferred-trigger-and-context-grounding.md) | Auto-Janitor: Deferred Trigger and Context Grounding | Accepted |
 | [0122](0122-no-duplicate-file-buffers.md) | No Duplicate File Buffers | Accepted |
 | [0123](0123-context-management-v2-observation-masking-and-disk-persistence.md) | Context Management v2: Observation Masking + Disk Persistence | Implemented |
+| [0124](0124-agent-input-history-cursor-and-label-rename.md) | Agent Input History, Mid-line Cursor, and Label Rename | Accepted |
+| [0125](0125-csv-and-json-preview-modes.md) | CSV and JSON Preview Modes | Accepted |
+| [0126](0126-token-efficiency-llm-interaction-quality-analysis.md) | Token Efficiency and LLM Interaction Quality Analysis | Accepted |
+| [0127](0127-dependency-audit-and-suppression-policy.md) | Dependency Audit and Advisory Suppression Policy | Accepted |
+| [0128](0128-investigation-subagent.md) | Investigation Subagent (`SPC a v`) | Accepted |
+| [0129](0129-insights-dashboard.md) | Insights Dashboard: Collaboration Analytics | Accepted |
 
 ## What is an ADR?
 

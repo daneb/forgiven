@@ -192,6 +192,7 @@ impl AgentPanel {
             investigation_rx: None,
             investigation_buf: String::new(),
             round_hint: None,
+            pending_tool_calls: Vec::new(),
         }
     }
 
@@ -607,6 +608,7 @@ impl AgentPanel {
         self.session_created_files.clear();
         self.context_near_limit_warned = false;
         self.session_total_100k_warned = false;
+        self.pending_tool_calls.clear();
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -826,6 +828,16 @@ impl AgentPanel {
         }
         let model_id = self.selected_model_id().to_string();
         self.last_submit_model = model_id.clone();
+
+        // Write a session_start record on the very first submit of a new
+        // conversation (session_rounds == 0 before the first Done increments it).
+        if self.session_rounds == 0 {
+            super::append_session_start_record(
+                &model_id,
+                self.provider.display_name(),
+                project_root.to_str().unwrap_or(""),
+            );
+        }
 
         // ── Build provider settings for this invocation ──────────────────────
         let chat_endpoint = match &self.provider {
@@ -1548,9 +1560,10 @@ Available tools:\n\
                             }
                         }
                     },
-                    Ok(StreamEvent::ToolDone { name, result_summary }) => {
+                    Ok(StreamEvent::ToolDone { name, result_summary, success }) => {
                         active = true;
                         self.status = AgentStatus::WaitingForResponse { round: self.current_round };
+                        self.pending_tool_calls.push((name.clone(), success));
                         if !matches!(name.as_str(), "create_task" | "complete_task") {
                             if let Some(r) = self.streaming_reply.as_mut() {
                                 r.push_str(&format!(" → {result_summary}"));
@@ -1675,6 +1688,13 @@ Available tools:\n\
                         }
                     },
                     Ok(StreamEvent::Done) => {
+                        // Flush accumulated tool calls to history JSONL before
+                        // the assistant reply is pushed, so the record is ordered
+                        // before the final text response in the file.
+                        let round_tools = std::mem::take(&mut self.pending_tool_calls);
+                        if !round_tools.is_empty() {
+                            super::append_round_tools(self.session_start_secs, &round_tools);
+                        }
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
                                 self.messages.push(ChatMessage {

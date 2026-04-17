@@ -232,6 +232,22 @@ pub(super) async fn dispatch_tools(
             result
         };
 
+        // Write a tool_error record to sessions.jsonl for failed tool calls
+        // so Phase 3 can break down error types without re-parsing log files.
+        let success = !result.starts_with("error");
+        if !success {
+            let error_snippet: String = result.chars().take(120).collect();
+            crate::agent::append_session_metric(&serde_json::json!({
+                "type": "tool_error",
+                "ts": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                "tool": call.name,
+                "error": error_snippet,
+            }));
+        }
+
         let result_summary = {
             // Prefer "path (N lines)" summary lines (read_file header) over
             // raw content lines.  Also skip lines that look like code
@@ -267,7 +283,9 @@ pub(super) async fn dispatch_tools(
                 s.to_string()
             }
         };
-        let _ = tx.send(StreamEvent::ToolDone { name: call.name.clone(), result_summary }).await;
+        let _ = tx
+            .send(StreamEvent::ToolDone { name: call.name.clone(), result_summary, success })
+            .await;
 
         messages.push(serde_json::json!({
             "role": "tool",

@@ -62,6 +62,7 @@ mod csv_preview;
 mod editor;
 mod explorer;
 mod highlight;
+mod insights;
 mod json_preview;
 mod keymap;
 mod lsp;

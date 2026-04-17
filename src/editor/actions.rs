@@ -681,6 +681,16 @@ Skip anything already obvious from reading the code.";
                     self.mode = Mode::ReviewChanges;
                 }
             },
+            // ── Insights dashboard (ADR 0129 Phase 3) ────────────────────────
+            Action::InsightsDashboardOpen => {
+                let data_dir = crate::config::Config::log_path()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                let insights = crate::insights::build_insights(&data_dir);
+                self.insights_dashboard =
+                    Some(crate::insights::panel::InsightsDashboardState::new(insights));
+                self.mode = Mode::InsightsDashboard;
+            },
             // ── Session revert (checkpoint undo) ─────────────────────────────
             Action::AgentSessionRevert => {
                 if !self.agent_panel.has_checkpoint() {

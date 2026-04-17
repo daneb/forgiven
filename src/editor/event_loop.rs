@@ -419,6 +419,43 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Insights narrative AI response poll (Phase 4, ADR 0129) ──────────
+            let narrative_done = if let Some(rx) = self.insights_narrative_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(_) => Some(Err(anyhow::anyhow!("insights narrative channel closed"))),
+                }
+            } else {
+                None
+            };
+            if let Some(result) = narrative_done {
+                self.insights_narrative_rx = None;
+                needs_render = true;
+                match result {
+                    Ok(narrative) => {
+                        // Persist to disk so future dashboard opens include the narrative.
+                        if let Some(data_dir) = crate::config::Config::log_path()
+                            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                        {
+                            let _ =
+                                std::fs::write(data_dir.join("insights_narrative.md"), &narrative);
+                        }
+                        // If the dashboard is currently open, hot-reload the narrative.
+                        if let Some(d) = self.insights_dashboard.as_mut() {
+                            d.insights.narrative = Some(narrative);
+                        }
+                        self.set_status(
+                            "Insights narrative ready — open SPC a I to view".to_string(),
+                        );
+                    },
+                    Err(e) => {
+                        self.set_status(format!("Failed to generate insights narrative: {e}"));
+                    },
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // ── MCP background connection poll ────────────────────────────────
             if let Some(rx) = self.mcp_rx.as_mut() {
                 if let Ok(manager) = rx.try_recv() {
@@ -442,6 +479,7 @@ impl Editor {
                 || self.commit_msg.rx.is_some()
                 || self.release_notes.rx.is_some()
                 || self.mcp_rx.is_some()
+                || self.insights_narrative_rx.is_some()
             {
                 needs_render = true;
             }

@@ -154,6 +154,10 @@ pub struct Editor {
     /// Active only while `mode == Mode::ReviewChanges`.
     pub review_changes: Option<ReviewChangesState>,
 
+    // ── Insights dashboard (ADR 0129 Phase 3) ────────────────────────────────
+    /// Active only while `mode == Mode::InsightsDashboard`.
+    pub insights_dashboard: Option<crate::insights::panel::InsightsDashboardState>,
+
     // ── Agent hooks (ADR 0114) ────────────────────────────────────────────────
     /// Per-hook cooldown tracking: `hook_index → last_fired`.
     /// Prevents the same hook from firing more than once per 5 seconds.
@@ -243,6 +247,10 @@ pub struct Editor {
 
     // ── Release notes generation (Mode::ReleaseNotes) ─────────────────────────
     release_notes: ReleaseNotesState,
+
+    // ── Insights narrative generation (Phase 4, ADR 0129) ─────────────────────
+    /// In-flight `:insights summarize` LLM task. Polled each tick.
+    insights_narrative_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
 
     // ── MCP servers ───────────────────────────────────────────────────────────
     /// Manages connected MCP servers and their tool registries.
@@ -368,6 +376,7 @@ impl Editor {
             surround_change_from: None,
             inline_assist: None,
             review_changes: None,
+            insights_dashboard: None,
             hook_cooldowns: std::collections::HashMap::new(),
             last_test_passed: None,
             hooks_firing: false,
@@ -401,6 +410,7 @@ impl Editor {
                 count_input: String::from("10"),
                 ..Default::default()
             },
+            insights_narrative_rx: None,
             mcp_manager: None,
             mcp_rx: None,
             pending_goto_definition: None,

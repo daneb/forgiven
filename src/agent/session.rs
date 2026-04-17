@@ -53,6 +53,59 @@ pub fn append_session_metric(record: &serde_json::Value) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Session-start record (Phase 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write a `"session_start"` record to `sessions.jsonl` on the first submit
+/// of a new conversation.  Provides the start timestamp, model, provider, and
+/// project root that `session_end` lacks, enabling session-duration and
+/// efficiency-ratio queries in Phase 3.
+pub fn append_session_start_record(model: &str, provider: &str, project_root: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    append_session_metric(&serde_json::json!({
+        "type": "session_start",
+        "ts": ts,
+        "model": model,
+        "provider": provider,
+        "project_root": project_root,
+    }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round tool-call record (Phase 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write a `"round_tools"` record to `history/<ts>.jsonl` capturing the tool
+/// calls made during one agent round.  Called from the `Done` event handler
+/// when `pending_tool_calls` is non-empty.
+pub fn append_round_tools(session_start_secs: u64, tools: &[(String, bool)]) {
+    let Some(path) = history_file_path(session_start_secs) else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let entry = serde_json::json!({
+        "type": "round_tools",
+        "ts": ts,
+        "tools": tools.iter()
+            .map(|(name, success)| serde_json::json!({"name": name, "success": success}))
+            .collect::<Vec<_>>(),
+    });
+    use std::io::Write as _;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{entry}"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Session-end efficiency record (Phase 4.1)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -29,7 +29,8 @@ pub use context::{message_importance, ContextBreakdown, SubmitCtx};
 pub use models::suggest_model_for_task;
 pub use provider::ProviderKind;
 pub use session::{
-    append_session_end_record, append_session_metric, history_file_path, suggest_max_rounds,
+    append_round_tools, append_session_end_record, append_session_metric,
+    append_session_start_record, history_file_path, suggest_max_rounds,
 };
 
 use std::path::PathBuf;
@@ -380,6 +381,10 @@ pub struct AgentPanel {
     /// enough historical data yet (< 3 matching sessions).
     /// Cleared to `None` after the first submit so it doesn't clutter later rounds.
     pub round_hint: Option<usize>,
+    /// Tool calls accumulated during the current agent invocation.
+    /// Each entry is `(tool_name, success)`.  Flushed to a `"round_tools"`
+    /// history JSONL record when `StreamEvent::Done` arrives (Phase 2).
+    pub pending_tool_calls: Vec<(String, bool)>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -447,6 +452,8 @@ pub enum StreamEvent {
     ToolDone {
         name: String,
         result_summary: String,
+        /// `true` when the tool result did not start with `"error"`.
+        success: bool,
     },
     /// A file was successfully written or edited by a tool.
     /// The path is project-relative (as passed to the tool).

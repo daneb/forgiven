@@ -233,6 +233,8 @@ pub struct RenderContext<'a> {
     pub inline_assist: Option<InlineAssistView<'a>>,
     /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
     pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
+    /// Insights dashboard overlay data (Mode::InsightsDashboard, ADR 0129).
+    pub insights_dashboard: Option<&'a crate::insights::panel::InsightsDashboardState>,
     /// When `true`, long lines are visually wrapped at the viewport edge.
     pub soft_wrap: bool,
 }
@@ -544,6 +546,11 @@ impl UI {
         // Render review changes overlay (Mode::ReviewChanges, ADR 0113)
         if let Some(review) = ctx.review_changes {
             Self::render_review_changes_overlay(frame, review, size);
+        }
+
+        // Render insights dashboard overlay (Mode::InsightsDashboard, ADR 0129)
+        if let Some(dashboard) = ctx.insights_dashboard {
+            crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
         }
     }
 }
