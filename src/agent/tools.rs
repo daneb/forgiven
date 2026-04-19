@@ -20,8 +20,46 @@ pub fn tool_definitions() -> serde_json::Value {
         {
             "type": "function",
             "function": {
+                "name": "get_file_outline",
+                "description": "Return a compact outline of a file: only top-level definitions (functions, structs, classes, enums, impls, interfaces) with their signatures — no bodies. Use this instead of read_file when you need to understand a file's structure or find where a symbol is defined, then use get_symbol_context or read_file to get the full definition.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path relative to the project root."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_symbol_context",
+                "description": "Return the full definition of a named symbol (function, struct, class, etc.) from a file, plus the signatures of any other symbols it directly calls within the same file. Use this to get focused context on one symbol without loading the entire file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path relative to the project root."
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "description": "Name of the function, struct, class, or other definition to retrieve."
+                        }
+                    },
+                    "required": ["path", "symbol"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_file",
-                "description": "Read the full contents of a file in the project. Returns line-numbered output.",
+                "description": "Read the full contents of a file in the project. Returns line-numbered output. Expensive: the entire file enters context. Prefer get_symbol_context for targeted lookups; use read_file only when you need more than three symbols from the same file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -123,44 +161,6 @@ pub fn tool_definitions() -> serde_json::Value {
         {
             "type": "function",
             "function": {
-                "name": "get_file_outline",
-                "description": "Return a compact outline of a file: only top-level definitions (functions, structs, classes, enums, impls, interfaces) with their signatures — no bodies. Use this instead of read_file when you need to understand a file's structure or find where a symbol is defined, then use get_symbol_context or read_file to get the full definition.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "File path relative to the project root."
-                        }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_symbol_context",
-                "description": "Return the full definition of a named symbol (function, struct, class, etc.) from a file, plus the signatures of any other symbols it directly calls within the same file. Use this to get focused context on one symbol without loading the entire file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "File path relative to the project root."
-                        },
-                        "symbol": {
-                            "type": "string",
-                            "description": "Name of the function, struct, class, or other definition to retrieve."
-                        }
-                    },
-                    "required": ["path", "symbol"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "list_directory",
                 "description": "List files and subdirectories at a path inside the project.",
                 "parameters": {
@@ -172,6 +172,31 @@ pub fn tool_definitions() -> serde_json::Value {
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "expand_result",
+                "description": "Retrieve the full content of a previously truncated tool result. When a tool result was too large to include in full, a summary is shown with an expand_result invitation. Call this with the id shown in that summary to get the complete content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "The tool call id shown in the truncation notice."
+                        },
+                        "range": {
+                            "type": "object",
+                            "description": "Optional byte-range to retrieve a slice of the full content.",
+                            "properties": {
+                                "start": { "type": "integer" },
+                                "end": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "required": ["id"]
                 }
             }
         },
@@ -518,15 +543,25 @@ pub async fn execute_tool(call: &ToolCall, root: &Path) -> String {
             };
             match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
-                    let symbols = extract_symbols(&content);
-                    if symbols.is_empty() {
+                    // Tree-sitter first; fall back to heuristic for unsupported extensions.
+                    let entries: Vec<(usize, String)> = if let Some(ts) =
+                        crate::treesitter::query::ts_extract_symbols(&path, &content)
+                    {
+                        ts.into_iter().map(|s| (s.line, s.signature)).collect()
+                    } else {
+                        extract_symbols(&content)
+                            .into_iter()
+                            .map(|s| (s.line, s.signature))
+                            .collect()
+                    };
+                    if entries.is_empty() {
                         format!("{path_str}: no top-level definitions found")
                     } else {
-                        let lines: Vec<String> = symbols
+                        let lines: Vec<String> = entries
                             .iter()
-                            .map(|s| format!("{:4} | {}", s.line + 1, s.signature))
+                            .map(|(line, sig)| format!("{:4} | {}", line + 1, sig))
                             .collect();
-                        format!("{path_str} — {} definitions:\n{}", symbols.len(), lines.join("\n"))
+                        format!("{path_str} — {} definitions:\n{}", entries.len(), lines.join("\n"))
                     }
                 },
                 Err(e) => format!("error reading {path_str}: {e}"),
@@ -548,7 +583,7 @@ pub async fn execute_tool(call: &ToolCall, root: &Path) -> String {
                 Err(e) => return format!("error: {e}"),
             };
             match tokio::fs::read_to_string(&path).await {
-                Ok(content) => symbol_context(path_str, &content, symbol),
+                Ok(content) => symbol_context(path_str, &path, &content, symbol),
                 Err(e) => format!("error reading {path_str}: {e}"),
             }
         },
@@ -779,9 +814,24 @@ fn find_end_line(lines: &[&str], start: usize) -> usize {
 
 /// Build the `get_symbol_context` response: full body of `symbol` +
 /// signatures of other symbols it calls within the same file.
-fn symbol_context(path_str: &str, source: &str, symbol: &str) -> String {
+///
+/// Tries tree-sitter extraction first; falls back to the heuristic extractor
+/// for file types not covered by the grammar set.
+fn symbol_context(path_str: &str, path: &std::path::Path, source: &str, symbol: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
-    let symbols = extract_symbols(source);
+    let symbols: Vec<SymbolDef> =
+        if let Some(ts) = crate::treesitter::query::ts_extract_symbols(path, source) {
+            ts.into_iter()
+                .map(|s| SymbolDef {
+                    line: s.line,
+                    end_line: s.end_line,
+                    name: s.name,
+                    signature: s.signature,
+                })
+                .collect()
+        } else {
+            extract_symbols(source)
+        };
 
     // Find the requested symbol (case-sensitive exact match first, then prefix).
     let target = symbols

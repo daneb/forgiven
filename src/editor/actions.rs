@@ -553,6 +553,7 @@ Skip anything already obvious from reading the code.";
                 let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
                 let mask_threshold = self.config.agent.observation_mask_threshold_chars;
+                let expand_threshold = self.config.agent.expand_threshold_chars;
                 let fut = self.agent_panel.submit(
                     None,
                     project_root,
@@ -561,6 +562,7 @@ Skip anything already obvious from reading the code.";
                     &preferred_model,
                     auto_compress,
                     mask_threshold,
+                    expand_threshold,
                 );
                 let submit_err = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
@@ -617,6 +619,7 @@ Skip anything already obvious from reading the code.";
                         &preferred_model,
                         auto_compress,
                         mask_threshold,
+                        0, // Don't truncate tool results during janitor compression.
                     );
                     let submit_err = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {

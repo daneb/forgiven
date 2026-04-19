@@ -189,6 +189,7 @@ impl Editor {
         let preferred_model = self.config.active_default_model().to_string();
         let auto_compress = self.config.agent.auto_compress_tool_results;
         let mask_threshold = self.config.agent.observation_mask_threshold_chars;
+        let expand_threshold = self.config.agent.expand_threshold_chars;
 
         let fut = self.agent_panel.submit(
             None,
@@ -198,6 +199,7 @@ impl Editor {
             &preferred_model,
             auto_compress,
             mask_threshold,
+            expand_threshold,
         );
         let submit_err = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -362,6 +364,7 @@ impl Editor {
         let preferred_model = self.config.active_default_model().to_string();
         let auto_compress = self.config.agent.auto_compress_tool_results;
         let mask_threshold = self.config.agent.observation_mask_threshold_chars;
+        let expand_threshold = self.config.agent.expand_threshold_chars;
 
         let fut = self.agent_panel.submit(
             None,
@@ -371,6 +374,7 @@ impl Editor {
             &preferred_model,
             auto_compress,
             mask_threshold,
+            expand_threshold,
         );
         let submit_err = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {

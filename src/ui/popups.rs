@@ -398,6 +398,33 @@ impl UI {
             )]));
         }
 
+        // ── Retrieval tool ratio ──────────────────────────────────────────────
+        if let Some((reads, symbols, outlines)) = data.tool_retrieval_counts {
+            let total_symbol = symbols + outlines;
+            let ratio_text = if reads == 0 {
+                "∞ (no read_file calls)".to_string()
+            } else {
+                format!("{:.1}x", total_symbol as f32 / reads as f32)
+            };
+            let ratio_color =
+                if reads == 0 || total_symbol >= reads { Color::Green } else { Color::Yellow };
+            lines.push(Line::from(vec![
+                Span::styled("  reads    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{reads} read_file"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  /  {symbols} get_symbol_context  /  {outlines} get_file_outline"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  ratio    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("symbol:read_file = {ratio_text}"),
+                    Style::default().fg(ratio_color),
+                ),
+            ]));
+        }
+
         // ── MCP Activity ──────────────────────────────────────────────────────
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(

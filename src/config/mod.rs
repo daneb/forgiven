@@ -416,6 +416,13 @@ pub struct AgentConfig {
     /// Default: 2 000 chars (≈ 500 tokens).
     #[serde(default = "default_observation_mask_threshold")]
     pub observation_mask_threshold_chars: usize,
+    /// Character-length threshold for expand-on-demand tool result truncation.
+    /// Tool results longer than this are stored in an in-memory cache and
+    /// truncated in conversation history; the full content is retrievable via
+    /// the `expand_result` tool.  Set to 0 to disable.
+    /// Default: 800 chars (≈ 200 tokens).
+    #[serde(default = "default_expand_threshold")]
+    pub expand_threshold_chars: usize,
     /// Event-driven hooks that fire the agent automatically.
     /// Defined as `[[agent.hooks]]` in the config file.
     #[serde(default)]
@@ -508,6 +515,9 @@ fn default_agent_warning_threshold() -> usize {
 }
 fn default_observation_mask_threshold() -> usize {
     2000
+}
+fn default_expand_threshold() -> usize {
+    800
 }
 
 impl Default for Config {

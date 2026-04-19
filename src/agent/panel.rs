@@ -193,6 +193,9 @@ impl AgentPanel {
             investigation_buf: String::new(),
             round_hint: None,
             pending_tool_calls: Vec::new(),
+            session_read_file_count: 0,
+            session_symbol_count: 0,
+            session_outline_count: 0,
         }
     }
 
@@ -609,6 +612,9 @@ impl AgentPanel {
         self.context_near_limit_warned = false;
         self.session_total_100k_warned = false;
         self.pending_tool_calls.clear();
+        self.session_read_file_count = 0;
+        self.session_symbol_count = 0;
+        self.session_outline_count = 0;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -627,6 +633,7 @@ impl AgentPanel {
         preferred_model: &str,
         auto_compress: bool,
         observation_mask_threshold_chars: usize,
+        expand_threshold_chars: usize,
     ) -> Result<()> {
         if !self.has_pending_content() {
             return Ok(());
@@ -937,88 +944,39 @@ impl AgentPanel {
             _ => true,
         };
 
-        let planning_rules = if use_planning {
-            "TASK PLANNING RULES:\n\
-0. Use create_task / complete_task ONLY when the job involves 3 or more distinct\n\
-   file operations (creates, rewrites, or edits across different files), OR when\n\
-   the user explicitly asks you to plan or list steps.\n\
-   Do NOT plan for: questions, explanations, single-file edits, or any task\n\
-   completable in 1-2 tool calls. Reading a file before editing it does NOT count\n\
-   as a separate step.\n\
-   When planning IS needed, call create_task ONCE per step BEFORE any file work,\n\
-   keep titles short and imperative (e.g. 'Create Program.cs'), and call\n\
-   complete_task with the exact same title after finishing each step.\n\n"
-        } else {
-            ""
-        };
-
-        let ask_user_rule = if use_planning {
-            "7. Use ask_user ONLY when you genuinely cannot proceed without clarification —\n\
-   e.g., ambiguous destructive actions or mutually exclusive design choices.\n\
-   Do NOT use it to confirm routine read/write operations.\n\n"
+        let planning_conventions = if use_planning {
+            "- Tasks (≥3 distinct file ops): create_task per step before work; complete_task after.\n\
+- ask_user: only for ambiguous destructive actions or mutually exclusive design choices.\n"
         } else {
             ""
         };
 
         let planning_tool_entries = if use_planning {
-            "- create_task          Register a planned step (call once per step before file work).\n\
-- complete_task        Mark a step done (call after finishing each step).\n\
-- ask_user             Show the user a question dialog and wait for their choice.\n"
+            "- create_task, complete_task — plan/track multi-step jobs\n\
+- ask_user, ask_user_input — ask user a question or collect free-text input\n"
         } else {
             ""
         };
 
         let tool_rules = format!(
-            "MANDATORY PROTOCOL — follow these rules without exception:\n\
+            "CONVENTIONS:\n\
+- Symbol tools first: get_file_outline → get_symbol_context before read_file.\n\
+  Use read_file only when you need more than 3 symbols from the same file.\n\
+- Edits: edit_file over write_file; copy old_str verbatim; retry with fresh read on mismatch.\n\
+- Batch: read_files([…]) over repeated read_file; search_files over read_file+scan.\n\
+- Work silently; write one concise summary after all tools finish.\n\
+{planning_conventions}\
+- Memory (when tools available): search_nodes(\"project context\") on first call;\n\
+  add_observations for non-obvious discoveries; persist key facts at session end.\n\
 \n\
-{planning_rules}\
-COMMUNICATION RULES:\n\
-6. Do NOT output any text while working through tool calls. Work silently.\n\
-   After ALL tools have finished, ALWAYS write a concise summary of what was\n\
-   accomplished (files changed, what was added/removed/fixed, and any caveats).\n\
-   Do not narrate steps, explain retries, or announce what you are about to do.\n\
-7. Be maximally concise in every response. No filler phrases, no hedging, no\n\
-   pleasantries. If the answer is one sentence, write one sentence. Never use\n\
-   'Certainly!', 'Of course', 'I'll now...', or similar preamble. State only\n\
-   what changed and why — nothing else.\n\
-{ask_user_rule}\
-FILE EDITING RULES:\n\
-1. Before editing a file, prefer get_file_outline to understand its structure,\n\
-   then get_symbol_context to get the specific symbol you need. Only fall back\n\
-   to read_file when you need the full contents (e.g. for a new file or a\n\
-   write_file rewrite). This saves tokens.\n\
-2. Copy old_str VERBATIM from the tool output, including all whitespace,\n\
-   indentation, and surrounding lines needed to make it unique in the file.\n\
-3. If edit_file returns an error, call get_symbol_context or read_file again\n\
-   to get the current content and retry with the correct old_str.\n\
-   Do NOT retry with the same old_str.\n\
-4. Prefer edit_file over write_file for any change to an existing file.\n\
-5. Use list_directory only if the project tree above is insufficient.\n\
-6. When you need several files, use read_files([...]) instead of multiple\n\
-   read_file calls. Use search_files(pattern, [...]) instead of read_file + scan.\n\
-\n\
-MEMORY RULES (only when memory tools are available):\n\
-- FIRST CALL on any new session: search_nodes(query='project context') BEFORE\n\
-  responding to the user. This surfaces prior architecture decisions and key file\n\
-  locations so you avoid re-discovering them.\n\
-  Example: search_nodes({{\"query\": \"project context\"}})\n\
-- During work: call add_observations when you discover non-obvious facts about\n\
-  the codebase (architecture decisions, gotchas, key file locations).\n\
-- At the END of a significant session: create_entities + add_observations to\n\
-  persist what you learned for future sessions.\n\
-\n\
-Available tools:\n\
-{planning_tool_entries}\
-- get_file_outline     List all top-level definitions in a file (signatures only, no bodies).\n\
-                       Use this first to find where a symbol lives — much cheaper than read_file.\n\
-- get_symbol_context   Get the full body of one symbol + signatures of what it calls.\n\
-                       Use after get_file_outline to get focused context before an edit.\n\
-- read_file            Read a file's full line-numbered content. Use when full content is needed.\n\
-- read_files           Read multiple files in one call (preferred over repeated read_file).\n\
-- search_files         Search for a pattern across files/directories (returns file:line: text).\n\
-- write_file           Write a complete file (for new files or full rewrites only).\n\
-- edit_file            Surgical find-and-replace. old_str must match EXACTLY once.\n\
-- list_directory       List a directory's contents.\n"
+Tools:\n\
+- get_file_outline, get_symbol_context — symbol-level retrieval (prefer these)\n\
+- read_file — full file (expensive; use when >3 symbols needed)\n\
+- read_files, search_files — batch reads and pattern search\n\
+- write_file, edit_file — create/overwrite or surgical find-and-replace\n\
+- list_directory — list directory contents\n\
+- expand_result(id) — retrieve full content of a truncated tool result\n\
+{planning_tool_entries}"
         );
 
         // Only include the full project tree on round 1 (session_rounds == 0).
@@ -1319,6 +1277,7 @@ Available tools:\n\
             abort_rx,
             mcp,
             auto_compress,
+            expand_threshold_chars,
         ));
         Ok(())
     }
@@ -1411,6 +1370,7 @@ Available tools:\n\
             abort_rx,
             None,  // no MCP manager
             false, // auto_compress
+            0,     // expand_threshold — disabled for inline assist
         ));
 
         Ok((rx, abort_tx))
@@ -1511,6 +1471,7 @@ Available tools:\n\
             abort_rx,
             mcp,
             false, // auto_compress
+            0,     // expand_threshold — disabled for investigation subagent
         ));
 
         self.investigation_rx = Some(rx);
@@ -1694,6 +1655,18 @@ Available tools:\n\
                         let round_tools = std::mem::take(&mut self.pending_tool_calls);
                         if !round_tools.is_empty() {
                             super::append_round_tools(self.session_start_secs, &round_tools);
+                            for (name, success) in &round_tools {
+                                if *success {
+                                    match name.as_str() {
+                                        "read_file" | "read_files" => {
+                                            self.session_read_file_count += 1
+                                        },
+                                        "get_symbol_context" => self.session_symbol_count += 1,
+                                        "get_file_outline" => self.session_outline_count += 1,
+                                        _ => {},
+                                    }
+                                }
+                            }
                         }
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {

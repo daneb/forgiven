@@ -118,6 +118,9 @@ pub struct DiagnosticsData<'a> {
     pub observation_mask_threshold_chars: usize,
     /// Recent MCP tool calls this session (newest-last).
     pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
+    /// Retrieval tool call counts this session: (read_file, get_symbol_context, get_file_outline).
+    /// None when no agent session has been active yet.
+    pub tool_retrieval_counts: Option<(u32, u32, u32)>,
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.

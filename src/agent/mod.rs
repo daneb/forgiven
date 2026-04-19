@@ -385,6 +385,13 @@ pub struct AgentPanel {
     /// Each entry is `(tool_name, success)`.  Flushed to a `"round_tools"`
     /// history JSONL record when `StreamEvent::Done` arrives (Phase 2).
     pub pending_tool_calls: Vec<(String, bool)>,
+    /// Cumulative successful read_file calls this conversation session.
+    /// Shown in SPC d to track retrieval tool preference ratio.
+    pub session_read_file_count: u32,
+    /// Cumulative successful get_symbol_context calls this session.
+    pub session_symbol_count: u32,
+    /// Cumulative successful get_file_outline calls this session.
+    pub session_outline_count: u32,
 }
 
 /// A model returned by the Copilot `/models` endpoint.

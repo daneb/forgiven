@@ -261,6 +261,188 @@ pub fn sticky_scroll_header(snap: &TsSnapshot, scroll_row: usize) -> Option<Stri
     snap.source.lines().nth(header_row).map(|l| l.to_string())
 }
 
+// ── Symbol extraction for agent tools ────────────────────────────────────────
+
+/// A named definition extracted from a source file by the tree-sitter AST.
+///
+/// Used by `get_file_outline` and `get_symbol_context` in the agent tool layer
+/// as a language-accurate replacement for the heuristic `extract_symbols`.
+pub struct TsSymbolDef {
+    /// 0-indexed line where the definition starts.
+    pub line: usize,
+    /// 0-indexed line where the definition ends.
+    pub end_line: usize,
+    /// Symbol name (identifier only, no keywords or types).
+    pub name: String,
+    /// First source line of the definition, trimmed.
+    pub signature: String,
+}
+
+/// Extract all named top-level and class-member definitions from `source` using
+/// the tree-sitter grammar for the file at `path`.
+///
+/// Returns `None` when the file extension is not supported (caller should fall
+/// back to the heuristic extractor). The `Parser` is created and dropped within
+/// this call — it is never held across an async boundary.
+pub fn ts_extract_symbols(path: &std::path::Path, source: &str) -> Option<Vec<TsSymbolDef>> {
+    let lang = TsLang::detect(path)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&lang.ts_language()).ok()?;
+    let tree = parser.parse(source.as_bytes(), None)?;
+    let lines: Vec<&str> = source.lines().collect();
+    let mut symbols = Vec::new();
+    collect_ts_symbols(tree.root_node(), source, &lines, lang, false, &mut symbols);
+    Some(symbols)
+}
+
+/// Recursive AST walk that emits `TsSymbolDef` entries.
+///
+/// `inside_class` controls depth: at the top level we look for functions,
+/// classes, and arrow-function variable assignments; inside a class body we
+/// look for methods only (we don't recurse further into method bodies).
+fn collect_ts_symbols(
+    node: Node<'_>,
+    source: &str,
+    lines: &[&str],
+    lang: TsLang,
+    inside_class: bool,
+    out: &mut Vec<TsSymbolDef>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+
+        // Transparent wrappers — pass through without emitting a symbol.
+        // export_statement wraps function/class declarations in JS/TS.
+        // decorated_definition wraps @decorator-annotated Python definitions.
+        if matches!(
+            kind,
+            "export_statement" | "export_default_declaration" | "decorated_definition"
+        ) {
+            collect_ts_symbols(child, source, lines, lang, inside_class, out);
+            continue;
+        }
+
+        // Variable declarations at the top level: look for arrow-function values.
+        if !inside_class && matches!(kind, "lexical_declaration" | "variable_declaration") {
+            collect_arrow_fn_vars(child, source, lines, out);
+            continue;
+        }
+
+        let is_fn = is_function_node(child, lang);
+        let is_cls = is_class_node(child, lang);
+
+        if is_fn {
+            // Emit function/method symbol; do not recurse into its body.
+            if let Some(sym) = make_ts_symbol(child, source, lines) {
+                out.push(sym);
+            }
+        } else if is_cls {
+            // Emit class/struct/impl symbol; recurse into its body for members.
+            if let Some(sym) = make_ts_symbol(child, source, lines) {
+                out.push(sym);
+            }
+            collect_ts_symbols(child, source, lines, lang, true, out);
+        } else if inside_class {
+            // Inside a class: recurse only into body container nodes.
+            if matches!(kind, "class_body" | "block" | "declaration_list" | "object_type") {
+                collect_ts_symbols(child, source, lines, lang, true, out);
+            }
+        } else {
+            // At the top level: recurse through non-definition, non-body nodes
+            // (handles impl_item declaration_list, module wrappers, etc.).
+            // Stop at function bodies so we don't descend into implementations.
+            if !matches!(kind, "block" | "statement_block" | "function_body") {
+                collect_ts_symbols(child, source, lines, lang, false, out);
+            }
+        }
+    }
+}
+
+/// Emit a `TsSymbolDef` for a `variable_declarator` node whose value is an
+/// arrow function or function expression (e.g. `const foo = (x) => x`).
+fn collect_arrow_fn_vars(
+    decl_node: Node<'_>,
+    source: &str,
+    lines: &[&str],
+    out: &mut Vec<TsSymbolDef>,
+) {
+    let mut cursor = decl_node.walk();
+    for child in decl_node.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let value_is_fn = child
+            .child_by_field_name("value")
+            .map(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
+            .unwrap_or(false);
+        if !value_is_fn {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else { continue };
+        let name = source[name_node.byte_range()].to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let line = decl_node.start_position().row;
+        let end_line = decl_node.end_position().row;
+        let signature = lines.get(line).unwrap_or(&"").trim().to_string();
+        out.push(TsSymbolDef { line, end_line, name, signature });
+    }
+}
+
+/// Build a `TsSymbolDef` from an AST node.
+///
+/// Returns `None` for anonymous nodes (e.g. bare arrow functions without a
+/// surrounding variable declarator) so the caller can skip them cleanly.
+fn make_ts_symbol(node: Node<'_>, source: &str, lines: &[&str]) -> Option<TsSymbolDef> {
+    let name = ts_node_name(node, source)?.to_string();
+    let line = node.start_position().row;
+    let end_line = node.end_position().row;
+    let signature = lines.get(line).unwrap_or(&"").trim().to_string();
+    Some(TsSymbolDef { line, end_line, name, signature })
+}
+
+/// Extract the symbol name from an AST node.
+///
+/// Handles the special cases:
+/// - Rust `impl_item` exposes a "type" field instead of "name".
+/// - Anonymous `arrow_function` nodes have no name field at all.
+/// - Fallback: first named identifier-kind child (covers some edge cases).
+fn ts_node_name<'a>(node: Node<'a>, source: &'a str) -> Option<&'a str> {
+    // Rust impl blocks expose the implementing type via the "type" field.
+    if node.kind() == "impl_item" {
+        return node.child_by_field_name("type").map(|n| &source[n.byte_range()]);
+    }
+    // Anonymous arrow functions — name lives in the parent variable_declarator,
+    // handled separately by collect_arrow_fn_vars.
+    if node.kind() == "arrow_function" {
+        return None;
+    }
+    // Standard "name" field used by function_item, struct_item, class_declaration,
+    // function_declaration, method_definition, function_definition, etc.
+    if let Some(n) = node.child_by_field_name("name") {
+        let s = &source[n.byte_range()];
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    // Fallback: first named child with an identifier-like kind.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "identifier" | "property_identifier" | "type_identifier" | "field_identifier"
+        ) {
+            let s = &source[child.byte_range()];
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -328,6 +510,91 @@ mod tests {
         assert!(r.is_some());
         let (sr, sc, _, _) = r.unwrap();
         assert_eq!((sr, sc), (0, 0));
+    }
+
+    // ── ts_extract_symbols tests ─────────────────────────────────────────────
+
+    fn extract(path: &str, src: &str) -> Vec<String> {
+        let p = std::path::Path::new(path);
+        ts_extract_symbols(p, src)
+            .expect("ts_extract_symbols returned None")
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    #[test]
+    fn ts_rust_top_level_fn() {
+        let src = "fn foo() {}\nfn bar(x: u32) -> u32 { x }\n";
+        let names = extract("mod.rs", src);
+        assert!(names.contains(&"foo".to_string()));
+        assert!(names.contains(&"bar".to_string()));
+    }
+
+    #[test]
+    fn ts_rust_impl_methods() {
+        let src = "struct Dog;\nimpl Dog {\n    fn bark(&self) {}\n    fn fetch(&self) {}\n}\n";
+        let names = extract("lib.rs", src);
+        assert!(names.contains(&"Dog".to_string()), "impl block itself: {names:?}");
+        assert!(names.contains(&"bark".to_string()), "method bark: {names:?}");
+        assert!(names.contains(&"fetch".to_string()), "method fetch: {names:?}");
+    }
+
+    #[test]
+    fn ts_python_top_level_fn() {
+        let src = "def greet(name):\n    return name\n\ndef farewell():\n    pass\n";
+        let names = extract("utils.py", src);
+        assert!(names.contains(&"greet".to_string()));
+        assert!(names.contains(&"farewell".to_string()));
+    }
+
+    #[test]
+    fn ts_python_class_methods() {
+        let src = "class Dog:\n    def bark(self):\n        pass\n\n    def fetch(self, item):\n        return item\n";
+        let names = extract("dog.py", src);
+        assert!(names.contains(&"Dog".to_string()), "class: {names:?}");
+        assert!(names.contains(&"bark".to_string()), "method bark: {names:?}");
+        assert!(names.contains(&"fetch".to_string()), "method fetch: {names:?}");
+    }
+
+    #[test]
+    fn ts_js_class_methods() {
+        let src = "class Animal {\n    constructor(name) { this.name = name; }\n    speak() { console.log(this.name); }\n}\n";
+        let names = extract("animal.js", src);
+        assert!(names.contains(&"Animal".to_string()), "class: {names:?}");
+        assert!(names.contains(&"constructor".to_string()), "constructor: {names:?}");
+        assert!(names.contains(&"speak".to_string()), "speak: {names:?}");
+    }
+
+    #[test]
+    fn ts_js_arrow_functions() {
+        let src = "const add = (a, b) => a + b;\nconst mul = (a, b) => { return a * b; };\n";
+        let names = extract("math.js", src);
+        assert!(names.contains(&"add".to_string()), "add: {names:?}");
+        assert!(names.contains(&"mul".to_string()), "mul: {names:?}");
+    }
+
+    #[test]
+    fn ts_js_exported_class() {
+        let src = "export class Service {\n    fetch(url) { return url; }\n}\n";
+        let names = extract("service.js", src);
+        assert!(names.contains(&"Service".to_string()), "class: {names:?}");
+        assert!(names.contains(&"fetch".to_string()), "method: {names:?}");
+    }
+
+    #[test]
+    fn ts_unsupported_ext_returns_none() {
+        let p = std::path::Path::new("file.csharp");
+        assert!(ts_extract_symbols(p, "class Foo {}").is_none());
+    }
+
+    #[test]
+    fn ts_symbol_line_numbers() {
+        let src = "fn first() {}\nfn second() {}\n";
+        let p = std::path::Path::new("lib.rs");
+        let syms = ts_extract_symbols(p, src).unwrap();
+        assert_eq!(syms[0].line, 0);
+        assert_eq!(syms[1].line, 1);
     }
 
     #[test]

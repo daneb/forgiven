@@ -32,6 +32,7 @@ pub(super) async fn agentic_loop(
     mut abort_rx: oneshot::Receiver<()>,
     mcp_manager: Option<Arc<McpManager>>,
     auto_compress: bool,
+    expand_threshold: usize,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
     // When the provider does not support tool calling (e.g. Ollama with an
@@ -87,6 +88,16 @@ pub(super) async fn agentic_loop(
     // the existing content and emit FileSnapshot so the panel can restore it
     // on `SPC a u`.
     let mut snapshotted: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // In-memory cache for expand-on-demand tool result truncation (Intervention 1).
+    // Maps tool_call_id → full result string. Keyed by tool call ID so the model
+    // can request the full content via expand_result(id=...).
+    let mut result_cache: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    // Soft budget guard for read_file preference (Intervention 2).
+    // Fires once per session when ≥3 large files are read in a single round.
+    let mut read_hint_fired = false;
 
     loop {
         if round >= effective_max {
@@ -193,6 +204,7 @@ pub(super) async fn agentic_loop(
         let mut sorted: Vec<(usize, tools::PartialToolCall)> = partial_tools.into_iter().collect();
         sorted.sort_by_key(|(idx, _)| *idx);
 
+        let mut large_reads_this_round: usize = 0;
         if let DispatchOutcome::Abort = dispatch_tools(
             sorted,
             &mut messages,
@@ -204,10 +216,28 @@ pub(super) async fn agentic_loop(
             auto_compress,
             &mut abort_rx,
             &mut question_rx,
+            &mut result_cache,
+            expand_threshold,
+            &mut large_reads_this_round,
         )
         .await
         {
             return;
+        }
+
+        // Soft budget hint: inject once per session when ≥3 large files (>300 lines)
+        // are read in a single round, to nudge the model toward symbol-level tools.
+        if !read_hint_fired && large_reads_this_round >= 3 {
+            read_hint_fired = true;
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": "[hint] You have read 3 or more large files this round. \
+                             Consider get_file_outline first to locate specific symbols, \
+                             then get_symbol_context for targeted reads."
+            }));
+            info!(
+                "[ctx] soft budget hint injected: {large_reads_this_round} large reads this round"
+            );
         }
 
         // Paragraph break between the tool-call lines and the next LLM response.

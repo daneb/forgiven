@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
+use tracing::info;
 
 use crate::mcp::McpManager;
 
@@ -44,6 +45,9 @@ pub(super) async fn dispatch_tools(
     auto_compress: bool,
     abort_rx: &mut oneshot::Receiver<()>,
     question_rx: &mut mpsc::UnboundedReceiver<String>,
+    result_cache: &mut HashMap<String, String>,
+    expand_threshold: usize,
+    large_reads: &mut usize,
 ) -> DispatchOutcome {
     let tool_calls_json: Vec<serde_json::Value> = sorted
         .iter()
@@ -103,7 +107,29 @@ pub(super) async fn dispatch_tools(
             }
         }
 
-        let result = if call.name == "ask_user" {
+        let result = if call.name == "expand_result" {
+            let args_val =
+                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+            let id = args_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            match result_cache.get(id) {
+                Some(full) => {
+                    if let Some(range) = args_val.get("range") {
+                        let start =
+                            range.get("start").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        let end = range.get("end").and_then(|v| v.as_u64()).map(|v| v as usize);
+                        let chars: Vec<char> = full.chars().collect();
+                        let end = end.unwrap_or(chars.len()).min(chars.len());
+                        chars[start.min(chars.len())..end].iter().collect()
+                    } else {
+                        full.clone()
+                    }
+                },
+                None => format!(
+                    "error: no cached result for id={id:?}. \
+                     The result may have expired or the id is incorrect."
+                ),
+            }
+        } else if call.name == "ask_user" {
             // Parse question + options, emit an AskingUser event, and block until
             // the user makes a selection (or the 5-minute timeout fires).
             let args_val =
@@ -231,6 +257,45 @@ pub(super) async fn dispatch_tools(
         } else {
             result
         };
+
+        // Count large read_file results for the soft budget guard (Intervention 2).
+        // Parse line count from the header: "{path} ({N} lines)\n..."
+        if call.name == "read_file" && !result.starts_with("error") {
+            if let Some(line_count) = result.lines().next().and_then(|hdr| {
+                let start = hdr.rfind('(')?;
+                let end = hdr.find(" lines)")?;
+                hdr[start + 1..end].trim().parse::<usize>().ok()
+            }) {
+                if line_count > 300 {
+                    *large_reads += 1;
+                }
+            }
+        }
+
+        // Expand-on-demand truncation (Intervention 1): store full result in cache
+        // and replace history entry with a truncated head + retrieval invitation.
+        let result =
+            if expand_threshold > 0 && call.name != "expand_result" && !result.starts_with("error")
+            {
+                let char_len = result.chars().count();
+                if char_len > expand_threshold {
+                    let truncated: String = result.chars().take(expand_threshold).collect();
+                    info!(
+                        "[ctx] truncated tool_result {} from {}chars to {}chars",
+                        partial.id, char_len, expand_threshold
+                    );
+                    result_cache.insert(partial.id.clone(), result);
+                    format!(
+                        "{truncated}\n[truncated; {char_len} chars total. \
+                         Call expand_result(id={:?}) to see full.]",
+                        partial.id
+                    )
+                } else {
+                    result
+                }
+            } else {
+                result
+            };
 
         // Write a tool_error record to sessions.jsonl for failed tool calls
         // so Phase 3 can break down error types without re-parsing log files.

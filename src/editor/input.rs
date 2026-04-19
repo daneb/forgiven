@@ -534,6 +534,7 @@ impl Editor {
                 let preferred_model = self.config.active_default_model().to_string();
                 let auto_compress = self.config.agent.auto_compress_tool_results;
                 let mask_threshold = self.config.agent.observation_mask_threshold_chars;
+                let expand_threshold = self.config.agent.expand_threshold_chars;
                 // We need a blocking submit here.  Use a one-shot channel via block_in_place
                 // or simply call submit synchronously via tokio::task::block_in_place.
                 // Since we are inside an async context, we use a local async block.
@@ -545,6 +546,7 @@ impl Editor {
                     &preferred_model,
                     auto_compress,
                     mask_threshold,
+                    expand_threshold,
                 );
                 // We can't .await inside handle_key (sync fn), so we use try_join on
                 // the runtime directly.  The cleanest way: push to a queue and process

@@ -478,6 +478,15 @@ impl Editor {
                     .as_ref()
                     .map(|m| m.recent_calls())
                     .unwrap_or_default(),
+                tool_retrieval_counts: if self.agent_panel.session_rounds > 0 {
+                    Some((
+                        self.agent_panel.session_read_file_count,
+                        self.agent_panel.session_symbol_count,
+                        self.agent_panel.session_outline_count,
+                    ))
+                } else {
+                    None
+                },
             })
         } else {
             None
