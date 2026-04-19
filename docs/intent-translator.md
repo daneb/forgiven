@@ -1,6 +1,6 @@
 # SPEC: Intent Translator (Option D)
 
-**Status:** Draft — not yet reviewed
+**Status:** Implemented — see ADR 0131
 **Priority:** Rank 1 of 4 in the AI-IDE architecture exploration
 **Estimated size:** ~400 LoC
 **Estimated time:** 3–5 days of focused work
