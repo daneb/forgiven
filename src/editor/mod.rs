@@ -367,6 +367,16 @@ impl Editor {
                 }
                 panel.openrouter_site_url = config.provider.openrouter.site_url.clone();
                 panel.openrouter_app_name = config.provider.openrouter.app_name.clone();
+                panel.intent_translator_enabled = config.agent.intent_translator.enabled;
+                panel.intent_translator_provider = config.agent.intent_translator.provider.clone();
+                panel.intent_translator_ollama_model =
+                    config.agent.intent_translator.ollama_model.clone();
+                panel.intent_translator_model = config.agent.intent_translator.model.clone();
+                panel.intent_translator_min_chars =
+                    config.agent.intent_translator.min_chars_to_translate;
+                panel.intent_translator_timeout_ms = config.agent.intent_translator.timeout_ms;
+                panel.intent_translator_skip_patterns =
+                    config.agent.intent_translator.skip_patterns.clone();
                 panel
             },
             clipboard: None::<(String, ClipboardType)>,

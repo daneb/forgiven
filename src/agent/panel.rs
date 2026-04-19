@@ -185,6 +185,13 @@ impl AgentPanel {
             usage_received_this_round: false,
             context_near_limit_warned: false,
             session_total_100k_warned: false,
+            intent_translator_enabled: false,
+            intent_translator_provider: "ollama".to_string(),
+            intent_translator_ollama_model: "qwen2.5-coder:7b".to_string(),
+            intent_translator_model: "claude-haiku-4-5-20251001".to_string(),
+            intent_translator_min_chars: 40,
+            intent_translator_timeout_ms: 10000,
+            intent_translator_skip_patterns: Vec::new(),
             cached_project_tree: None,
             cached_structural_map: None,
             session_snapshots: std::collections::HashMap::new(),
@@ -870,8 +877,8 @@ impl AgentPanel {
         };
         let provider_settings = ProviderSettings {
             kind: self.provider.clone(),
-            api_token: effective_token,
-            chat_endpoint,
+            api_token: effective_token.clone(),
+            chat_endpoint: chat_endpoint.clone(),
             num_ctx: if self.provider == ProviderKind::Ollama {
                 self.ollama_context_length
             } else {
@@ -1188,14 +1195,106 @@ Tools:\n\
         let image_dims: Vec<(u32, u32)> =
             images.iter().map(|img| (img.width, img.height)).collect();
 
+        // ── Intent translation (SPC a t / [agent.intent_translator]) ─────────
+        // Translate the raw message into a structured task spec before dispatch.
+        // Falls through silently (uses raw message) on timeout, error, or short message.
+        let (api_user_text, intent_preamble): (String, Option<String>) =
+            if self.intent_translator_enabled {
+                let open_file_hint = context
+                    .as_ref()
+                    .and_then(|c| c.strip_prefix("File: "))
+                    .and_then(|c| c.lines().next());
+                let language_hint = open_file_hint
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str())
+                    .map(|ext| match ext {
+                        "rs" => "Rust",
+                        "ts" | "tsx" => "TypeScript",
+                        "py" => "Python",
+                        "go" => "Go",
+                        "js" | "jsx" => "JavaScript",
+                        "cpp" | "cc" | "cxx" => "C++",
+                        "c" | "h" => "C",
+                        "java" => "Java",
+                        "rb" => "Ruby",
+                        "swift" => "Swift",
+                        _ => "unknown",
+                    });
+                let tx_ctx = super::intent::TranslationContext {
+                    open_file: open_file_hint,
+                    recent_files: &[],
+                    project_root: &project_root,
+                    language_hint,
+                };
+                // Resolve endpoint/token/model for the translator's chosen provider.
+                // "ollama" → local Ollama, no auth; "active" → reuse main provider.
+                let (tx_endpoint, tx_token, tx_model, tx_kind) =
+                    if self.intent_translator_provider == "ollama" {
+                        let ep = format!("{}/v1/chat/completions", self.ollama_base_url);
+                        (
+                            ep,
+                            String::new(),
+                            self.intent_translator_ollama_model.clone(),
+                            ProviderKind::Ollama,
+                        )
+                    } else {
+                        (
+                            chat_endpoint.clone(),
+                            effective_token.clone(),
+                            self.intent_translator_model.clone(),
+                            self.provider.clone(),
+                        )
+                    };
+                let tx_settings = super::intent::IntentCallSettings {
+                    endpoint: &tx_endpoint,
+                    api_token: &tx_token,
+                    model: &tx_model,
+                    provider_kind: &tx_kind,
+                    timeout_ms: self.intent_translator_timeout_ms,
+                    min_chars_to_translate: self.intent_translator_min_chars,
+                    skip_patterns: &self.intent_translator_skip_patterns,
+                    openrouter_site_url: &self.openrouter_site_url,
+                    openrouter_app_name: &self.openrouter_app_name,
+                };
+                match super::intent::translate_intent(&user_text, &tx_ctx, &tx_settings).await {
+                    Some(intent) if !intent.ambiguities.is_empty() => {
+                        // Ambiguous: show clarifying questions and bail out without
+                        // dispatching the agent loop. The user refines and resubmits.
+                        let questions = intent.ambiguities.join("\n• ");
+                        self.messages.push(ChatMessage {
+                            role: Role::System,
+                            content: format!(
+                                "Intent unclear — please clarify before submitting:\n• {questions}"
+                            ),
+                            images: vec![],
+                        });
+                        self.messages.push(ChatMessage {
+                            role: Role::User,
+                            content: user_text,
+                            images: image_dims,
+                        });
+                        self.scroll = 0;
+                        self.status = AgentStatus::Idle;
+                        return Ok(());
+                    },
+                    Some(intent) if !intent.structured_prompt.is_empty() => {
+                        let preamble = super::intent::format_preamble(&intent);
+                        (intent.structured_prompt, Some(preamble))
+                    },
+                    _ => (user_text.clone(), None),
+                }
+            } else {
+                (user_text.clone(), None)
+            };
+
         let user_msg = if images.is_empty() {
-            serde_json::json!({ "role": "user", "content": user_text.clone() })
+            serde_json::json!({ "role": "user", "content": api_user_text.clone() })
         } else {
             let mut content_parts: Vec<serde_json::Value> = Vec::new();
-            if !user_text.trim().is_empty() {
+            if !api_user_text.trim().is_empty() {
                 content_parts.push(serde_json::json!({
                     "type": "text",
-                    "text": user_text.clone()
+                    "text": api_user_text.clone()
                 }));
             }
             for img in &images {
@@ -1232,6 +1331,14 @@ Tools:\n\
             ctx_window: context_limit,
         });
 
+        // Show the intent preamble (dim System line) above the user message.
+        if let Some(preamble) = intent_preamble {
+            self.messages.push(ChatMessage {
+                role: Role::System,
+                content: preamble,
+                images: vec![],
+            });
+        }
         self.messages.push(ChatMessage {
             role: Role::User,
             content: user_text,

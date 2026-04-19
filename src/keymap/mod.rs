@@ -179,6 +179,8 @@ pub enum Action {
     ReviewChangesOpen, // SPC a r — open review overlay for all agent-touched files
     // Insights dashboard (ADR 0129 Phase 3)
     InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
+    // Intent Translator (docs/intent-translator.md)
+    AgentIntentTranslatorToggle, // SPC a t — toggle intent translator for current session
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -369,6 +371,10 @@ impl KeyHandler {
         agent_node
             .children
             .insert('I', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
+        agent_node.children.insert(
+            't',
+            KeyNode::leaf("toggle intent translator", Action::AgentIntentTranslatorToggle),
+        );
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

@@ -694,6 +694,13 @@ Skip anything already obvious from reading the code.";
                     Some(crate::insights::panel::InsightsDashboardState::new(insights));
                 self.mode = Mode::InsightsDashboard;
             },
+            // ── Intent Translator toggle (SPC a t) ───────────────────────────
+            Action::AgentIntentTranslatorToggle => {
+                self.agent_panel.intent_translator_enabled =
+                    !self.agent_panel.intent_translator_enabled;
+                let state = if self.agent_panel.intent_translator_enabled { "on" } else { "off" };
+                self.set_status(format!("Intent translator {state} (SPC a t to toggle)"));
+            },
             // ── Session revert (checkpoint undo) ─────────────────────────────
             Action::AgentSessionRevert => {
                 if !self.agent_panel.has_checkpoint() {

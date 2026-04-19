@@ -377,6 +377,103 @@ pub struct AgentHook {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Intent Translator config (docs/intent-translator.md) ─────────────────────
+
+/// Configuration for the Intent Translator preprocessing step.
+///
+/// When enabled, every user message is sent to a small, fast model for
+/// rewriting into a structured task spec before the main agent loop starts.
+/// Disabled by default until validated against `forgiven-bench/`.
+///
+/// To use a local Ollama model:
+/// ```toml
+/// [agent.intent_translator]
+/// enabled      = true
+/// provider     = "ollama"
+/// ollama_model = "qwen2.5-coder:7b"
+/// timeout_ms   = 10000
+/// ```
+///
+/// To use the same provider as the main agent (e.g. Copilot → haiku):
+/// ```toml
+/// [agent.intent_translator]
+/// enabled  = true
+/// provider = "active"
+/// model    = "claude-haiku-4-5-20251001"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IntentTranslatorConfig {
+    /// Enable the translator.  Default: `false` until measured on corpus.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Which backend to use for the translation call.
+    ///
+    /// | value      | endpoint used                                    |
+    /// |------------|--------------------------------------------------|
+    /// | `"ollama"` | local Ollama (`[provider.ollama] base_url`)     |
+    /// | `"active"` | same provider as the main agent (default)       |
+    ///
+    /// Default: `"ollama"` — no API key needed, runs entirely locally.
+    #[serde(default = "default_intent_translator_provider")]
+    pub provider: String,
+    /// Model tag for Ollama (e.g. `"qwen2.5-coder:7b"`, `"llama3.2:3b"`).
+    /// Only used when `provider = "ollama"`.
+    #[serde(default = "default_intent_ollama_model")]
+    pub ollama_model: String,
+    /// Model ID when `provider = "active"` (e.g. `"claude-haiku-4-5-20251001"`).
+    /// Ignored when `provider = "ollama"`.
+    #[serde(default = "default_intent_active_model")]
+    pub model: String,
+    /// Skip translation for messages shorter than this character count.
+    /// Very short messages are already crisp; translation adds only latency.
+    /// Default: 40.
+    #[serde(default = "default_intent_min_chars")]
+    pub min_chars_to_translate: usize,
+    /// Abort the translation call if no response arrives within this window.
+    /// Ollama on a cold start may need longer (model loading).
+    /// Default: 10 000 ms.
+    #[serde(default = "default_intent_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Literal string prefixes — messages that start with any of these are
+    /// passed through without translation (e.g. `["/speckit"]`).
+    #[serde(default)]
+    pub skip_patterns: Vec<String>,
+}
+
+impl Default for IntentTranslatorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_intent_translator_provider(),
+            ollama_model: default_intent_ollama_model(),
+            model: default_intent_active_model(),
+            min_chars_to_translate: default_intent_min_chars(),
+            timeout_ms: default_intent_timeout_ms(),
+            skip_patterns: Vec::new(),
+        }
+    }
+}
+
+fn default_intent_translator_provider() -> String {
+    "ollama".to_string()
+}
+
+fn default_intent_ollama_model() -> String {
+    "qwen2.5-coder:7b".to_string()
+}
+
+fn default_intent_active_model() -> String {
+    "claude-haiku-4-5-20251001".to_string()
+}
+
+fn default_intent_min_chars() -> usize {
+    40
+}
+
+fn default_intent_timeout_ms() -> u64 {
+    5000
+}
+
 /// Configuration for the agent panel.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentConfig {
@@ -430,6 +527,9 @@ pub struct AgentConfig {
     /// Test runner configuration for the `on_test_fail` hook trigger.
     #[serde(default)]
     pub test: TestConfig,
+    /// Intent Translator preprocessing step (Option D).
+    #[serde(default)]
+    pub intent_translator: IntentTranslatorConfig,
 }
 
 // ── Test runner config (ADR 0114 — on_test_fail trigger) ─────────────────────

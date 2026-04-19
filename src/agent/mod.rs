@@ -15,6 +15,7 @@
 mod agentic_loop;
 mod auth;
 pub mod context;
+pub mod intent;
 mod models;
 mod panel;
 pub mod provider;
@@ -352,6 +353,23 @@ pub struct AgentPanel {
     /// Fires once per conversation regardless of model window size.
     /// Reset by `new_conversation()` and `compress_history()`.
     pub session_total_100k_warned: bool,
+    // ── Intent Translator (docs/intent-translator.md) ─────────────────────────
+    /// Whether the intent translator is active for the current session.
+    /// Initialised from `[agent.intent_translator] enabled` in config;
+    /// toggled at runtime by `SPC a t` without editing the config file.
+    pub intent_translator_enabled: bool,
+    /// `"ollama"` or `"active"` (same provider as main agent).
+    pub intent_translator_provider: String,
+    /// Ollama model tag (e.g. `"qwen2.5-coder:7b"`). Used when provider = "ollama".
+    pub intent_translator_ollama_model: String,
+    /// Model ID when provider = "active" (e.g. `"claude-haiku-4-5-20251001"`).
+    pub intent_translator_model: String,
+    /// Minimum message length (chars) below which translation is skipped.
+    pub intent_translator_min_chars: usize,
+    /// HTTP timeout for the translation call in milliseconds.
+    pub intent_translator_timeout_ms: u64,
+    /// Literal string prefixes — messages starting with any of these skip translation.
+    pub intent_translator_skip_patterns: Vec<String>,
     /// Cached project file-tree string (depth 2), rebuilt at most once every 30 s.
     /// Avoids a full filesystem walk on every `submit()` call.
     /// Cleared by `new_conversation()` to force a fresh tree on the next session.
