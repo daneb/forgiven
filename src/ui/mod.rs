@@ -121,6 +121,9 @@ pub struct DiagnosticsData<'a> {
     /// Retrieval tool call counts this session: (read_file, get_symbol_context, get_file_outline).
     /// None when no agent session has been active yet.
     pub tool_retrieval_counts: Option<(u32, u32, u32)>,
+    /// Codified context: (constitution_tokens, max_tokens, specialist_count, knowledge_count).
+    /// None when the feature is disabled.
+    pub codified_context_info: Option<(usize, usize, usize, usize)>,
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.

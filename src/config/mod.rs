@@ -474,6 +474,56 @@ fn default_intent_timeout_ms() -> u64 {
     5000
 }
 
+// ── Codified Context config (docs/codified-context.md) ───────────────────────
+
+/// Three-tier context loader: constitution (hot), specialists (warm), knowledge (cold).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodifiedContextConfig {
+    /// Enable the three-tier loader. Default: false until validated.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to the .forgiven directory relative to project root.
+    #[serde(default = "default_codified_context_directory")]
+    pub directory: String,
+    /// Hard cap on constitution size in tokens. Larger triggers a warning in SPC d.
+    #[serde(default = "default_constitution_max_tokens")]
+    pub constitution_max_tokens: usize,
+    /// Max number of specialists loaded per turn (if more match, first wins).
+    #[serde(default = "default_max_specialists_per_turn")]
+    pub max_specialists_per_turn: usize,
+    /// Cold memory size cap per fetch_knowledge() call in bytes.
+    #[serde(default = "default_knowledge_fetch_max_bytes")]
+    pub knowledge_fetch_max_bytes: usize,
+}
+
+impl Default for CodifiedContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: default_codified_context_directory(),
+            constitution_max_tokens: default_constitution_max_tokens(),
+            max_specialists_per_turn: default_max_specialists_per_turn(),
+            knowledge_fetch_max_bytes: default_knowledge_fetch_max_bytes(),
+        }
+    }
+}
+
+fn default_codified_context_directory() -> String {
+    ".forgiven".to_string()
+}
+
+fn default_constitution_max_tokens() -> usize {
+    500
+}
+
+fn default_max_specialists_per_turn() -> usize {
+    2
+}
+
+fn default_knowledge_fetch_max_bytes() -> usize {
+    8192
+}
+
 /// Configuration for the agent panel.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentConfig {
@@ -530,6 +580,9 @@ pub struct AgentConfig {
     /// Intent Translator preprocessing step (Option D).
     #[serde(default)]
     pub intent_translator: IntentTranslatorConfig,
+    /// Codified Context three-tier loader (Option B).
+    #[serde(default)]
+    pub codified_context: CodifiedContextConfig,
 }
 
 // ── Test runner config (ADR 0114 — on_test_fail trigger) ─────────────────────

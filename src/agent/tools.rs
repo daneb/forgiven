@@ -203,6 +203,23 @@ pub fn tool_definitions() -> serde_json::Value {
         {
             "type": "function",
             "function": {
+                "name": "fetch_knowledge",
+                "description": "Retrieve a project knowledge document from the .forgiven/knowledge/ directory. The system prompt lists available documents with one-line descriptions. Call this when you need detailed architecture docs, API contracts, or design rationale that are not in the active context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The document name as listed in the Knowledge base catalogue (without the .md extension)."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "complete_task",
                 "description": "Mark a previously created task as done. Use the exact same title passed to create_task.",
                 "parameters": {

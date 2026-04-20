@@ -487,6 +487,28 @@ impl Editor {
                 } else {
                     None
                 },
+                codified_context_info: if self.agent_panel.codified_context_enabled {
+                    let (ctokens, scount, kcount) = self
+                        .agent_panel
+                        .codified_context
+                        .as_ref()
+                        .map(|cc| {
+                            (
+                                cc.constitution.as_ref().map(|c| c.token_estimate).unwrap_or(0),
+                                cc.specialists.len(),
+                                cc.knowledge_docs.len(),
+                            )
+                        })
+                        .unwrap_or((0, 0, 0));
+                    Some((
+                        ctokens,
+                        self.agent_panel.codified_context_constitution_max_tokens,
+                        scount,
+                        kcount,
+                    ))
+                } else {
+                    None
+                },
             })
         } else {
             None

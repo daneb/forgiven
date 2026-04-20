@@ -14,6 +14,7 @@
 
 mod agentic_loop;
 mod auth;
+pub mod codified_context;
 pub mod context;
 pub mod intent;
 mod models;
@@ -410,6 +411,21 @@ pub struct AgentPanel {
     pub session_symbol_count: u32,
     /// Cumulative successful get_file_outline calls this session.
     pub session_outline_count: u32,
+    // ── Codified Context (docs/codified-context.md) ───────────────────────────
+    /// Whether the three-tier codified context loader is enabled.
+    /// Initialised from `[agent.codified_context] enabled` in config.
+    pub codified_context_enabled: bool,
+    /// Loaded context tiers for the current project root. `None` when the
+    /// `.forgiven/` directory is absent or `codified_context_enabled = false`.
+    pub codified_context: Option<codified_context::CodifiedContext>,
+    /// Set to `true` once the first-session tip has been posted so it fires only once.
+    pub codified_context_tip_shown: bool,
+    /// Token cap for constitution size warnings shown in SPC d.
+    pub codified_context_constitution_max_tokens: usize,
+    /// Max specialists per turn.
+    pub codified_context_max_specialists: usize,
+    /// Knowledge fetch byte cap.
+    pub codified_context_knowledge_max_bytes: usize,
 }
 
 /// A model returned by the Copilot `/models` endpoint.

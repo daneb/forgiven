@@ -425,6 +425,36 @@ impl UI {
             ]));
         }
 
+        // ── Codified Context ──────────────────────────────────────────────────
+        if let Some((ctokens, max_tokens, scount, kcount)) = data.codified_context_info {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                " Codified Context ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )]));
+            let (tok_color, warn) = if ctokens > max_tokens {
+                (Color::Red, "  !! exceeds max")
+            } else if ctokens > max_tokens * 4 / 5 {
+                (Color::Yellow, "  ! near limit")
+            } else {
+                (Color::Green, "")
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  constitution  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{ctokens} t"), Style::default().fg(tok_color)),
+                Span::styled(
+                    format!("  / {max_tokens} t cap{warn}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  specialists   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{scount} loaded"), Style::default().fg(Color::White)),
+                Span::styled("  knowledge  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{kcount} docs"), Style::default().fg(Color::White)),
+            ]));
+        }
+
         // ── MCP Activity ──────────────────────────────────────────────────────
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(

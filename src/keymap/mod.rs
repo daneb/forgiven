@@ -181,6 +181,10 @@ pub enum Action {
     InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
     // Intent Translator (docs/intent-translator.md)
     AgentIntentTranslatorToggle, // SPC a t — toggle intent translator for current session
+    // Codified Context (docs/codified-context.md)
+    CodifiedContextOpenConstitution, // SPC a c — open .forgiven/constitution.md
+    CodifiedContextOpenSpecialist,   // SPC a C — open a .forgiven/agents/*.md specialist
+    CodifiedContextOpenKnowledge,    // SPC a k — open a .forgiven/knowledge/*.md document
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -375,6 +379,16 @@ impl KeyHandler {
             't',
             KeyNode::leaf("toggle intent translator", Action::AgentIntentTranslatorToggle),
         );
+        agent_node.children.insert(
+            'c',
+            KeyNode::leaf("open constitution", Action::CodifiedContextOpenConstitution),
+        );
+        agent_node
+            .children
+            .insert('C', KeyNode::leaf("open specialist", Action::CodifiedContextOpenSpecialist));
+        agent_node
+            .children
+            .insert('k', KeyNode::leaf("open knowledge doc", Action::CodifiedContextOpenKnowledge));
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree

@@ -203,6 +203,12 @@ impl AgentPanel {
             session_read_file_count: 0,
             session_symbol_count: 0,
             session_outline_count: 0,
+            codified_context_enabled: false,
+            codified_context: None,
+            codified_context_tip_shown: false,
+            codified_context_constitution_max_tokens: 500,
+            codified_context_max_specialists: 2,
+            codified_context_knowledge_max_bytes: 8192,
         }
     }
 
@@ -622,6 +628,7 @@ impl AgentPanel {
         self.session_read_file_count = 0;
         self.session_symbol_count = 0;
         self.session_outline_count = 0;
+        self.codified_context_tip_shown = false;
         self.messages.push(ChatMessage {
             role: Role::System,
             content: format!("── New conversation · {model_name} ──"),
@@ -898,6 +905,42 @@ impl AgentPanel {
 
         let root_display = project_root.display().to_string();
 
+        // ── Codified Context (ADR 0132) ──────────────────────────────────────
+        // Reload on first submit or when the project root changes.
+        if self.codified_context_enabled {
+            let needs_reload = match &self.codified_context {
+                None => true,
+                Some(cc) => cc.forgiven_dir.parent() != Some(&project_root),
+            };
+            if needs_reload {
+                use crate::config::CodifiedContextConfig;
+                let cfg = CodifiedContextConfig {
+                    enabled: true,
+                    directory: ".forgiven".to_string(),
+                    constitution_max_tokens: self.codified_context_constitution_max_tokens,
+                    max_specialists_per_turn: self.codified_context_max_specialists,
+                    knowledge_fetch_max_bytes: self.codified_context_knowledge_max_bytes,
+                };
+                self.codified_context =
+                    crate::agent::codified_context::CodifiedContext::load(&project_root, &cfg);
+            }
+        }
+
+        // Tip: show once per session when .forgiven/ is absent (enabled or not).
+        if !self.codified_context_tip_shown && self.session_rounds == 0 {
+            let forgiven_present = project_root.join(".forgiven").is_dir();
+            if !forgiven_present {
+                self.codified_context_tip_shown = true;
+                self.messages.push(ChatMessage {
+                    role: Role::System,
+                    content: "[tip] Create .forgiven/constitution.md to improve agent \
+                              consistency across sessions."
+                        .to_string(),
+                    images: vec![],
+                });
+            }
+        }
+
         // ── Cap open-file context injection ─────────────────────────────────
         // The active buffer is useful orientation for small files, but sending
         // tens-of-thousands of tokens on every round (even unrelated rounds)
@@ -997,6 +1040,24 @@ Tools:\n\
             String::from("[Project tree omitted after round 1 — call list_directory if needed]\n\n")
         };
 
+        // Codified context block (constitution + triggered specialists + knowledge catalogue).
+        // Empty string when disabled or .forgiven/ absent.
+        // Derive open file path from context header ("File: path/to/file\n\n...").
+        let open_file_path = context
+            .as_ref()
+            .and_then(|s| s.lines().next())
+            .and_then(|line| line.strip_prefix("File: "))
+            .unwrap_or("")
+            .to_string();
+        let codified_block = if self.codified_context_enabled {
+            self.codified_context
+                .as_ref()
+                .map(|cc| cc.system_prompt_block(&open_file_path, &user_text))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let system = if let Some(ref ctx) = context_snippet {
             let truncation_note = if ctx_total_lines > MAX_CTX_LINES {
                 format!(
@@ -1010,6 +1071,7 @@ Tools:\n\
                 "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
                  Project root: {root_display}\n\n\
                  {tree_block}\
+                 {codified_block}\
                  {tool_rules}\n\
                  Currently open file (use read_file for full content):\n\
                  ```\n{ctx}{truncation_note}\n```"
@@ -1019,6 +1081,7 @@ Tools:\n\
                 "You are an agentic coding assistant embedded in the 'forgiven' terminal editor.\n\
                  Project root: {root_display}\n\n\
                  {tree_block}\
+                 {codified_block}\
                  {tool_rules}"
             )
         };
@@ -1371,6 +1434,12 @@ Tools:\n\
         self.abort_tx = Some(abort_tx);
 
         let mcp = self.mcp_manager.as_ref().map(Arc::clone);
+        let knowledge_docs: Vec<(String, PathBuf)> = self
+            .codified_context
+            .as_ref()
+            .map(|cc| cc.knowledge_docs.iter().map(|d| (d.name.clone(), d.path.clone())).collect())
+            .unwrap_or_default();
+        let knowledge_fetch_max_bytes = self.codified_context_knowledge_max_bytes;
         tokio::spawn(agentic_loop(
             provider_settings,
             send_messages,
@@ -1385,6 +1454,8 @@ Tools:\n\
             mcp,
             auto_compress,
             expand_threshold_chars,
+            knowledge_docs,
+            knowledge_fetch_max_bytes,
         ));
         Ok(())
     }
@@ -1478,6 +1549,8 @@ Tools:\n\
             None,  // no MCP manager
             false, // auto_compress
             0,     // expand_threshold — disabled for inline assist
+            vec![],
+            0,
         ));
 
         Ok((rx, abort_tx))
@@ -1579,6 +1652,8 @@ Tools:\n\
             mcp,
             false, // auto_compress
             0,     // expand_threshold — disabled for investigation subagent
+            vec![],
+            0,
         ));
 
         self.investigation_rx = Some(rx);

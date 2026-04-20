@@ -33,6 +33,9 @@ pub(super) async fn agentic_loop(
     mcp_manager: Option<Arc<McpManager>>,
     auto_compress: bool,
     expand_threshold: usize,
+    // Knowledge docs for `fetch_knowledge`: Vec<(name, path)> pairs.
+    knowledge_docs: Vec<(String, PathBuf)>,
+    knowledge_fetch_max_bytes: usize,
 ) {
     // Merge built-in tools with any tools provided by MCP servers.
     // When the provider does not support tool calling (e.g. Ollama with an
@@ -219,6 +222,8 @@ pub(super) async fn agentic_loop(
             &mut result_cache,
             expand_threshold,
             &mut large_reads_this_round,
+            &knowledge_docs,
+            knowledge_fetch_max_bytes,
         )
         .await
         {

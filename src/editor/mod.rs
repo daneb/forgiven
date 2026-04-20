@@ -377,6 +377,13 @@ impl Editor {
                 panel.intent_translator_timeout_ms = config.agent.intent_translator.timeout_ms;
                 panel.intent_translator_skip_patterns =
                     config.agent.intent_translator.skip_patterns.clone();
+                panel.codified_context_enabled = config.agent.codified_context.enabled;
+                panel.codified_context_constitution_max_tokens =
+                    config.agent.codified_context.constitution_max_tokens;
+                panel.codified_context_max_specialists =
+                    config.agent.codified_context.max_specialists_per_turn;
+                panel.codified_context_knowledge_max_bytes =
+                    config.agent.codified_context.knowledge_fetch_max_bytes;
                 panel
             },
             clipboard: None::<(String, ClipboardType)>,

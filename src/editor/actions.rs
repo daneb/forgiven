@@ -701,6 +701,47 @@ Skip anything already obvious from reading the code.";
                 let state = if self.agent_panel.intent_translator_enabled { "on" } else { "off" };
                 self.set_status(format!("Intent translator {state} (SPC a t to toggle)"));
             },
+            // ── Codified Context file openers (SPC a c/C/k) ──────────────────
+            Action::CodifiedContextOpenConstitution => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let path = project_root.join(".forgiven/constitution.md");
+                if !path.exists() {
+                    // Create the directory and an empty stub so the user can start writing.
+                    let dir = path.parent().unwrap();
+                    let _ = std::fs::create_dir_all(dir);
+                    let _ = std::fs::write(
+                        &path,
+                        "# Project Constitution\n\n\
+                         ## Language\n\n\
+                         ## Style\n\n\
+                         ## Architecture\n\n\
+                         ## Hard rules\n",
+                    );
+                }
+                let _ = self.open_file(&path);
+            },
+            Action::CodifiedContextOpenSpecialist => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let agents_dir = project_root.join(".forgiven/agents");
+                let _ = std::fs::create_dir_all(&agents_dir);
+                // Open the directory in the file explorer so the user can pick a file.
+                self.set_status(
+                    "Specialists are in .forgiven/agents/ — use the file explorer to open one"
+                        .to_string(),
+                );
+            },
+            Action::CodifiedContextOpenKnowledge => {
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let knowledge_dir = project_root.join(".forgiven/knowledge");
+                let _ = std::fs::create_dir_all(&knowledge_dir);
+                self.set_status(
+                    "Knowledge docs are in .forgiven/knowledge/ — use the file explorer to open one"
+                        .to_string(),
+                );
+            },
             // ── Session revert (checkpoint undo) ─────────────────────────────
             Action::AgentSessionRevert => {
                 if !self.agent_panel.has_checkpoint() {

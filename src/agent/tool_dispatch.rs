@@ -48,6 +48,8 @@ pub(super) async fn dispatch_tools(
     result_cache: &mut HashMap<String, String>,
     expand_threshold: usize,
     large_reads: &mut usize,
+    knowledge_docs: &[(String, std::path::PathBuf)],
+    knowledge_fetch_max_bytes: usize,
 ) -> DispatchOutcome {
     let tool_calls_json: Vec<serde_json::Value> = sorted
         .iter()
@@ -107,7 +109,37 @@ pub(super) async fn dispatch_tools(
             }
         }
 
-        let result = if call.name == "expand_result" {
+        let result = if call.name == "fetch_knowledge" {
+            let args_val =
+                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+            let name = args_val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            match knowledge_docs.iter().find(|(n, _)| n == name) {
+                Some((_, path)) => match tokio::fs::read_to_string(path).await {
+                    Ok(content) => {
+                        if content.len() > knowledge_fetch_max_bytes {
+                            let truncated: String =
+                                content.chars().take(knowledge_fetch_max_bytes).collect();
+                            format!("{truncated}\n[truncated at {knowledge_fetch_max_bytes} bytes]")
+                        } else {
+                            content
+                        }
+                    },
+                    Err(e) => format!("error: could not read knowledge doc {name:?}: {e}"),
+                },
+                None => {
+                    let available: Vec<_> =
+                        knowledge_docs.iter().map(|(n, _)| n.as_str()).collect();
+                    if available.is_empty() {
+                        "error: no knowledge documents found in .forgiven/knowledge/".to_string()
+                    } else {
+                        format!(
+                            "error: knowledge document {name:?} not found. Available: {}",
+                            available.join(", ")
+                        )
+                    }
+                },
+            }
+        } else if call.name == "expand_result" {
             let args_val =
                 serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
             let id = args_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
