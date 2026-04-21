@@ -471,6 +471,79 @@ impl Buffer {
         chars[..self.cursor.col].iter().rposition(|&c| c == ch)
     }
 
+    /// Find the position of the bracket that matches the one under (or after) the cursor.
+    /// Handles `()`, `[]`, `{}` with nesting across lines.
+    /// If the cursor is not on a bracket, scans forward on the current line for the next one.
+    /// Returns `(row, col)` of the match, or `None`.
+    pub fn find_matching_pair(&self) -> Option<(usize, usize)> {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+
+        fn bracket_kind(ch: char) -> Option<(char, char, bool)> {
+            match ch {
+                '(' => Some(('(', ')', true)),
+                ')' => Some(('(', ')', false)),
+                '[' => Some(('[', ']', true)),
+                ']' => Some(('[', ']', false)),
+                '{' => Some(('{', '}', true)),
+                '}' => Some(('{', '}', false)),
+                _ => None,
+            }
+        }
+
+        // Determine starting position: either cursor or next bracket on current line.
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let (start_row, start_col, open, close, forward) =
+            if let Some(info) = chars.get(col).and_then(|&c| bracket_kind(c)) {
+                (row, col, info.0, info.1, info.2)
+            } else {
+                // Find next bracket on current line after cursor.
+                let found = chars[col..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, &c)| bracket_kind(c).map(|info| (col + i, info)))?;
+                (row, found.0, found.1 .0, found.1 .1, found.1 .2)
+            };
+
+        if forward {
+            // Scan forward: find matching close bracket.
+            let mut depth: i32 = 0;
+            let line_count = self.lines.len();
+            for r in start_row..line_count {
+                let line_chars: Vec<char> = self.lines[r].chars().collect();
+                let col_start = if r == start_row { start_col } else { 0 };
+                for (c, &ch) in line_chars.iter().enumerate().skip(col_start) {
+                    if ch == open {
+                        depth += 1;
+                    } else if ch == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((r, c));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Scan backward: find matching open bracket.
+            let mut depth: i32 = 0;
+            for r in (0..=start_row).rev() {
+                let line_chars: Vec<char> = self.lines[r].chars().collect();
+                let col_end = if r == start_row { start_col + 1 } else { line_chars.len() };
+                for (c, &ch) in line_chars[..col_end].iter().enumerate().rev() {
+                    if ch == close {
+                        depth += 1;
+                    } else if ch == open {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((r, c));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Delete from cursor to `end_col` (exclusive) and return the deleted text.
     pub fn delete_to_col(&mut self, end_col: usize) -> String {
         let row = self.cursor.row;

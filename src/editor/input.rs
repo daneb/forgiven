@@ -517,6 +517,21 @@ impl Editor {
             },
             // Enter — submit the input.
             KeyCode::Enter => {
+                // Action slash-command interception: /compress and /translate are
+                // editor actions, not prompt templates — handle them before submit.
+                let trimmed = self.agent_panel.input.trim().to_string();
+                if trimmed == "/compress" {
+                    self.agent_panel.input.clear();
+                    self.agent_panel.update_slash_menu();
+                    let _ = self.execute_action(Action::AgentJanitorCompress);
+                    return Ok(());
+                }
+                if trimmed == "/translate" {
+                    self.agent_panel.input.clear();
+                    self.agent_panel.update_slash_menu();
+                    let _ = self.execute_action(Action::AgentIntentTranslatorToggle);
+                    return Ok(());
+                }
                 // Snapshot current buffer content as context, including its path
                 // so the model knows which file is open and can reference it directly.
                 let context = self.current_buffer().map(|buf| {

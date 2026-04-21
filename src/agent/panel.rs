@@ -519,40 +519,65 @@ impl AgentPanel {
         Ok(Some(ClipboardImage { width, height, data_uri }))
     }
 
+    /// Built-in action slash commands that are always available regardless of spec_framework.
+    const BUILTIN_SLASH_COMMANDS: &'static [(&'static str, &'static str)] = &[
+        ("compress", "Summarise and compress chat history (free a slot in the context window)"),
+        ("translate", "Toggle intent translator for this session"),
+    ];
+
     /// Recompute the slash-command dropdown based on the current input.
     /// Call this whenever `self.input` changes in Agent mode.
     pub fn update_slash_menu(&mut self) {
-        let Some(ref fw) = self.spec_framework else {
-            self.slash_menu = None;
-            return;
-        };
         // Only active when the input starts with '/'
         if !self.input.starts_with('/') {
             self.slash_menu = None;
             return;
         }
         let prefix = self.input.trim_start_matches('/');
-        let all = fw.commands();
-        let items: Vec<String> =
-            all.into_iter().filter(|cmd| cmd.starts_with(prefix)).map(|s| s.to_string()).collect();
+        // Strip any trailing context (e.g. "/compress extra" → prefix is "compress extra",
+        // but we match on the command part only).
+        let cmd_prefix = prefix.split_whitespace().next().unwrap_or(prefix);
+
+        // Built-in action commands (always available).
+        let mut items: Vec<String> = Self::BUILTIN_SLASH_COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(cmd_prefix))
+            .map(|(cmd, _)| cmd.to_string())
+            .collect();
+
+        // Framework template commands (when a framework is loaded).
+        if let Some(ref fw) = self.spec_framework {
+            let fw_items: Vec<String> = fw
+                .commands()
+                .into_iter()
+                .filter(|cmd| cmd.starts_with(prefix))
+                .map(|s| s.to_string())
+                .collect();
+            items.extend(fw_items);
+        }
 
         if items.is_empty() {
             self.slash_menu = None;
             return;
         }
 
+        let describe = |cmd: &str| -> Option<String> {
+            // Check built-ins first, then fall back to framework descriptions.
+            if let Some((_, desc)) = Self::BUILTIN_SLASH_COMMANDS.iter().find(|(c, _)| *c == cmd) {
+                return Some(desc.to_string());
+            }
+            self.spec_framework.as_ref().and_then(|fw| fw.describe(cmd)).map(str::to_string)
+        };
+
         match self.slash_menu.as_mut() {
             Some(menu) => {
-                // Preserve selection index if still valid, otherwise reset.
                 let prev = menu.selected;
                 menu.items = items;
                 menu.selected = prev.min(menu.items.len().saturating_sub(1));
-                let desc = fw.describe(menu.items[menu.selected].as_str()).map(str::to_string);
-                menu.description = desc;
+                menu.description = describe(menu.items[menu.selected].as_str());
             },
             None => {
-                let description =
-                    items.first().and_then(|cmd| fw.describe(cmd.as_str())).map(str::to_string);
+                let description = items.first().and_then(|cmd| describe(cmd.as_str()));
                 self.slash_menu = Some(SlashMenuState { items, selected: 0, description });
             },
         }

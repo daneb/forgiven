@@ -9,6 +9,7 @@ impl UI {
         panel: &AgentPanel,
         mode: Mode,
         area: Rect,
+        highlighter: &crate::highlight::Highlighter,
     ) {
         let focused = mode == Mode::Agent;
         let border_style = if focused {
@@ -127,7 +128,8 @@ impl UI {
                         Style::default().fg(color).add_modifier(Modifier::BOLD)
                     };
                     ml.push(Line::from(vec![Span::styled(format!("╔ {label} "), header_style)]));
-                    let content_lines = render_message_content(&msg.content, content_width);
+                    let content_lines =
+                        render_message_content(&msg.content, content_width, highlighter);
                     if dimmed {
                         for line in content_lines {
                             ml.push(Line::from(
@@ -200,7 +202,7 @@ impl UI {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
                         ),
                     ])];
-                    sl.extend(render_message_content(partial, content_width));
+                    sl.extend(render_message_content(partial, content_width, highlighter));
                     cache.streaming_lines = sl;
                 } else {
                     cache.streaming_lines.clear();

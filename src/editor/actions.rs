@@ -905,6 +905,13 @@ Skip anything already obvious from reading the code.";
                     }
                 });
             },
+            Action::JumpMatchingPair => {
+                self.with_buffer(|buf| {
+                    if let Some((row, col)) = buf.find_matching_pair() {
+                        buf.move_cursor_to(row, col);
+                    }
+                });
+            },
             Action::YankWord => {
                 let yanked = self.current_buffer().map(|buf| buf.yank_word());
                 if let Some(text) = yanked {

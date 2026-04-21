@@ -14,6 +14,40 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+// ── Language → extension mapping ──────────────────────────────────────────────
+
+fn lang_to_extension(lang: &str) -> &str {
+    match lang.to_ascii_lowercase().trim() {
+        "rust" | "rs" => "rs",
+        "python" | "py" => "py",
+        "javascript" | "js" => "js",
+        "typescript" | "ts" => "ts",
+        "bash" | "sh" | "shell" | "zsh" => "sh",
+        "json" => "json",
+        "yaml" | "yml" => "yml",
+        "toml" => "toml",
+        "html" => "html",
+        "css" => "css",
+        "go" | "golang" => "go",
+        "c" => "c",
+        "cpp" | "c++" | "cxx" => "cpp",
+        "sql" => "sql",
+        "xml" => "xml",
+        "java" => "java",
+        "ruby" | "rb" => "rb",
+        "swift" => "swift",
+        "kotlin" | "kt" => "kt",
+        "scala" => "scala",
+        "lua" => "lua",
+        "ps1" | "powershell" => "ps1",
+        "makefile" | "make" => "makefile",
+        // Unknown language names: pass back an empty string so syntect falls
+        // back to plain-text highlighting rather than trying to dereference a
+        // temporary.
+        _ => "",
+    }
+}
+
 // ── String helpers ────────────────────────────────────────────────────────────
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values, appending `…`
@@ -35,8 +69,15 @@ use ratatui::{
 
 /// Render `content` (CommonMark markdown) into ratatui [`Line`]s that fit
 /// within `width` terminal columns.
-pub fn render(content: &str, width: usize) -> Vec<Line<'static>> {
-    Renderer::new(width).process(content)
+///
+/// Pass `Some(hl)` to get syntax-highlighted fenced code blocks. Call sites
+/// without a `Highlighter` (e.g. release-notes popup) can pass `None`.
+pub fn render(
+    content: &str,
+    width: usize,
+    hl: Option<&crate::highlight::Highlighter>,
+) -> Vec<Line<'static>> {
+    Renderer::new(width, hl).process(content)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -46,9 +87,10 @@ const MARGIN: &str = "    ";
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
-struct Renderer {
+struct Renderer<'h> {
     width: usize,
     output: Vec<Line<'static>>,
+    highlighter: Option<&'h crate::highlight::Highlighter>,
 
     // ── Inline state ─────────────────────────────────────────────────────────
     bold: bool,
@@ -85,11 +127,12 @@ struct Renderer {
     table_current_cell: String,
 }
 
-impl Renderer {
-    fn new(width: usize) -> Self {
+impl<'h> Renderer<'h> {
+    fn new(width: usize, hl: Option<&'h crate::highlight::Highlighter>) -> Self {
         Self {
             width,
             output: Vec::new(),
+            highlighter: hl,
             bold: false,
             italic: false,
             pending: Vec::new(),
@@ -114,7 +157,7 @@ impl Renderer {
     // ── Style helpers ─────────────────────────────────────────────────────────
 
     fn prose_style(&self) -> Style {
-        let mut s = Style::default().fg(Color::White);
+        let mut s = Style::default().fg(Color::Rgb(210, 215, 220));
         if self.bold {
             s = s.add_modifier(Modifier::BOLD);
         }
@@ -156,33 +199,33 @@ impl Renderer {
 
         match level {
             HeadingLevel::H1 => {
-                let style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                let style =
+                    Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD);
                 self.output.push(Line::from(Span::styled(format!("{MARGIN}{text}"), style)));
-                // Full-width underline with ═
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{}", "═".repeat(rule_width)),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                    Style::default().fg(Color::Rgb(130, 90, 25)),
                 )));
             },
             HeadingLevel::H2 => {
-                let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                let style =
+                    Style::default().fg(Color::Rgb(100, 200, 210)).add_modifier(Modifier::BOLD);
                 self.output.push(Line::from(Span::styled(format!("{MARGIN}{text}"), style)));
-                // Full-width underline with ─
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{}", "─".repeat(rule_width)),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    Style::default().fg(Color::Rgb(45, 100, 110)),
                 )));
             },
             HeadingLevel::H3 => {
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{text}"),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Rgb(145, 205, 125)).add_modifier(Modifier::BOLD),
                 )));
             },
             _ => {
                 self.output.push(Line::from(Span::styled(
                     format!("{MARGIN}{text}"),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Rgb(175, 175, 190)).add_modifier(Modifier::BOLD),
                 )));
             },
         }
@@ -230,9 +273,45 @@ impl Renderer {
             return;
         }
 
+        // Breathing room: insert a blank line before a top-level paragraph when
+        // the previous output line is non-blank (e.g. after a code block or list).
+        if trail_blank
+            && !self.in_item
+            && self.blockquote_depth == 0
+            && !self.output.is_empty()
+            && !self.output.last().map(|l| l.spans.is_empty()).unwrap_or(true)
+        {
+            self.output.push(Line::from(""));
+        }
+
         let (first, rest) = self.para_prefixes();
         let wrapped = reflow(std::mem::take(&mut self.pending), self.width, &first, &rest);
-        self.output.extend(wrapped);
+
+        // For blockquotes, re-colour the plain gutter prefix on each wrapped line
+        // with warm amber so the quote bar stands out.
+        if self.blockquote_depth > 0 {
+            let bar_len = MARGIN.len() + 3 * self.blockquote_depth; // "│  " = 3 chars per level
+            let bar_style = Style::default().fg(Color::Rgb(185, 145, 75));
+            for mut line in wrapped {
+                if let Some(first_span) = line.spans.first_mut() {
+                    if first_span.content.len() >= bar_len {
+                        let (bar_part, text_part) =
+                            first_span.content.split_at(bar_len.min(first_span.content.len()));
+                        let bar_owned = bar_part.to_string();
+                        let text_owned = text_part.to_string();
+                        let text_style = first_span.style;
+                        line.spans = std::iter::once(Span::styled(bar_owned, bar_style))
+                            .chain(std::iter::once(Span::styled(text_owned, text_style)))
+                            .chain(line.spans.into_iter().skip(1))
+                            .collect();
+                    }
+                }
+                self.output.push(line);
+            }
+        } else {
+            self.output.extend(wrapped);
+        }
+
         if trail_blank {
             self.output.push(Line::from(""));
         }
@@ -337,7 +416,12 @@ impl Renderer {
             if *is_ordered {
                 format!("{MARGIN}{indent}{}. ", counter)
             } else {
-                format!("{MARGIN}{indent}•  ")
+                let bullet = match self.list_stack.len() {
+                    1 => "●",
+                    2 => "◦",
+                    _ => "▸",
+                };
+                format!("{MARGIN}{indent}{bullet}  ")
             }
         } else {
             MARGIN.to_string()
@@ -390,29 +474,69 @@ impl Renderer {
                         CodeBlockKind::Fenced(lang) => lang.to_string(),
                         CodeBlockKind::Indented => String::new(),
                     };
-                    // Language label — dim italic, only when present
+                    // Blank line before the block (if preceded by content).
+                    if !self.output.is_empty()
+                        && !self.output.last().map(|l| l.spans.is_empty()).unwrap_or(true)
+                    {
+                        self.output.push(Line::from(""));
+                    }
+                    // Top border: ╭─ lang ─────╮
+                    let border_style = Style::default().fg(Color::Rgb(70, 80, 105));
+                    let rule_width = self.width.saturating_sub(MARGIN.len() + 4).max(4); // 4 = "╭─" + "╮" + space
                     if self.code_lang == "mermaid" {
-                        self.output.push(Line::from(Span::styled(
-                            format!("{MARGIN}  mermaid"),
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
-                        )));
+                        let label = "mermaid";
+                        let dashes = "─".repeat(rule_width.saturating_sub(label.len() + 2));
+                        self.output.push(Line::from(vec![
+                            Span::styled(format!("{MARGIN}  ╭─ "), border_style),
+                            Span::styled(
+                                label,
+                                Style::default()
+                                    .fg(Color::Rgb(220, 185, 80))
+                                    .add_modifier(Modifier::ITALIC),
+                            ),
+                            Span::styled(format!(" {dashes}╮"), border_style),
+                        ]));
                     } else if !self.code_lang.is_empty() {
+                        let label = self.code_lang.trim().to_string();
+                        let dashes =
+                            "─".repeat(rule_width.saturating_sub(label.chars().count() + 2));
+                        self.output.push(Line::from(vec![
+                            Span::styled(format!("{MARGIN}  ╭─ "), border_style),
+                            Span::styled(
+                                label,
+                                Style::default()
+                                    .fg(Color::Rgb(140, 160, 190))
+                                    .add_modifier(Modifier::ITALIC),
+                            ),
+                            Span::styled(format!(" {dashes}╮"), border_style),
+                        ]));
+                    } else {
+                        let dashes = "─".repeat(rule_width);
                         self.output.push(Line::from(Span::styled(
-                            format!("{MARGIN}  {}", self.code_lang),
-                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                            format!("{MARGIN}  ╭{dashes}╮"),
+                            border_style,
                         )));
                     }
                 },
                 Event::End(TagEnd::CodeBlock) => {
                     let is_mermaid = self.code_lang == "mermaid";
                     self.in_code_block = false;
+                    // Bottom border: ╰──────────╯
+                    let border_style = Style::default().fg(Color::Rgb(70, 80, 105));
+                    let rule_width = self.width.saturating_sub(MARGIN.len() + 4).max(4);
+                    let dashes = "─".repeat(rule_width);
                     if is_mermaid {
                         self.output.push(Line::from(Span::styled(
                             format!("{MARGIN}  · open in a browser to render"),
                             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                         )));
                     }
+                    self.output.push(Line::from(Span::styled(
+                        format!("{MARGIN}  ╰{dashes}╯"),
+                        border_style,
+                    )));
                     self.output.push(Line::from(""));
+                    self.code_lang = String::new();
                 },
 
                 // ── Lists ─────────────────────────────────────────────────────
@@ -469,26 +593,51 @@ impl Renderer {
                     if self.in_table_cell {
                         self.table_current_cell.push_str(&code);
                     } else {
-                        // Inline code — cyan; color alone signals code, no backticks.
-                        self.pending
-                            .push(Span::styled(code.to_string(), Style::default().fg(Color::Cyan)));
+                        self.pending.push(Span::styled(
+                            code.to_string(),
+                            Style::default()
+                                .fg(Color::Rgb(175, 230, 215))
+                                .bg(Color::Rgb(28, 42, 52)),
+                        ));
                     }
                 },
                 Event::Text(text) => {
                     if self.in_code_block {
-                        let (gutter_color, text_color) = if self.code_lang == "mermaid" {
-                            (Color::Yellow, Color::DarkGray)
+                        let gutter_style = Style::default().fg(Color::Rgb(70, 80, 105));
+                        let is_mermaid = self.code_lang == "mermaid";
+
+                        // Highlight the whole block in one pass (stateful HighlightLines
+                        // handles multi-line constructs correctly).
+                        let highlighted: Vec<Vec<Span<'static>>> = if !is_mermaid {
+                            if let Some(hl) = self.highlighter {
+                                let ext = lang_to_extension(&self.code_lang);
+                                hl.highlight_block(&text, ext)
+                            } else {
+                                text.lines()
+                                    .map(|l| {
+                                        vec![Span::styled(
+                                            l.to_string(),
+                                            Style::default().fg(Color::Rgb(210, 215, 220)),
+                                        )]
+                                    })
+                                    .collect()
+                            }
                         } else {
-                            (Color::DarkGray, Color::White)
+                            text.lines()
+                                .map(|l| {
+                                    vec![Span::styled(
+                                        l.to_string(),
+                                        Style::default().fg(Color::DarkGray),
+                                    )]
+                                })
+                                .collect()
                         };
-                        for line in text.lines() {
-                            self.output.push(Line::from(vec![
-                                Span::styled(
-                                    format!("{MARGIN}  │ "),
-                                    Style::default().fg(gutter_color),
-                                ),
-                                Span::styled(line.to_string(), Style::default().fg(text_color)),
-                            ]));
+
+                        for spans in highlighted {
+                            let mut line_spans =
+                                vec![Span::styled(format!("{MARGIN}  ▏ "), gutter_style)];
+                            line_spans.extend(spans);
+                            self.output.push(Line::from(line_spans));
                         }
                     } else if self.in_table_cell {
                         self.table_current_cell.push_str(&text);
@@ -518,7 +667,7 @@ impl Renderer {
                     let rule_width = self.width.saturating_sub(MARGIN.len() * 2).max(4);
                     self.output.push(Line::from(Span::styled(
                         format!("{MARGIN}{}", "─".repeat(rule_width)),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Rgb(80, 82, 105)),
                     )));
                     self.output.push(Line::from(""));
                 },

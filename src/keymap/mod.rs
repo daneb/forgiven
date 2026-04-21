@@ -244,6 +244,9 @@ pub enum Action {
     SurroundAddWord {
         ch: char,
     },
+    // Bracket navigation
+    /// `%` — jump to the matching bracket/paren/brace
+    JumpMatchingPair,
     // Inline assistant (ADR 0111)
     /// `SPC a i` — open the inline AI assist overlay on the current selection (or cursor)
     InlineAssistStart,
@@ -361,9 +364,6 @@ impl KeyHandler {
             .insert('s', KeyNode::leaf("save session to memory", Action::MemorySave));
         agent_node
             .children
-            .insert('j', KeyNode::leaf("compress history (janitor)", Action::AgentJanitorCompress));
-        agent_node
-            .children
             .insert('i', KeyNode::leaf("inline AI assist", Action::InlineAssistStart));
         agent_node
             .children
@@ -372,23 +372,19 @@ impl KeyHandler {
             .children
             .insert('v', KeyNode::leaf("investigate (single-round)", Action::AgentInvestigate));
         agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
-        agent_node
-            .children
-            .insert('I', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
-        agent_node.children.insert(
-            't',
-            KeyNode::leaf("toggle intent translator", Action::AgentIntentTranslatorToggle),
-        );
-        agent_node.children.insert(
+        // SPC a x - Codified context file openers (sub-tree to free top-level slots)
+        let mut ctx_node = KeyNode::new("codified context");
+        ctx_node.children.insert(
             'c',
             KeyNode::leaf("open constitution", Action::CodifiedContextOpenConstitution),
         );
-        agent_node
+        ctx_node
             .children
             .insert('C', KeyNode::leaf("open specialist", Action::CodifiedContextOpenSpecialist));
-        agent_node
+        ctx_node
             .children
             .insert('k', KeyNode::leaf("open knowledge doc", Action::CodifiedContextOpenKnowledge));
+        agent_node.children.insert('x', ctx_node);
         tree.insert('a', agent_node);
 
         // SPC e - Explorer / file tree
@@ -451,6 +447,9 @@ impl KeyHandler {
             .children
             .insert('d', KeyNode::leaf("diagnostics overlay", Action::DiagnosticsOpen));
         diag_node.children.insert('l', KeyNode::leaf("open log file", Action::DiagnosticsOpenLog));
+        diag_node
+            .children
+            .insert('i', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
         tree.insert('d', diag_node);
 
         tree
@@ -752,6 +751,9 @@ impl KeyHandler {
             KeyCode::Char('/') => Action::InFileSearchStart,
             KeyCode::Char('n') => Action::InFileSearchNext,
             KeyCode::Char('N') => Action::InFileSearchPrev,
+
+            // Bracket matching
+            KeyCode::Char('%') => Action::JumpMatchingPair,
 
             // f/t repeat: `;` = same direction, `,` = opposite direction
             KeyCode::Char(';') => self.last_find.clone().unwrap_or(Action::Noop),

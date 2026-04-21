@@ -243,6 +243,8 @@ pub struct RenderContext<'a> {
     pub insights_dashboard: Option<&'a crate::insights::panel::InsightsDashboardState>,
     /// When `true`, long lines are visually wrapped at the viewport edge.
     pub soft_wrap: bool,
+    /// Syntax highlighter — used for code blocks inside markdown rendering.
+    pub highlighter: &'a crate::highlight::Highlighter,
 }
 
 /// UI rendering for the editor
@@ -476,7 +478,7 @@ impl UI {
 
         // Render agent panel if visible
         if let (Some(panel), Some(area)) = (agent_panel, agent_area) {
-            Self::render_agent_panel(frame, panel, mode, area);
+            Self::render_agent_panel(frame, panel, mode, area, ctx.highlighter);
         }
 
         // Render left sidebar (explorer only now)

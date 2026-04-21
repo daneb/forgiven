@@ -5,7 +5,11 @@ use super::*;
 ///
 /// Thinking blocks get a `◌ thinking` header and word-wrapped dim-gray text;
 /// the actual reply beneath is passed unchanged through the markdown renderer.
-pub(super) fn render_message_content(content: &str, width: usize) -> Vec<Line<'static>> {
+pub(super) fn render_message_content(
+    content: &str,
+    width: usize,
+    hl: &crate::highlight::Highlighter,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     for segment in split_thinking(content) {
@@ -53,7 +57,7 @@ pub(super) fn render_message_content(content: &str, width: usize) -> Vec<Line<'s
                 lines.push(Line::from(""));
             },
             ContentSegment::Normal(text) => {
-                lines.extend(crate::markdown::render(&text, width));
+                lines.extend(crate::markdown::render(&text, width, Some(hl)));
             },
         }
     }

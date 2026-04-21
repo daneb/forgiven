@@ -252,7 +252,8 @@ impl Editor {
                     let ver = key.unwrap_or(0);
                     let content =
                         self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-                    let rendered = crate::markdown::render(&content, viewport_width);
+                    let rendered =
+                        crate::markdown::render(&content, viewport_width, Some(&self.highlighter));
                     self.markdown_cache = Some(MarkdownCache {
                         buffer_idx: buf_idx,
                         lsp_version: ver,
@@ -619,6 +620,7 @@ impl Editor {
                     None
                 },
                 soft_wrap: self.config.soft_wrap,
+                highlighter: &self.highlighter,
             };
             UI::render(frame, &ctx);
         })?;

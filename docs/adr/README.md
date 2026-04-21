@@ -137,6 +137,11 @@ that motivated it, what was decided, and the consequences.
 | [0127](0127-dependency-audit-and-suppression-policy.md) | Dependency Audit and Advisory Suppression Policy | Accepted |
 | [0128](0128-investigation-subagent.md) | Investigation Subagent (`SPC a v`) | Accepted |
 | [0129](0129-insights-dashboard.md) | Insights Dashboard: Collaboration Analytics | Accepted |
+| [0130](0130-context-efficiency-expand-on-demand-retrieval-policy-compact-prompt.md) | Context Efficiency: Expand-on-Demand Results, Retrieval Policy, and Compact System Prompt | Accepted |
+| [0131](0131-intent-translator.md) | Intent Translator | Accepted |
+| [0132](0132-codified-context-three-tier-loader.md) | Codified Context: Three-Tier Context Loader | Accepted |
+| [0133](0133-markdown-readability-upgrade.md) | Markdown Readability Upgrade | Accepted |
+| [0134](0134-vim-percent-matching-pair-motion.md) | Vim `%` Matching-Pair Motion | Accepted |
 
 ## What is an ADR?
 

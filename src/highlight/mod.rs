@@ -105,6 +105,43 @@ impl Highlighter {
             .collect()
     }
 
+    /// Highlight an entire block of text (e.g. a fenced code block) using a single
+    /// stateful `HighlightLines` instance so multi-line constructs (block comments,
+    /// string literals) are tokenised correctly across line boundaries.
+    ///
+    /// Returns one `Vec<Span>` per line in `text`.
+    pub fn highlight_block(&self, text: &str, extension: &str) -> Vec<Vec<Span<'static>>> {
+        let syntax = self
+            .ps
+            .find_syntax_by_extension(extension)
+            .unwrap_or_else(|| self.ps.find_syntax_plain_text());
+
+        let theme =
+            self.ts.themes.get(&self.theme).unwrap_or_else(|| &self.ts.themes["base16-ocean.dark"]);
+
+        let mut h = HighlightLines::new(syntax, theme);
+
+        text.lines()
+            .map(|line| {
+                let with_nl = format!("{line}\n");
+                match h.highlight_line(&with_nl, &self.ps) {
+                    Ok(ranges) => ranges
+                        .into_iter()
+                        .filter_map(|(style, text)| {
+                            let t = text.trim_end_matches('\n');
+                            if t.is_empty() {
+                                None
+                            } else {
+                                Some(Span::styled(t.to_string(), syntect_to_ratatui(style)))
+                            }
+                        })
+                        .collect(),
+                    Err(_) => vec![Span::raw(line.to_string())],
+                }
+            })
+            .collect()
+    }
+
     /// Return the file extension for a given path, or empty string for no extension.
     pub fn extension_for(path: &std::path::Path) -> String {
         path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string()
