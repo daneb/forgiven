@@ -115,6 +115,23 @@ async fn main() -> Result<()> {
         .with(RingBufLayer { buf: Arc::clone(&log_buf), capacity: 50 })
         .init();
 
+    // Log panics to the tracing file so crashes leave a trace even though the
+    // Drop impl restores the terminal (making panics look like clean exits).
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        tracing::error!("PANIC at {location}: {msg}");
+    }));
+
     let cli = Cli::parse();
 
     // -----------------------------------------------------------------------

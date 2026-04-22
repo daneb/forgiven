@@ -147,6 +147,56 @@ async fn one_shot_with_provider(
 // Free functions
 // =============================================================================
 
+/// Strip JSON wrapping from a model-generated commit message.
+///
+/// Some models (e.g. qwen via Ollama) ignore the plain-text instruction and
+/// return JSON like `{"commit_message": "..."}` or wrap the output in a
+/// markdown code fence. This function attempts to recover the plain-text
+/// message, falling back to the raw string if it cannot.
+pub(super) fn strip_json_commit_msg(raw: &str) -> String {
+    // 1. Strip surrounding markdown code fences (```json ... ``` or ``` ... ```)
+    let stripped = {
+        let trimmed = raw.trim();
+        let inner = if let Some(rest) = trimmed.strip_prefix("```") {
+            // skip the optional language tag on the opening fence line
+            let after_tag = rest.trim_start_matches(|c: char| c.is_alphabetic());
+            if let Some(body) =
+                after_tag.strip_prefix('\n').or_else(|| after_tag.strip_prefix('\r'))
+            {
+                body.trim_end_matches("```").trim()
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        };
+        inner
+    };
+
+    // 2. Try to parse as JSON and extract common commit-message fields.
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(stripped) {
+        // Try single-field variants first
+        for key in &["commit_message", "message", "commit_msg", "text", "content"] {
+            if let Some(s) = val[key].as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+        // subject + optional body
+        if let Some(subject) = val["subject"].as_str().filter(|s| !s.trim().is_empty()) {
+            if let Some(body) = val["body"].as_str().filter(|s| !s.trim().is_empty()) {
+                return format!("{}\n\n{}", subject.trim(), body.trim());
+            }
+            return subject.trim().to_string();
+        }
+    }
+
+    // 3. Not JSON (or no recognised field) — return stripped plain text.
+    stripped.to_string()
+}
+
 /// Fix unquoted node labels containing parentheses in Mermaid source.
 ///
 /// Mermaid breaks when a square-bracket label contains `(` or `)` without
@@ -380,7 +430,8 @@ impl Editor {
                 &user,
                 2048,
             )
-            .await;
+            .await
+            .map(|s| strip_json_commit_msg(&s));
             let _ = tx.send(result);
         });
 
@@ -398,6 +449,7 @@ impl Editor {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.commit_msg.buffer.clear();
+                self.commit_msg.cursor = 0;
                 self.commit_msg.rx = None;
                 self.set_status("Commit message discarded".to_string());
             },
@@ -411,6 +463,7 @@ impl Editor {
                 let out = std::process::Command::new("git").args(["commit", "-m", &msg]).output();
                 self.mode = Mode::Normal;
                 self.commit_msg.buffer.clear();
+                self.commit_msg.cursor = 0;
                 self.commit_msg.rx = None;
                 match out {
                     Ok(o) if o.status.success() => {
@@ -423,13 +476,57 @@ impl Editor {
                     Err(e) => self.set_status(format!("git error: {e}")),
                 }
             },
-            // Backspace — delete last character
+            // Backspace — delete char before cursor
             KeyCode::Backspace => {
-                self.commit_msg.buffer.pop();
+                let pos = self.commit_msg.cursor;
+                if pos > 0 {
+                    // Find the start of the previous char (handle multi-byte UTF-8)
+                    let prev = self.commit_msg.buffer[..pos]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.commit_msg.buffer.remove(prev);
+                    self.commit_msg.cursor = prev;
+                }
             },
-            // Regular characters
+            // Left arrow — move cursor one char left
+            KeyCode::Left => {
+                let pos = self.commit_msg.cursor;
+                if pos > 0 {
+                    let prev = self.commit_msg.buffer[..pos]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.commit_msg.cursor = prev;
+                }
+            },
+            // Right arrow — move cursor one char right
+            KeyCode::Right => {
+                let pos = self.commit_msg.cursor;
+                if pos < self.commit_msg.buffer.len() {
+                    let next = self.commit_msg.buffer[pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| pos + i)
+                        .unwrap_or(self.commit_msg.buffer.len());
+                    self.commit_msg.cursor = next;
+                }
+            },
+            // Home — jump to beginning
+            KeyCode::Home => {
+                self.commit_msg.cursor = 0;
+            },
+            // End — jump to end
+            KeyCode::End => {
+                self.commit_msg.cursor = self.commit_msg.buffer.len();
+            },
+            // Regular characters — insert at cursor
             KeyCode::Char(ch) => {
-                self.commit_msg.buffer.push(ch);
+                let pos = self.commit_msg.cursor;
+                self.commit_msg.buffer.insert(pos, ch);
+                self.commit_msg.cursor += ch.len_utf8();
             },
             _ => {},
         }

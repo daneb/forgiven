@@ -399,7 +399,7 @@ fn render_models(frame: &mut Frame, state: &InsightsDashboardState, area: Rect) 
         for (model, count) in &by_count {
             let bar_len = (*count * 20 / max).min(20);
             let bar = "█".repeat(bar_len);
-            let pct = if total > 0 { *count * 100 / total } else { 0 };
+            let pct = (*count * 100).checked_div(total).unwrap_or(0);
             lines.push(Line::from(vec![
                 Span::styled(format!("  {:<36}", model), Style::default().fg(Color::White)),
                 Span::styled(format!("{bar:<20}"), Style::default().fg(Color::Yellow)),
@@ -422,7 +422,7 @@ fn render_models(frame: &mut Frame, state: &InsightsDashboardState, area: Rect) 
         let mut by_count: Vec<_> = log.providers.iter().collect();
         by_count.sort_by(|a, b| b.1.cmp(a.1));
         for (provider, count) in &by_count {
-            let pct = if total > 0 { *count * 100 / total } else { 0 };
+            let pct = (*count * 100).checked_div(total).unwrap_or(0);
             lines.push(Line::from(vec![
                 Span::styled(format!("  {:<24}", provider), Style::default().fg(Color::White)),
                 Span::styled(

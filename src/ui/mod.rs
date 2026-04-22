@@ -211,6 +211,8 @@ pub struct RenderContext<'a> {
     pub split_right_focused: bool,
     /// Editable commit message buffer (Mode::CommitMsg only).
     pub commit_msg: Option<&'a str>,
+    /// Byte-offset cursor position within `commit_msg` (Mode::CommitMsg only).
+    pub commit_msg_cursor: usize,
     /// Release notes popup data (Mode::ReleaseNotes only).
     pub release_notes: Option<&'a ReleaseNotesView<'a>>,
     /// Diagnostics overlay data (Mode::Diagnostics only).
@@ -276,6 +278,7 @@ impl UI {
         let split_highlighted_lines = ctx.split_highlighted_lines;
         let split_right_focused = ctx.split_right_focused;
         let commit_msg = ctx.commit_msg;
+        let commit_msg_cursor = ctx.commit_msg_cursor;
         let release_notes = ctx.release_notes;
         let diag_overlay = ctx.diag_overlay;
         let binary_file_path = ctx.binary_file_path;
@@ -512,7 +515,7 @@ impl UI {
 
         // Render commit message popup if active
         if let Some(msg) = commit_msg {
-            Self::render_commit_msg_popup(frame, msg, size);
+            Self::render_commit_msg_popup(frame, msg, commit_msg_cursor, size);
         }
 
         // Render release notes popup if active

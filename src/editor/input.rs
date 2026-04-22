@@ -37,6 +37,11 @@ impl Editor {
             _ => {},
         }
 
+        // Discard any in-flight leader sequence before switching modes.
+        // Without this a partial SPC q sequence started in Normal could
+        // complete with a key typed in the Agent panel and quit unexpectedly.
+        self.key_handler.clear_sequence();
+
         // Focus the panel gaining focus.
         match next {
             0 => {
@@ -610,11 +615,12 @@ impl Editor {
             // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
             // On first press, fetches the live model list from the Copilot API.
             // Ctrl+C — abort the running agentic loop (stream + tool calls).
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.agent_panel.stream_rx.is_some() {
-                    self.agent_panel.cancel_stream();
-                    self.set_status("Agent stopped".to_string());
-                }
+            KeyCode::Char('c')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.agent_panel.stream_rx.is_some() =>
+            {
+                self.agent_panel.cancel_stream();
+                self.set_status("Agent stopped".to_string());
             },
             // Ctrl+K — copy next code block from the last reply (cycles through all blocks).
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {

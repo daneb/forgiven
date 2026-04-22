@@ -414,6 +414,8 @@ pub(crate) struct SplitState {
 pub(crate) struct CommitMsgState {
     /// Editable commit message buffer.
     pub buffer: String,
+    /// Byte offset of the edit cursor within `buffer`.
+    pub cursor: usize,
     /// In-flight AI generation task.
     pub rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
     /// `true` = generated from staged diff (`SPC g s`); `false` = last commit (`SPC g l`).

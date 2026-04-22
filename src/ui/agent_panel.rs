@@ -240,7 +240,7 @@ impl UI {
         let status_suffix =
             panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
         let scroll_suffix: std::borrow::Cow<'static, str> = if scroll > 0 {
-            let pct = if max_scroll > 0 { 100 - (scroll * 100 / max_scroll).min(100) } else { 100 };
+            let pct = 100 - (scroll * 100).checked_div(max_scroll).unwrap_or(0).min(100);
             format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ").into()
         } else if total_display_rows > visible_height {
             "  (↑ to scroll up) ".into()

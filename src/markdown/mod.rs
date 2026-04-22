@@ -290,7 +290,10 @@ impl<'h> Renderer<'h> {
         // For blockquotes, re-colour the plain gutter prefix on each wrapped line
         // with warm amber so the quote bar stands out.
         if self.blockquote_depth > 0 {
-            let bar_len = MARGIN.len() + 3 * self.blockquote_depth; // "│  " = 3 chars per level
+            // "│  " = 5 bytes (│ is 3 bytes in UTF-8, plus 2 ASCII spaces).
+            // bar_len = byte offset right after the last │, before the trailing spaces.
+            // Formula: MARGIN (4 bytes) + 5 * depth - 2 (drop the 2 trailing spaces).
+            let bar_len = MARGIN.len() + "│  ".len() * self.blockquote_depth - 2;
             let bar_style = Style::default().fg(Color::Rgb(185, 145, 75));
             for mut line in wrapped {
                 if let Some(first_span) = line.spans.first_mut() {
@@ -655,13 +658,11 @@ impl<'h> Renderer<'h> {
                         self.push_text(" ");
                     }
                 },
-                Event::HardBreak => {
-                    if !self.pending.is_empty() {
-                        let (first, rest) = self.para_prefixes();
-                        let wrapped =
-                            reflow(std::mem::take(&mut self.pending), self.width, &first, &rest);
-                        self.output.extend(wrapped);
-                    }
+                Event::HardBreak if !self.pending.is_empty() => {
+                    let (first, rest) = self.para_prefixes();
+                    let wrapped =
+                        reflow(std::mem::take(&mut self.pending), self.width, &first, &rest);
+                    self.output.extend(wrapped);
                 },
                 Event::Rule => {
                     let rule_width = self.width.saturating_sub(MARGIN.len() * 2).max(4);
@@ -784,4 +785,109 @@ fn reflow(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // ── Blockquote rendering (ADR 0136) ───────────────────────────────────────
+    // These tests guard against the UTF-8 split-at panic that was triggered
+    // whenever a message contained a depth-≥2 nested blockquote.
+
+    #[test]
+    fn blockquote_depth1_does_not_panic() {
+        let lines = render("> hello world", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("hello world"), "depth-1 blockquote text missing: {text:?}");
+    }
+
+    #[test]
+    fn blockquote_depth2_does_not_panic() {
+        // ">> hello" is the exact pattern that previously caused a panic:
+        // pulldown-cmark parses it as a nested blockquote (depth 2), and the
+        // old bar_len formula (4 + 3*2 = 10) fell inside the second │ character.
+        let lines = render(">> hello", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("hello"), "depth-2 blockquote text missing: {text:?}");
+    }
+
+    #[test]
+    fn blockquote_depth3_does_not_panic() {
+        let lines = render(">>> deep", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("deep"), "depth-3 blockquote text missing: {text:?}");
+    }
+
+    #[test]
+    fn blockquote_depth4_does_not_panic() {
+        let lines = render(">>>> four", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("four"), "depth-4 blockquote text missing: {text:?}");
+    }
+
+    #[test]
+    fn blockquote_contains_bar_chars() {
+        let lines = render("> quote", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains('│'), "expected │ gutter char in: {text:?}");
+    }
+
+    // ── General rendering smoke tests ─────────────────────────────────────────
+
+    #[test]
+    fn heading_h1_renders() {
+        let lines = render("# Title", 80, None);
+        assert!(plain_text(&lines).contains("Title"));
+    }
+
+    #[test]
+    fn heading_h2_renders() {
+        let lines = render("## Section", 80, None);
+        assert!(plain_text(&lines).contains("Section"));
+    }
+
+    #[test]
+    fn fenced_code_block_renders() {
+        let md = "```rust\nlet x = 1;\n```";
+        let lines = render(md, 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("let x = 1;"), "code content missing: {text:?}");
+        assert!(text.contains('╭'), "top border missing: {text:?}");
+        assert!(text.contains('╰'), "bottom border missing: {text:?}");
+    }
+
+    #[test]
+    fn unordered_list_renders() {
+        let lines = render("- item one\n- item two", 80, None);
+        let text = plain_text(&lines);
+        assert!(text.contains("item one"));
+        assert!(text.contains("item two"));
+    }
+
+    #[test]
+    fn inline_code_renders() {
+        let lines = render("use `foo()` here", 80, None);
+        assert!(plain_text(&lines).contains("foo()"));
+    }
+
+    #[test]
+    fn empty_input_does_not_panic() {
+        let lines = render("", 80, None);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn zero_width_does_not_panic() {
+        let lines = render("hello world", 0, None);
+        assert!(plain_text(&lines).contains("hello"));
+    }
 }

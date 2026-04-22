@@ -76,10 +76,11 @@ impl UI {
     }
 
     /// Render the centred commit-message popup (Mode::CommitMsg).
-    pub(super) fn render_commit_msg_popup(frame: &mut Frame, msg: &str, area: Rect) {
-        let popup_width = 80.min(area.width);
-        // Height: 2 borders + hint line + content lines (min 4, max 12)
-        let content_lines = msg.lines().count().clamp(4, 12) as u16;
+    pub(super) fn render_commit_msg_popup(frame: &mut Frame, msg: &str, cursor: usize, area: Rect) {
+        let popup_width = 100.min(area.width);
+        let inner_width = popup_width.saturating_sub(2) as usize; // subtract borders
+                                                                  // Height: 2 borders + hint line + content lines (min 6, max 20)
+        let content_lines = msg.lines().count().clamp(6, 20) as u16;
         let popup_height = (content_lines + 3).min(area.height);
         let x = (area.width.saturating_sub(popup_width)) / 2;
         let y = (area.height.saturating_sub(popup_height)) / 2;
@@ -88,7 +89,7 @@ impl UI {
         frame.render_widget(Clear, popup_area);
 
         let hint = Line::from(Span::styled(
-            " Enter=commit   Esc=discard   (edit freely) ",
+            " Enter=commit   Esc=discard   ←→=move   (edit freely) ",
             Style::default().fg(Color::DarkGray),
         ));
         let content_lines_rendered: Vec<Line<'static>> =
@@ -104,6 +105,39 @@ impl UI {
                 Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
             ));
         frame.render_widget(Paragraph::new(all_lines).block(block), popup_area);
+
+        // Position the terminal cursor so the user can see where they're editing.
+        // Walk the text up to the cursor byte offset, tracking line/col.
+        let mut cur_row: u16 = 0;
+        let mut cur_col: usize = 0;
+        let mut byte_pos: usize = 0;
+        'outer: for line in msg.lines() {
+            for (char_idx, ch) in line.char_indices() {
+                if byte_pos == cursor {
+                    cur_col = char_idx;
+                    break 'outer;
+                }
+                byte_pos += ch.len_utf8();
+            }
+            if byte_pos == cursor {
+                // Cursor is at end of this line
+                cur_col = line.len();
+                break;
+            }
+            // Account for the '\n' separator
+            byte_pos += 1;
+            if byte_pos > cursor {
+                break;
+            }
+            cur_row += 1;
+            // Wrap long lines
+            cur_row += (line.chars().count() / inner_width.max(1)) as u16;
+            cur_col = 0;
+        }
+        // +1 border, +1 hint line, +1 border top = row offset of 2; +1 border left + 1 space indent = col offset of 2
+        let screen_col = x + 1 + 1 + (cur_col % inner_width.max(1)) as u16;
+        let screen_row = y + 2 + cur_row + (cur_col / inner_width.max(1)) as u16;
+        frame.set_cursor_position((screen_col, screen_row));
     }
 
     /// Render the centred release notes popup (Mode::ReleaseNotes).

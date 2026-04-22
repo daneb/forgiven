@@ -174,7 +174,7 @@ impl Editor {
                 // AND the cached range covers at least as many rows as we now need
                 // (the range grows when folds are active to cover hidden rows).
                 let hl_extra = fold_hidden_rows.len();
-                let required_end = (scroll_row + term_height + hl_extra).min(usize::MAX);
+                let required_end = scroll_row + term_height + hl_extra;
                 let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
                     c.buffer_idx == buf_idx
                         && c.scroll_row == scroll_row
@@ -581,6 +581,7 @@ impl Editor {
                 split_highlighted_lines: split_hl_ref,
                 split_right_focused,
                 commit_msg: commit_msg_buf,
+                commit_msg_cursor: self.commit_msg.cursor,
                 release_notes: release_notes_view.as_ref(),
                 diag_overlay: diag_overlay.as_ref(),
                 binary_file_path: self.binary_file_path.as_deref(),

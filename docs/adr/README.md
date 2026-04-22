@@ -142,6 +142,8 @@ that motivated it, what was decided, and the consequences.
 | [0132](0132-codified-context-three-tier-loader.md) | Codified Context: Three-Tier Context Loader | Accepted |
 | [0133](0133-markdown-readability-upgrade.md) | Markdown Readability Upgrade | Accepted |
 | [0134](0134-vim-percent-matching-pair-motion.md) | Vim `%` Matching-Pair Motion | Accepted |
+| [0135](0135-agent-panel-space-a-cleanup.md) | Agent Panel Space-A Cleanup | Accepted |
+| [0136](0136-blockquote-split-panic-fix.md) | Blockquote Gutter Split Panic Fix | Implemented |
 
 ## What is an ADR?
 

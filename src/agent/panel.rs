@@ -725,6 +725,13 @@ impl AgentPanel {
                 ));
                 continue;
             }
+            // Use 4-backtick fences so that any ``` sequences inside the file
+            // (e.g. code blocks in a .md file) cannot prematurely close the outer
+            // fence and break both the model's context and the UI renderer.
+            let lang = std::path::Path::new(name.as_str())
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             let remaining_chars = (max_file_tokens - used_file_tokens) * 4;
             if content.len() > remaining_chars {
                 let truncated: String = content
@@ -739,13 +746,13 @@ impl AgentPanel {
                     .join("\n");
                 used_file_tokens += truncated.len() / 4;
                 parts.push(format!(
-                    "File: {name}\n\n```\n{truncated}\n```\n\
+                    "File: {name}\n\n````{lang}\n{truncated}\n````\n\
                      [truncated — aggregate file context limit reached; \
                      use read_file for the rest]"
                 ));
             } else {
                 used_file_tokens += file_tokens;
-                parts.push(format!("File: {name}\n\n```\n{content}\n```"));
+                parts.push(format!("File: {name}\n\n````{lang}\n{content}\n````"));
             }
         }
         if used_file_tokens >= max_file_tokens {

@@ -420,6 +420,7 @@ impl Editor {
             Action::AgentToggle => {
                 self.agent_panel.toggle_visible();
                 if self.agent_panel.visible {
+                    self.key_handler.clear_sequence();
                     self.mode = Mode::Agent;
                     // Eagerly load models on first show
                     if self.agent_panel.available_models.is_empty() {
@@ -440,6 +441,7 @@ impl Editor {
                 if !self.agent_panel.visible {
                     self.agent_panel.visible = true;
                 }
+                self.key_handler.clear_sequence();
                 self.agent_panel.focus();
                 self.mode = Mode::Agent;
                 // Eagerly load models on first show

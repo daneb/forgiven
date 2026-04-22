@@ -376,6 +376,7 @@ impl Editor {
                 needs_render = true;
                 match result {
                     Ok(msg) => {
+                        self.commit_msg.cursor = msg.len();
                         self.commit_msg.buffer = msg;
                         self.set_status(
                             "Commit message ready — edit then Enter to commit, Esc to discard"

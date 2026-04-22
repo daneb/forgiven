@@ -17,15 +17,13 @@ impl Editor {
                 self.mode = Mode::Normal;
                 self.status_message = None;
             },
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.buffer_picker_idx > 0 {
-                    self.buffer_picker_idx -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.buffer_picker_idx > 0 => {
+                self.buffer_picker_idx -= 1;
             },
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.buffer_picker_idx + 1 < self.buffers.len() {
-                    self.buffer_picker_idx += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.buffer_picker_idx + 1 < self.buffers.len() =>
+            {
+                self.buffer_picker_idx += 1;
             },
             _ => {},
         }
@@ -185,7 +183,7 @@ impl Editor {
                         .map(|(score, idxs)| (score, p.clone(), idxs))
                 })
                 .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.0));
             self.file_list = scored.into_iter().map(|(_, p, idxs)| (p, idxs)).collect();
         }
 
@@ -230,7 +228,7 @@ impl Editor {
                     Self::fuzzy_score(&query, &display).map(|(sc, idxs)| (sc, p.clone(), idxs))
                 })
                 .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.0));
             scored.into_iter().map(|(_, p, idxs)| (p, idxs)).collect()
         };
 
