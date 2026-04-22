@@ -383,7 +383,6 @@ impl UI {
 
         if !row_in_selection {
             // ── Fast path: no selection on this row — clip spans to viewport ──
-            // Reuses syntect Span content directly; zero extra String allocations.
             let mut col_budget = text_width;
             let mut skipped = 0usize;
 
@@ -391,20 +390,25 @@ impl UI {
                 if col_budget == 0 {
                     break;
                 }
-                let span_chars: Vec<char> = span.content.chars().collect();
-                let span_len = span_chars.len();
+                let span_len = span.content.chars().count();
+
+                if skipped + span_len <= scroll_col {
+                    // Entire span is before the viewport — skip without allocating.
+                    skipped += span_len;
+                    continue;
+                }
 
                 if skipped < scroll_col {
-                    let skip_here = (scroll_col - skipped).min(span_len);
-                    skipped += skip_here;
-                    let rest: String = span_chars[skip_here..].iter().collect();
+                    let skip_here = scroll_col - skipped;
+                    let rest: String =
+                        span.content.chars().skip(skip_here).take(col_budget).collect();
+                    col_budget = col_budget.saturating_sub(rest.chars().count());
+                    skipped = scroll_col;
                     if !rest.is_empty() {
-                        let take: String = rest.chars().take(col_budget).collect();
-                        col_budget = col_budget.saturating_sub(take.chars().count());
-                        out_spans.push(Span::styled(take, span.style));
+                        out_spans.push(Span::styled(rest, span.style));
                     }
                 } else {
-                    let take: String = span_chars.iter().take(col_budget).collect();
+                    let take: String = span.content.chars().take(col_budget).collect();
                     col_budget = col_budget.saturating_sub(take.chars().count());
                     out_spans.push(Span::styled(take, span.style));
                 }

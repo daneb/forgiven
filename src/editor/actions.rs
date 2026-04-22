@@ -505,6 +505,11 @@ impl Editor {
             Action::MarkdownOpenBrowser => {
                 self.open_markdown_in_browser();
             },
+            Action::SoftWrapToggle => {
+                self.config.soft_wrap = !self.config.soft_wrap;
+                let state = if self.config.soft_wrap { "on" } else { "off" };
+                self.set_status(format!("Soft wrap {state}"));
+            },
             // ── CSV / JSON preview ────────────────────────────────────────────
             Action::CsvPreviewToggle => {
                 if self.mode == Mode::CsvPreview {
@@ -595,9 +600,11 @@ Skip anything already obvious from reading the code.";
                     // second AI call is starting (the janitor, not a duplicate).
                     self.agent_panel.messages.push(ChatMessage {
                         role: Role::System,
-                        content:
-                            "🗜\u{fe0f} Auto-Janitor: token budget reached — compressing history…"
-                                .to_string(),
+                        content: "🗜\u{fe0f} /compress — summarising chat history to free up the \
+                                  context window. A structured summary (files changed, key \
+                                  decisions, open questions, next step) will replace the \
+                                  archived messages."
+                            .to_string(),
                         images: vec![],
                     });
                     let project_root =
@@ -700,8 +707,22 @@ Skip anything already obvious from reading the code.";
             Action::AgentIntentTranslatorToggle => {
                 self.agent_panel.intent_translator_enabled =
                     !self.agent_panel.intent_translator_enabled;
-                let state = if self.agent_panel.intent_translator_enabled { "on" } else { "off" };
+                let enabled = self.agent_panel.intent_translator_enabled;
+                let state = if enabled { "on" } else { "off" };
                 self.set_status(format!("Intent translator {state} (SPC a t to toggle)"));
+                let info = if enabled {
+                    "🔄 Intent Translator: on — your messages will be analysed and rephrased for \
+                     clarity before being sent to the model. Useful when prompts are ambiguous or \
+                     terse. Toggle with /translate or SPC a t."
+                } else {
+                    "🔄 Intent Translator: off — messages are sent as-is. Toggle with /translate \
+                     or SPC a t."
+                };
+                self.agent_panel.messages.push(ChatMessage {
+                    role: Role::System,
+                    content: info.to_string(),
+                    images: vec![],
+                });
             },
             // ── Codified Context file openers (SPC a c/C/k) ──────────────────
             Action::CodifiedContextOpenConstitution => {

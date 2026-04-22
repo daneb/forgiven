@@ -167,6 +167,7 @@ pub enum Action {
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
     CsvPreviewToggle,      // SPC m c — toggle column-aligned CSV preview
     JsonPreviewToggle,     // SPC m j — toggle pretty-printed JSON preview
+    SoftWrapToggle,        // SPC m w — toggle soft-wrap (word wrap at viewport edge)
     // Memory
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
@@ -425,6 +426,7 @@ impl KeyHandler {
         md_node
             .children
             .insert('j', KeyNode::leaf("toggle JSON preview", Action::JsonPreviewToggle));
+        md_node.children.insert('w', KeyNode::leaf("toggle soft wrap", Action::SoftWrapToggle));
         tree.insert('m', md_node);
 
         // SPC s - Search
