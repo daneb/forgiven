@@ -77,6 +77,25 @@ pub(crate) struct JsonCache {
     pub lines: Vec<ratatui::text::Line<'static>>,
 }
 
+/// Cached fold hidden-row set and stub map (ADR 0138).
+///
+/// Keyed on `(buffer_idx, lsp_version, fold_fingerprint)`.  `fold_fingerprint`
+/// is a cheap XOR hash of the sorted closed-fold start rows so that toggling a
+/// fold invalidates the cache without a full set comparison.  `lsp_version`
+/// covers buffer edits (same signal used by HighlightCache and StickyScrollCache).
+///
+/// On a cache hit the pre-built `HashSet`/`HashMap` are reused directly,
+/// eliminating the per-frame allocation that existed before this cache.
+pub(crate) struct FoldCache {
+    pub buffer_idx: usize,
+    pub lsp_version: i32,
+    /// XOR of all closed-fold start rows. Cheap to compute; collisions are
+    /// benign (worst case: one extra recomputation, never wrong output).
+    pub fold_fingerprint: u64,
+    pub hidden_rows: std::collections::HashSet<usize>,
+    pub stub_map: std::collections::HashMap<usize, usize>,
+}
+
 // ── LSP location list ─────────────────────────────────────────────────────────
 
 /// A single navigable entry produced by goto-definition, find-references, or

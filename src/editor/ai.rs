@@ -176,7 +176,7 @@ pub(super) fn strip_json_commit_msg(raw: &str) -> String {
     // 2. Try to parse as JSON and extract common commit-message fields.
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(stripped) {
         // Try single-field variants first
-        for key in &["commit_message", "message", "commit_msg", "text", "content"] {
+        for key in &["commit_message", "message", "commit_msg", "text", "content", "response"] {
             if let Some(s) = val[key].as_str() {
                 let s = s.trim();
                 if !s.is_empty() {
@@ -190,6 +190,18 @@ pub(super) fn strip_json_commit_msg(raw: &str) -> String {
                 return format!("{}\n\n{}", subject.trim(), body.trim());
             }
             return subject.trim().to_string();
+        }
+        // Last resort: pick the longest non-empty string value from any top-level key.
+        if let Some(obj) = val.as_object() {
+            if let Some(best) = obj
+                .values()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .max_by_key(|s| s.len())
+            {
+                return best.to_string();
+            }
         }
     }
 
@@ -1095,5 +1107,55 @@ impl Editor {
             }
         }
         snippets.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_json_commit_msg;
+
+    #[test]
+    fn plain_text_passes_through() {
+        let msg = "Fix render bug\n\n- rewrote cursor calc";
+        assert_eq!(strip_json_commit_msg(msg), msg);
+    }
+
+    #[test]
+    fn known_commit_message_key() {
+        let raw = r#"{"commit_message": "Add feature X"}"#;
+        assert_eq!(strip_json_commit_msg(raw), "Add feature X");
+    }
+
+    #[test]
+    fn response_key_extracted() {
+        let raw = r#"{"response": "Fix cursor position\n\n- walk byte offsets correctly"}"#;
+        assert_eq!(
+            strip_json_commit_msg(raw),
+            "Fix cursor position\n\n- walk byte offsets correctly"
+        );
+    }
+
+    #[test]
+    fn pretty_printed_response_key() {
+        let raw = "{\n  \"response\": \"Refactor state module\"\n}";
+        assert_eq!(strip_json_commit_msg(raw), "Refactor state module");
+    }
+
+    #[test]
+    fn unknown_key_falls_back_to_longest_value() {
+        let raw = r#"{"note": "short", "summary": "A longer commit message here"}"#;
+        assert_eq!(strip_json_commit_msg(raw), "A longer commit message here");
+    }
+
+    #[test]
+    fn markdown_fence_stripped_before_json_parse() {
+        let raw = "```json\n{\"message\": \"chore: bump version\"}\n```";
+        assert_eq!(strip_json_commit_msg(raw), "chore: bump version");
+    }
+
+    #[test]
+    fn subject_and_body_combined() {
+        let raw = r#"{"subject": "Add fold cache", "body": "- reduces per-frame allocs"}"#;
+        assert_eq!(strip_json_commit_msg(raw), "Add fold cache\n\n- reduces per-frame allocs");
     }
 }

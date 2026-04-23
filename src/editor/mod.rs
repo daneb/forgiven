@@ -15,8 +15,8 @@ mod state;
 mod surround;
 mod text_objects;
 pub(crate) use state::{
-    apply_hunk_verdicts, ClipboardType, CommitMsgState, CsvCache, HighlightCache, JsonCache,
-    MarkdownCache, ReleaseNotesState, SplitState, StickyScrollCache,
+    apply_hunk_verdicts, ClipboardType, CommitMsgState, CsvCache, FoldCache, HighlightCache,
+    JsonCache, MarkdownCache, ReleaseNotesState, SplitState, StickyScrollCache,
 };
 pub use state::{
     DiffLine, HoverPopupState, InlineAssistPhase, InlineAssistState, LocationEntry,
@@ -201,6 +201,8 @@ pub struct Editor {
 
     /// Cached sticky-scroll header — avoids walking the tree-sitter CST every frame.
     sticky_scroll_cache: Option<StickyScrollCache>,
+    /// Cached fold hidden-row set and stub map (ADR 0138).
+    fold_cache: Option<FoldCache>,
 
     // ── Project-wide text search ──────────────────────────────────────────────
     /// State for the search overlay (Mode::Search).
@@ -409,6 +411,7 @@ impl Editor {
             csv_cache: None,
             json_cache: None,
             sticky_scroll_cache: None,
+            fold_cache: None,
             last_agent_render: None,
             search_state: SearchState::new(),
             search_rx: None,

@@ -1,13 +1,307 @@
 use anyhow::Result;
 use ratatui::text::Span;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{CsvCache, Editor, HighlightCache, JsonCache, MarkdownCache, StickyScrollCache};
+use super::{
+    CsvCache, Editor, FoldCache, HighlightCache, JsonCache, MarkdownCache, StickyScrollCache,
+};
 use crate::highlight::Highlighter;
 use crate::keymap::Mode;
 use crate::ui::{RenderContext, UI};
 
+// ── Fold data helpers (ADR 0138) ──────────────────────────────────────────────
+
+/// Compute which rows are hidden and which rows are fold stubs given the
+/// tree-sitter fold ranges and the set of currently-closed fold start rows.
+///
+/// Pure function — no `self`, no side effects, fully unit-testable.
+/// Called by `render()` on a cache miss; result stored in `FoldCache`.
+pub(crate) fn compute_fold_data(
+    fold_ranges: &[(usize, usize)],
+    fold_closed_set: &HashSet<usize>,
+) -> (HashSet<usize>, HashMap<usize, usize>) {
+    let mut hidden_rows = HashSet::new();
+    let mut stub_map = HashMap::new();
+    for &(start, end) in fold_ranges {
+        if fold_closed_set.contains(&start) {
+            for row in (start + 1)..=end {
+                hidden_rows.insert(row);
+            }
+            stub_map.insert(start, end);
+        }
+    }
+    (hidden_rows, stub_map)
+}
+
+/// Cheap fingerprint for a set of closed fold start rows.
+/// XOR of all values — O(k), collision-safe enough for a render cache.
+pub(crate) fn fold_fingerprint(closed: &HashSet<usize>) -> u64 {
+    closed.iter().fold(0u64, |acc, &v| acc ^ (v as u64))
+}
+
+// ── Preview cache helper (ADR 0138) ───────────────────────────────────────────
+
+/// Cache-or-render for preview modes (Markdown, CSV, JSON).
+///
+/// On a cache hit (`key_matches` returns `true`) the stored lines are cloned
+/// and returned without calling `render_fn`.  On a miss `render_fn` is called
+/// once, the result is stored via `make_cache`, and the same lines are returned.
+///
+/// Free function (not a method) so the caller can extract fields from `self`
+/// before passing a mutable borrow of the cache field — avoiding split-borrow
+/// conflicts.
+pub(crate) fn cached_preview<C: PreviewLines>(
+    cache: &mut Option<C>,
+    key_matches: impl Fn(&C) -> bool,
+    render_fn: impl FnOnce() -> Vec<ratatui::text::Line<'static>>,
+    make_cache: impl FnOnce(Vec<ratatui::text::Line<'static>>) -> C,
+) -> Vec<ratatui::text::Line<'static>> {
+    if cache.as_ref().is_some_and(key_matches) {
+        cache.as_ref().unwrap().lines().to_vec()
+    } else {
+        let rendered = render_fn();
+        *cache = Some(make_cache(rendered.clone()));
+        rendered
+    }
+}
+
+/// Trait so `cached_preview` can access the stored lines from any cache type
+/// without knowing its concrete fields.
+pub(crate) trait PreviewLines {
+    fn lines(&self) -> &[ratatui::text::Line<'static>];
+}
+
+impl PreviewLines for MarkdownCache {
+    fn lines(&self) -> &[ratatui::text::Line<'static>] {
+        &self.lines
+    }
+}
+impl PreviewLines for CsvCache {
+    fn lines(&self) -> &[ratatui::text::Line<'static>] {
+        &self.lines
+    }
+}
+impl PreviewLines for JsonCache {
+    fn lines(&self) -> &[ratatui::text::Line<'static>] {
+        &self.lines
+    }
+}
+
 impl Editor {
+    /// Ensure FoldCache is current and return `(hidden_rows, stub_map)`.
+    ///
+    /// Caller must have already called `ts_tree_for_current_buffer()` so that
+    /// `ts_cache[buf_idx]` is fresh before this is invoked.
+    fn render_fold_data(&mut self, buf_idx: usize) -> (HashSet<usize>, HashMap<usize, usize>) {
+        let lsp_ver = self.current_buffer().map(|b| b.lsp_version).unwrap_or(0);
+        let closed = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();
+        let fingerprint = fold_fingerprint(&closed);
+        let cache_hit = self.fold_cache.as_ref().is_some_and(|c| {
+            c.buffer_idx == buf_idx && c.lsp_version == lsp_ver && c.fold_fingerprint == fingerprint
+        });
+        if !cache_hit {
+            let ranges: Vec<(usize, usize)> = self
+                .ts_cache
+                .get(&buf_idx)
+                .map(crate::treesitter::query::fold_ranges)
+                .unwrap_or_default();
+            let (hidden_rows, stub_map) = compute_fold_data(&ranges, &closed);
+            self.fold_cache = Some(FoldCache {
+                buffer_idx: buf_idx,
+                lsp_version: lsp_ver,
+                fold_fingerprint: fingerprint,
+                hidden_rows,
+                stub_map,
+            });
+        }
+        self.fold_cache
+            .as_ref()
+            .map(|c| (c.hidden_rows.clone(), c.stub_map.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Ensure StickyScrollCache is current and return the header string.
+    ///
+    /// Returns `None` when there is no enclosing scope at the current scroll
+    /// position, or when tree-sitter has no parse for the buffer.
+    fn render_sticky_scroll(&mut self, buf_idx: usize) -> Option<String> {
+        let scroll_row = self.current_buffer().map(|b| b.scroll_row).unwrap_or(0);
+        let lsp_ver = self.current_buffer().map(|b| b.lsp_version).unwrap_or(0);
+        let cache_hit = self.sticky_scroll_cache.as_ref().is_some_and(|c| {
+            c.buffer_idx == buf_idx && c.scroll_row == scroll_row && c.lsp_version == lsp_ver
+        });
+        if !cache_hit {
+            let header = self
+                .ts_cache
+                .get(&buf_idx)
+                .and_then(|s| crate::treesitter::query::sticky_scroll_header(s, scroll_row));
+            self.sticky_scroll_cache = Some(StickyScrollCache {
+                buffer_idx: buf_idx,
+                scroll_row,
+                lsp_version: lsp_ver,
+                header,
+            });
+        }
+        self.sticky_scroll_cache.as_ref().and_then(|c| c.header.clone())
+    }
+
+    /// Ensure HighlightCache is current and return an Arc to the span vec.
+    ///
+    /// `fold_hidden_rows` is needed to extend the highlighted range beyond the
+    /// visible viewport so the renderer can look up spans for fold-skipped rows.
+    fn render_highlight_spans(
+        &mut self,
+        buf_idx: usize,
+        fold_hidden_rows: &HashSet<usize>,
+        term_height: usize,
+    ) -> Option<Arc<Vec<Vec<Span<'static>>>>> {
+        // Collect cache key via immutable borrow — borrow ends before mutable write.
+        let cache_key = self.current_buffer().map(|buf| {
+            let ext = buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default();
+            let name = buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default();
+            (buf.scroll_row, buf.lsp_version, ext, name)
+        });
+        let (scroll_row, lsp_ver, ext, name) = cache_key?;
+        let hl_extra = fold_hidden_rows.len();
+        let required_end = scroll_row + term_height + hl_extra;
+        let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
+            c.buffer_idx == buf_idx
+                && c.scroll_row == scroll_row
+                && c.lsp_version == lsp_ver
+                && c.spans.len() >= required_end.saturating_sub(scroll_row)
+        });
+        if cache_hit {
+            return self.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans));
+        }
+        // Cache miss: run syntect for the visible window + hidden fold rows.
+        let spans = if let Some(buf) = self.current_buffer() {
+            let end = (scroll_row + term_height + hl_extra).min(buf.lines().len());
+            buf.lines()[scroll_row..end]
+                .iter()
+                .map(|line| self.highlighter.highlight_line(line, &ext, &name))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let arc = Arc::new(spans);
+        self.highlight_cache = Some(HighlightCache {
+            buffer_idx: buf_idx,
+            scroll_row,
+            lsp_version: lsp_ver,
+            spans: Arc::clone(&arc),
+        });
+        Some(arc)
+    }
+
+    /// Return the scrolled preview lines for MarkdownPreview, CsvPreview, or
+    /// JsonPreview modes.  Returns `None` for all other modes.
+    fn render_preview_lines(
+        &mut self,
+        mode: Mode,
+        buf_idx: usize,
+        viewport_width: usize,
+    ) -> Option<Vec<ratatui::text::Line<'static>>> {
+        if mode == Mode::MarkdownPreview {
+            let lsp_ver = self.current_buffer().map(|b| b.lsp_version);
+            let ver = lsp_ver.unwrap_or(0);
+            let content =
+                self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+            let highlighter_ref = &self.highlighter;
+            let vw = viewport_width;
+            let all_lines = cached_preview(
+                &mut self.markdown_cache,
+                |c| {
+                    c.buffer_idx == buf_idx
+                        && Some(c.lsp_version) == lsp_ver
+                        && c.viewport_width == vw
+                },
+                || crate::markdown::render(&content, vw, Some(highlighter_ref)),
+                |lines| MarkdownCache {
+                    buffer_idx: buf_idx,
+                    lsp_version: ver,
+                    viewport_width: vw,
+                    lines,
+                },
+            );
+            let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else if mode == Mode::CsvPreview {
+            let lsp_ver = self.current_buffer().map(|b| b.lsp_version);
+            let ver = lsp_ver.unwrap_or(0);
+            let content =
+                self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+            let all_lines = cached_preview(
+                &mut self.csv_cache,
+                |c| c.buffer_idx == buf_idx && Some(c.lsp_version) == lsp_ver,
+                || crate::csv_preview::render(&content),
+                |lines| CsvCache { buffer_idx: buf_idx, lsp_version: ver, lines },
+            );
+            let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else if mode == Mode::JsonPreview {
+            let lsp_ver = self.current_buffer().map(|b| b.lsp_version);
+            let ver = lsp_ver.unwrap_or(0);
+            let content =
+                self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
+            let all_lines = cached_preview(
+                &mut self.json_cache,
+                |c| c.buffer_idx == buf_idx && Some(c.lsp_version) == lsp_ver,
+                || crate::json_preview::render(&content),
+                |lines| JsonCache { buffer_idx: buf_idx, lsp_version: ver, lines },
+            );
+            let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
+            Some(all_lines.into_iter().skip(scroll).collect())
+        } else {
+            None
+        }
+    }
+
+    /// Ensure the split-pane HighlightCache is current and return an Arc to
+    /// the span vec.  Returns `None` when no split is active.
+    fn render_split_highlight(
+        &mut self,
+        term_height: usize,
+    ) -> Option<Arc<Vec<Vec<Span<'static>>>>> {
+        let split_idx = self.split.other_idx?;
+        // Collect key fields from an immutable borrow before any mutable write.
+        let (split_scroll, split_ver, split_ext, split_name) = {
+            let buf = self.buffers.get(split_idx)?;
+            (
+                buf.scroll_row,
+                buf.lsp_version,
+                buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default(),
+                buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default(),
+            )
+        };
+        let cache_hit = self.split.highlight_cache.as_ref().is_some_and(|c| {
+            c.buffer_idx == split_idx && c.scroll_row == split_scroll && c.lsp_version == split_ver
+        });
+        if cache_hit {
+            return self.split.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans));
+        }
+        let end = {
+            let buf = self.buffers.get(split_idx)?;
+            (split_scroll + term_height).min(buf.lines().len())
+        };
+        // Re-borrow for the highlight pass — separate from the cache write below.
+        let spans: Vec<Vec<Span<'static>>> = {
+            let buf = self.buffers.get(split_idx)?;
+            buf.lines()[split_scroll..end]
+                .iter()
+                .map(|line| self.highlighter.highlight_line(line, &split_ext, &split_name))
+                .collect()
+        };
+        let arc = Arc::new(spans);
+        self.split.highlight_cache = Some(HighlightCache {
+            buffer_idx: split_idx,
+            scroll_row: split_scroll,
+            lsp_version: split_ver,
+            spans: Arc::clone(&arc),
+        });
+        Some(arc)
+    }
+
     /// Render the UI
     pub(super) fn render(&mut self) -> Result<()> {
         let mode = self.mode;
@@ -62,32 +356,10 @@ impl Editor {
             self.with_buffer(|buf| buf.scroll_to_cursor(viewport_height, viewport_width));
         }
 
-        // ── Fold data (ADR 0106) ──────────────────────────────────────────────
-        // Populate the tree-sitter cache for the current buffer (no-op if already
-        // current), then compute which rows are hidden and which are fold stubs.
+        // ── Fold data (ADR 0106, cached per ADR 0138) ────────────────────────
         let buf_idx = self.current_buffer_idx;
         let _ = self.ts_tree_for_current_buffer(); // ensures ts_cache[buf_idx] is fresh
-
-        let fold_ranges: Vec<(usize, usize)> = self
-            .ts_cache
-            .get(&buf_idx)
-            .map(crate::treesitter::query::fold_ranges)
-            .unwrap_or_default();
-
-        let fold_closed_set = self.fold_closed.get(&buf_idx).cloned().unwrap_or_default();
-
-        let mut fold_hidden_rows: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        let mut fold_stub_map: std::collections::HashMap<usize, usize> =
-            std::collections::HashMap::new();
-        for &(start, end) in &fold_ranges {
-            if fold_closed_set.contains(&start) {
-                for row in (start + 1)..=end {
-                    fold_hidden_rows.insert(row);
-                }
-                fold_stub_map.insert(start, end);
-            }
-        }
+        let (fold_hidden_rows, fold_stub_map) = self.render_fold_data(buf_idx);
 
         // The fold_data passed to the renderer (None when no folds are active).
         let fold_data_owned: Option<crate::ui::FoldData> = if !fold_stub_map.is_empty() {
@@ -101,26 +373,7 @@ impl Editor {
         let fold_data_ref: Option<&crate::ui::FoldData> = fold_data_owned.as_ref();
 
         // ── Sticky scroll header (ADR 0107) ───────────────────────────────────
-        let scroll_row_for_sticky = self.current_buffer().map(|b| b.scroll_row).unwrap_or(0);
-        let lsp_ver_for_sticky = self.current_buffer().map(|b| b.lsp_version).unwrap_or(0);
-        let cache_hit = self.sticky_scroll_cache.as_ref().is_some_and(|c| {
-            c.buffer_idx == buf_idx
-                && c.scroll_row == scroll_row_for_sticky
-                && c.lsp_version == lsp_ver_for_sticky
-        });
-        if !cache_hit {
-            let header = self.ts_cache.get(&buf_idx).and_then(|s| {
-                crate::treesitter::query::sticky_scroll_header(s, scroll_row_for_sticky)
-            });
-            self.sticky_scroll_cache = Some(StickyScrollCache {
-                buffer_idx: buf_idx,
-                scroll_row: scroll_row_for_sticky,
-                lsp_version: lsp_ver_for_sticky,
-                header,
-            });
-        }
-        let sticky_header_owned: Option<String> =
-            self.sticky_scroll_cache.as_ref().and_then(|c| c.header.clone());
+        let sticky_header_owned: Option<String> = self.render_sticky_scroll(buf_idx);
         let sticky_header_ref: Option<&str> = sticky_header_owned.as_deref();
 
         // ── Account for sticky header in viewport height ───────────────────────
@@ -156,62 +409,9 @@ impl Editor {
         });
 
         // ── Syntax-highlight cache ─────────────────────────────────────────────
-        // Re-use spans from the previous frame when the buffer content (lsp_version),
-        // scroll position, and active buffer are all unchanged.  This eliminates the
-        // ~3–8 ms syntect cost on every frame where the user is just moving the cursor.
         let term_height = viewport_height;
-
-        // Collect the cache key from an immutable borrow (borrow ends before mut access).
-        let cache_key = self.current_buffer().map(|buf| {
-            let ext = buf.file_path.as_deref().map(Highlighter::extension_for).unwrap_or_default();
-            let name = buf.file_path.as_deref().map(Highlighter::filename_for).unwrap_or_default();
-            (buf.scroll_row, buf.lsp_version, ext, name)
-        });
-
-        let highlighted_lines: Option<Arc<Vec<Vec<Span<'static>>>>> =
-            if let Some((scroll_row, lsp_ver, ext, name)) = cache_key {
-                // Cache hit only when: same buffer, same scroll position, same content version,
-                // AND the cached range covers at least as many rows as we now need
-                // (the range grows when folds are active to cover hidden rows).
-                let hl_extra = fold_hidden_rows.len();
-                let required_end = scroll_row + term_height + hl_extra;
-                let cache_hit = self.highlight_cache.as_ref().is_some_and(|c| {
-                    c.buffer_idx == buf_idx
-                        && c.scroll_row == scroll_row
-                        && c.lsp_version == lsp_ver
-                        && c.spans.len() >= required_end.saturating_sub(scroll_row)
-                });
-
-                if cache_hit {
-                    // Cache hit: Arc::clone is a single atomic increment — zero allocation.
-                    self.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
-                } else {
-                    // Cache miss: run syntect for the visible window and store result.
-                    // Extend the range by the number of hidden (fold-skipped) rows so
-                    // that the renderer can look up highlights for all visible buffer rows
-                    // using `line_idx = buf_row - scroll_row` even when folds are active.
-                    let spans = if let Some(buf) = self.current_buffer() {
-                        let hl_extra = fold_hidden_rows.len();
-                        let end = (scroll_row + term_height + hl_extra).min(buf.lines().len());
-                        buf.lines()[scroll_row..end]
-                            .iter()
-                            .map(|line| self.highlighter.highlight_line(line, &ext, &name))
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    };
-                    let arc = Arc::new(spans);
-                    self.highlight_cache = Some(HighlightCache {
-                        buffer_idx: buf_idx,
-                        scroll_row,
-                        lsp_version: lsp_ver,
-                        spans: Arc::clone(&arc),
-                    });
-                    Some(arc)
-                }
-            } else {
-                None
-            };
+        let highlighted_lines =
+            self.render_highlight_spans(buf_idx, &fold_hidden_rows, term_height);
 
         // Buffer list for PickBuffer mode
         let buffer_list = if self.mode == Mode::PickBuffer {
@@ -230,100 +430,14 @@ impl Editor {
             None
         };
 
-        let ghost = self.ghost_text.as_ref().map(|(text, row, col)| (text.as_str(), *row, *col));
+        // Clone ghost text so the borrow on self.ghost_text doesn't conflict
+        // with the &mut self borrow taken by render_preview_lines below.
+        let ghost_owned =
+            self.ghost_text.as_ref().map(|(text, row, col)| (text.clone(), *row, *col));
+        let ghost = ghost_owned.as_ref().map(|(text, row, col)| (text.as_str(), *row, *col));
 
-        // ── Markdown preview lines ─────────────────────────────────────────────
-        // Computed when in MarkdownPreview mode; cached by (lsp_version, viewport_width)
-        // so markdown re-parsing is skipped on frames where nothing changed.
-        let preview_lines_owned: Option<Vec<ratatui::text::Line<'static>>> = if mode
-            == Mode::MarkdownPreview
-        {
-            let all_lines = {
-                let buf_idx = self.current_buffer_idx;
-                let key = self.current_buffer().map(|buf| buf.lsp_version);
-                let cache_hit = self.markdown_cache.as_ref().is_some_and(|c| {
-                    c.buffer_idx == buf_idx
-                        && Some(c.lsp_version) == key
-                        && c.viewport_width == viewport_width
-                });
-                if cache_hit {
-                    self.markdown_cache.as_ref().unwrap().lines.clone()
-                } else {
-                    let ver = key.unwrap_or(0);
-                    let content =
-                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-                    let rendered =
-                        crate::markdown::render(&content, viewport_width, Some(&self.highlighter));
-                    self.markdown_cache = Some(MarkdownCache {
-                        buffer_idx: buf_idx,
-                        lsp_version: ver,
-                        viewport_width,
-                        lines: rendered.clone(),
-                    });
-                    rendered
-                }
-            };
-            // Cap scroll so we can't scroll past the end.
-            let max_scroll = all_lines.len().saturating_sub(1);
-            let scroll = self.preview_scroll.min(max_scroll);
-            Some(all_lines.into_iter().skip(scroll).collect())
-        } else if mode == Mode::CsvPreview {
-            // ── CSV preview lines ──────────────────────────────────────────────
-            let all_lines = {
-                let buf_idx = self.current_buffer_idx;
-                let key = self.current_buffer().map(|buf| buf.lsp_version);
-                let cache_hit = self
-                    .csv_cache
-                    .as_ref()
-                    .is_some_and(|c| c.buffer_idx == buf_idx && Some(c.lsp_version) == key);
-                if cache_hit {
-                    self.csv_cache.as_ref().unwrap().lines.clone()
-                } else {
-                    let ver = key.unwrap_or(0);
-                    let content =
-                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-                    let rendered = crate::csv_preview::render(&content);
-                    self.csv_cache = Some(CsvCache {
-                        buffer_idx: buf_idx,
-                        lsp_version: ver,
-                        lines: rendered.clone(),
-                    });
-                    rendered
-                }
-            };
-            let max_scroll = all_lines.len().saturating_sub(1);
-            let scroll = self.preview_scroll.min(max_scroll);
-            Some(all_lines.into_iter().skip(scroll).collect())
-        } else if mode == Mode::JsonPreview {
-            // ── JSON preview lines ─────────────────────────────────────────────
-            let all_lines = {
-                let buf_idx = self.current_buffer_idx;
-                let key = self.current_buffer().map(|buf| buf.lsp_version);
-                let cache_hit = self
-                    .json_cache
-                    .as_ref()
-                    .is_some_and(|c| c.buffer_idx == buf_idx && Some(c.lsp_version) == key);
-                if cache_hit {
-                    self.json_cache.as_ref().unwrap().lines.clone()
-                } else {
-                    let ver = key.unwrap_or(0);
-                    let content =
-                        self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-                    let rendered = crate::json_preview::render(&content);
-                    self.json_cache = Some(JsonCache {
-                        buffer_idx: buf_idx,
-                        lsp_version: ver,
-                        lines: rendered.clone(),
-                    });
-                    rendered
-                }
-            };
-            let max_scroll = all_lines.len().saturating_sub(1);
-            let scroll = self.preview_scroll.min(max_scroll);
-            Some(all_lines.into_iter().skip(scroll).collect())
-        } else {
-            None
-        };
+        // ── Preview lines (Markdown / CSV / JSON) — ADR 0138 ─────────────────
+        let preview_lines_owned = self.render_preview_lines(mode, buf_idx, viewport_width);
 
         // ── Split pane data ────────────────────────────────────────────────────
         // Same viewport-clipped approach as the primary buffer: only the visible
@@ -344,53 +458,7 @@ impl Editor {
         });
 
         // ── Split highlight cache ──────────────────────────────────────────────
-        let split_highlighted_lines: Option<Arc<Vec<Vec<ratatui::text::Span<'static>>>>> =
-            if let Some(split_idx) = self.split.other_idx {
-                if let Some(split_buf) = self.buffers.get(split_idx) {
-                    let split_scroll = split_buf.scroll_row;
-                    let split_ver = split_buf.lsp_version;
-                    let split_ext = split_buf
-                        .file_path
-                        .as_deref()
-                        .map(Highlighter::extension_for)
-                        .unwrap_or_default();
-                    let split_name = split_buf
-                        .file_path
-                        .as_deref()
-                        .map(Highlighter::filename_for)
-                        .unwrap_or_default();
-                    let cache_hit = self.split.highlight_cache.as_ref().is_some_and(|c| {
-                        c.buffer_idx == split_idx
-                            && c.scroll_row == split_scroll
-                            && c.lsp_version == split_ver
-                    });
-                    if cache_hit {
-                        // Cache hit: Arc::clone is a single atomic increment — zero allocation.
-                        self.split.highlight_cache.as_ref().map(|c| Arc::clone(&c.spans))
-                    } else {
-                        let end = (split_scroll + term_height).min(split_buf.lines().len());
-                        let spans: Vec<Vec<ratatui::text::Span<'static>>> = split_buf.lines()
-                            [split_scroll..end]
-                            .iter()
-                            .map(|line| {
-                                self.highlighter.highlight_line(line, &split_ext, &split_name)
-                            })
-                            .collect();
-                        let arc = Arc::new(spans);
-                        self.split.highlight_cache = Some(HighlightCache {
-                            buffer_idx: split_idx,
-                            scroll_row: split_scroll,
-                            lsp_version: split_ver,
-                            spans: Arc::clone(&arc),
-                        });
-                        Some(arc)
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+        let split_highlighted_lines = self.render_split_highlight(term_height);
 
         let split_right_focused = self.split.right_focused;
 
@@ -627,5 +695,177 @@ impl Editor {
         })?;
 
         Ok(())
+    }
+}
+
+// ── Tests (ADR 0138) ──────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::text::Line;
+
+    // ── compute_fold_data ────────────────────────────────────────────────────
+
+    #[test]
+    fn fold_no_closed_ranges_produces_empty_sets() {
+        let ranges = vec![(2usize, 5usize), (10, 15)];
+        let closed: HashSet<usize> = HashSet::new();
+        let (hidden, stubs) = compute_fold_data(&ranges, &closed);
+        assert!(hidden.is_empty(), "no closed folds → no hidden rows");
+        assert!(stubs.is_empty(), "no closed folds → no stubs");
+    }
+
+    #[test]
+    fn fold_closed_range_hides_interior_rows() {
+        let ranges = vec![(2usize, 5usize)];
+        let closed: HashSet<usize> = [2].into();
+        let (hidden, stubs) = compute_fold_data(&ranges, &closed);
+        // rows 3, 4, 5 are hidden; row 2 (the start) is NOT hidden — it becomes the stub
+        assert!(!hidden.contains(&2), "start row must not be hidden");
+        assert!(hidden.contains(&3));
+        assert!(hidden.contains(&4));
+        assert!(hidden.contains(&5));
+        assert_eq!(hidden.len(), 3);
+        assert_eq!(stubs.get(&2), Some(&5), "stub maps start → end");
+    }
+
+    #[test]
+    fn fold_open_range_not_in_hidden_or_stubs() {
+        let ranges = vec![(0usize, 3usize), (5, 8)];
+        // Only close the second range
+        let closed: HashSet<usize> = [5].into();
+        let (hidden, stubs) = compute_fold_data(&ranges, &closed);
+        // Rows 1-3 must NOT be hidden (first fold is open)
+        assert!(!hidden.contains(&1));
+        assert!(!hidden.contains(&2));
+        assert!(!hidden.contains(&3));
+        assert!(!stubs.contains_key(&0));
+        // Rows 6-8 must be hidden
+        assert!(hidden.contains(&6));
+        assert!(hidden.contains(&7));
+        assert!(hidden.contains(&8));
+        assert_eq!(stubs.get(&5), Some(&8));
+    }
+
+    #[test]
+    fn fold_multiple_closed_ranges() {
+        let ranges = vec![(0usize, 2usize), (5, 7)];
+        let closed: HashSet<usize> = [0, 5].into();
+        let (hidden, stubs) = compute_fold_data(&ranges, &closed);
+        // First fold: rows 1-2 hidden, start 0 → stub 2
+        // Second fold: rows 6-7 hidden, start 5 → stub 7
+        assert_eq!(hidden.len(), 4);
+        assert!(hidden.contains(&1) && hidden.contains(&2));
+        assert!(hidden.contains(&6) && hidden.contains(&7));
+        assert_eq!(stubs.len(), 2);
+        assert_eq!(stubs.get(&0), Some(&2));
+        assert_eq!(stubs.get(&5), Some(&7));
+    }
+
+    #[test]
+    fn fold_start_row_never_in_hidden_set() {
+        // Regression: the start row of a closed fold must be the stub line shown
+        // to the user, not hidden. This would cause an invisible cursor if wrong.
+        let ranges = vec![(10usize, 20usize)];
+        let closed: HashSet<usize> = [10].into();
+        let (hidden, _) = compute_fold_data(&ranges, &closed);
+        assert!(!hidden.contains(&10), "start row must never be hidden — it is the stub line");
+    }
+
+    // ── fold_fingerprint ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fold_fingerprint_empty_set_is_zero() {
+        assert_eq!(fold_fingerprint(&HashSet::new()), 0);
+    }
+
+    #[test]
+    fn fold_fingerprint_changes_when_set_changes() {
+        let a: HashSet<usize> = [1, 2, 3].into();
+        let b: HashSet<usize> = [1, 2, 4].into();
+        assert_ne!(fold_fingerprint(&a), fold_fingerprint(&b));
+    }
+
+    #[test]
+    fn fold_fingerprint_order_independent() {
+        // XOR is commutative — insertion order must not matter.
+        let a: HashSet<usize> = [10, 20, 30].into();
+        let b: HashSet<usize> = [30, 10, 20].into();
+        assert_eq!(fold_fingerprint(&a), fold_fingerprint(&b));
+    }
+
+    // ── cached_preview ───────────────────────────────────────────────────────
+
+    // Minimal concrete cache type for testing the generic helper.
+    struct TestCache {
+        key: u32,
+        stored_lines: Vec<Line<'static>>,
+    }
+    impl PreviewLines for TestCache {
+        fn lines(&self) -> &[Line<'static>] {
+            &self.stored_lines
+        }
+    }
+
+    fn make_line(s: &'static str) -> Line<'static> {
+        Line::from(s)
+    }
+
+    #[test]
+    fn preview_cache_miss_calls_render_fn_once() {
+        let mut cache: Option<TestCache> = None;
+        let mut call_count = 0u32;
+        let result = cached_preview(
+            &mut cache,
+            |_| false,
+            || {
+                call_count += 1;
+                vec![make_line("hello")]
+            },
+            |lines| TestCache { key: 1, stored_lines: lines },
+        );
+        assert_eq!(call_count, 1, "render_fn must be called exactly once on miss");
+        assert_eq!(result.len(), 1);
+        assert!(cache.is_some(), "cache must be populated after miss");
+    }
+
+    #[test]
+    fn preview_cache_hit_skips_render_fn() {
+        let mut cache: Option<TestCache> =
+            Some(TestCache { key: 42, stored_lines: vec![make_line("cached")] });
+        let mut call_count = 0u32;
+        let result = cached_preview(
+            &mut cache,
+            |c| c.key == 42,
+            || {
+                call_count += 1;
+                vec![make_line("fresh")]
+            },
+            |lines| TestCache { key: 42, stored_lines: lines },
+        );
+        assert_eq!(call_count, 0, "render_fn must not be called on cache hit");
+        assert_eq!(result.len(), 1);
+        // Must have returned the cached value, not the fresh one
+        assert_eq!(result[0], make_line("cached"));
+    }
+
+    #[test]
+    fn preview_cache_invalidates_on_key_change() {
+        let mut cache: Option<TestCache> =
+            Some(TestCache { key: 1, stored_lines: vec![make_line("old")] });
+        let mut call_count = 0u32;
+        // key changed from 1 → 2: should miss
+        let result = cached_preview(
+            &mut cache,
+            |c| c.key == 2,
+            || {
+                call_count += 1;
+                vec![make_line("new")]
+            },
+            |lines| TestCache { key: 2, stored_lines: lines },
+        );
+        assert_eq!(call_count, 1, "render_fn must be called when key changes");
+        assert_eq!(result[0], make_line("new"));
+        assert_eq!(cache.as_ref().unwrap().key, 2, "cache must be updated with new key");
     }
 }
