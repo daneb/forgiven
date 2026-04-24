@@ -1,6 +1,13 @@
 use super::markdown::render_message_content;
 use super::*;
 use crate::agent::suggest_model_for_task;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static RESPONSE_DUMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Lines of rendered output above which an assistant response is written to
+/// a file rather than displayed inline.
+const RESPONSE_LINE_THRESHOLD: usize = 100;
 
 impl UI {
     /// Render the Copilot Chat / agent panel on the right side.
@@ -128,8 +135,33 @@ impl UI {
                         Style::default().fg(color).add_modifier(Modifier::BOLD)
                     };
                     ml.push(Line::from(vec![Span::styled(format!("╔ {label} "), header_style)]));
-                    let content_lines =
-                        render_message_content(&msg.content, content_width, highlighter);
+                    let content_lines = {
+                        let mut lines =
+                            render_message_content(&msg.content, content_width, highlighter);
+                        if matches!(msg.role, Role::Assistant)
+                            && lines.len() > RESPONSE_LINE_THRESHOLD
+                        {
+                            let n = RESPONSE_DUMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            let filename = format!("response_{n}.md");
+                            let notice_text = if std::fs::write(&filename, &msg.content).is_ok() {
+                                format!("    ⤵ Response too long — saved to {filename}")
+                            } else {
+                                "    ⤵ Response too long to display".to_string()
+                            };
+                            lines = vec![
+                                Line::from(Span::styled(
+                                    format!("    {}", "╌".repeat(content_width.saturating_sub(4))),
+                                    Style::default().fg(Color::DarkGray),
+                                )),
+                                Line::from(Span::styled(
+                                    notice_text,
+                                    Style::default().fg(Color::Yellow),
+                                )),
+                                Line::from(""),
+                            ];
+                        }
+                        lines
+                    };
                     if dimmed {
                         for line in content_lines {
                             ml.push(Line::from(

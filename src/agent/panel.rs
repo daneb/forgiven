@@ -388,6 +388,14 @@ impl AgentPanel {
 
     pub fn input_backspace(&mut self) {
         if self.input_cursor == 0 {
+            // No typed text to delete — pop the last paste/image/file block instead.
+            if !self.pasted_blocks.is_empty() {
+                self.pasted_blocks.pop();
+            } else if !self.image_blocks.is_empty() {
+                self.image_blocks.pop();
+            } else if !self.file_blocks.is_empty() {
+                self.file_blocks.pop();
+            }
             return;
         }
         let prev =
@@ -589,10 +597,17 @@ impl AgentPanel {
             let n = menu.items.len();
             if n > 0 {
                 menu.selected = (menu.selected as i32 + delta).rem_euclid(n as i32) as usize;
-                if let Some(ref fw) = self.spec_framework {
-                    menu.description =
-                        fw.describe(menu.items[menu.selected].as_str()).map(str::to_string);
-                }
+                let cmd = menu.items[menu.selected].clone();
+                menu.description = Self::BUILTIN_SLASH_COMMANDS
+                    .iter()
+                    .find(|(c, _)| *c == cmd.as_str())
+                    .map(|(_, d)| d.to_string())
+                    .or_else(|| {
+                        self.spec_framework
+                            .as_ref()
+                            .and_then(|fw| fw.describe(cmd.as_str()))
+                            .map(str::to_string)
+                    });
             }
         }
     }

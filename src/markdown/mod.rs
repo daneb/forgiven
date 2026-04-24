@@ -13,6 +13,9 @@
 //!         convention) and are not re-wrapped.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static TABLE_DUMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 // ── Language → extension mapping ──────────────────────────────────────────────
 
@@ -352,6 +355,34 @@ impl<'h> Renderer<'h> {
 
         // Scale down proportionally if we exceed available width.
         let natural_total: usize = col_widths.iter().sum();
+
+        // If the table is more than 2x the available width, render inline is
+        // pointless — dump to a markdown file instead and show a notice.
+        if natural_total > available * 2 {
+            let n = TABLE_DUMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let filename = format!("table_{n}.md");
+            let md = build_markdown_table(&self.table_header, &self.table_body);
+            let separator = Line::from(Span::styled(
+                format!("{MARGIN}{}", "╌".repeat(self.width.saturating_sub(MARGIN.len()))),
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+            ));
+            let notice_text = if std::fs::write(&filename, &md).is_ok() {
+                format!("{MARGIN}⤵ Table too wide — saved to {filename}")
+            } else {
+                format!("{MARGIN}⤵ Table too wide to display")
+            };
+            let notice = Line::from(Span::styled(
+                notice_text,
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+            ));
+            self.output.push(separator);
+            self.output.push(notice);
+            self.output.push(Line::from(""));
+            self.table_header.clear();
+            self.table_body.clear();
+            return;
+        }
+
         if natural_total > available {
             for w in &mut col_widths {
                 *w = (*w * available / natural_total).max(1);
@@ -718,6 +749,25 @@ impl<'h> Renderer<'h> {
 
         self.output
     }
+}
+
+// ── Table dump helper ─────────────────────────────────────────────────────────
+
+fn build_markdown_table(header: &[String], body: &[Vec<String>]) -> String {
+    let n_cols = header.len().max(body.iter().map(|r| r.len()).max().unwrap_or(0));
+    if n_cols == 0 {
+        return String::new();
+    }
+    let cell = |row: &[String], i: usize| row.get(i).map(|s| s.as_str()).unwrap_or("").to_string();
+    let mut out = String::new();
+    let header_row: Vec<String> = (0..n_cols).map(|i| cell(header, i)).collect();
+    out.push_str(&format!("| {} |\n", header_row.join(" | ")));
+    out.push_str(&format!("|{}|\n", vec!["---"; n_cols].join("|")));
+    for row in body {
+        let cells: Vec<String> = (0..n_cols).map(|i| cell(row, i)).collect();
+        out.push_str(&format!("| {} |\n", cells.join(" | ")));
+    }
+    out
 }
 
 // ── Word-wrap + span reflow ───────────────────────────────────────────────────

@@ -164,6 +164,7 @@ pub(super) async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
                                     || id.contains("whisper")
                                     || id.contains("tts")
                                     || id.contains("dall")
+                                    || id.contains("search")
                                 {
                                     return None;
                                 }
