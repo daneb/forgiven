@@ -1,13 +1,12 @@
 //! Pluggable prompt-framework layer for the agent panel.
 //!
-//! Slash commands typed in the agent panel (e.g. `/speckit.specify`) are intercepted
+//! Slash commands typed in the agent panel (e.g. `/openspec.propose`) are intercepted
 //! in [`AgentPanel::submit`] and resolved to a structured prompt template that is
 //! prepended to the **user turn** of the next API call (not the system prompt).
 //!
-//! # Built-in framework: `spec-kit`
-//! A port of GitHub's Spec-Driven Development workflow (github/spec-kit).
-//! Commands: `speckit.constitution`, `speckit.specify`, `speckit.plan`,
-//!            `speckit.tasks`, `speckit.implement`, `speckit.clarify`, `speckit.analyze`
+//! # Built-in framework: `open-spec`
+//! A port of the OpenSpec 3-command workflow (Fission-AI/OpenSpec).
+//! Commands: `openspec.propose`, `openspec.review`, `openspec.apply`
 //!
 //! # Custom framework
 //! Point `[agent] spec_framework` at a directory of `.md` files.  Each file's
@@ -16,7 +15,7 @@
 //! # Config (`~/.config/forgiven/config.toml`)
 //! ```toml
 //! [agent]
-//! spec_framework = "spec-kit"                    # built-in (default when set)
+//! spec_framework = "open-spec"                   # built-in (default when set)
 //! # spec_framework = "/path/to/my/framework"     # custom directory
 //! # spec_framework = "none"                      # disabled (default when absent)
 //! ```
@@ -28,29 +27,35 @@ use std::path::Path;
 use tracing::warn;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Built-in spec-kit templates (embedded at compile time)
+// Built-in openspec templates (embedded at compile time)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SPECKIT_CONSTITUTION: &str = include_str!("templates/speckit/constitution.md");
-const SPECKIT_SPECIFY: &str = include_str!("templates/speckit/specify.md");
-const SPECKIT_PLAN: &str = include_str!("templates/speckit/plan.md");
-const SPECKIT_TASKS: &str = include_str!("templates/speckit/tasks.md");
-const SPECKIT_IMPLEMENT: &str = include_str!("templates/speckit/implement.md");
-const SPECKIT_CLARIFY: &str = include_str!("templates/speckit/clarify.md");
-const SPECKIT_ANALYZE: &str = include_str!("templates/speckit/analyze.md");
+const OPENSPEC_PROPOSE: &str = include_str!("templates/openspec/propose.md");
+const OPENSPEC_REVIEW: &str = include_str!("templates/openspec/review.md");
+const OPENSPEC_APPLY: &str = include_str!("templates/openspec/apply.md");
 
-fn speckit_templates() -> HashMap<String, &'static str> {
+fn openspec_templates() -> HashMap<String, &'static str> {
     [
-        ("speckit.constitution", SPECKIT_CONSTITUTION),
-        ("speckit.specify", SPECKIT_SPECIFY),
-        ("speckit.plan", SPECKIT_PLAN),
-        ("speckit.tasks", SPECKIT_TASKS),
-        ("speckit.implement", SPECKIT_IMPLEMENT),
-        ("speckit.clarify", SPECKIT_CLARIFY),
-        ("speckit.analyze", SPECKIT_ANALYZE),
+        ("openspec.propose", OPENSPEC_PROPOSE),
+        ("openspec.review", OPENSPEC_REVIEW),
+        ("openspec.apply", OPENSPEC_APPLY),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+fn openspec_descriptions() -> HashMap<String, String> {
+    [
+        (
+            "openspec.propose",
+            "/openspec.propose <change-name> — elicit requirements, design, tasks",
+        ),
+        ("openspec.review", "/openspec.review <change-name>  — audit artefacts before implement"),
+        ("openspec.apply", "/openspec.apply <change-name>   — implement tasks, archive to specs/"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
 }
 
@@ -68,24 +73,9 @@ pub struct SpecFramework {
     /// Human-readable name shown in the agent panel status line.
     pub name: String,
     /// Commands that should automatically start a new conversation before
-    /// injecting their template.  All built-in spec-kit commands set this;
+    /// injecting their template.  All built-in openspec commands set this;
     /// custom-framework templates opt in via `clears_context: true` front-matter.
     clears_context: HashSet<String>,
-}
-
-fn speckit_descriptions() -> HashMap<String, String> {
-    [
-        ("speckit.constitution", "Step 1 · Define project principles & constraints"),
-        ("speckit.specify", "Step 2 · /speckit.specify <feature-name> [context]"),
-        ("speckit.plan", "Step 3 · /speckit.plan <feature-name>"),
-        ("speckit.tasks", "Step 4 · /speckit.tasks <feature-name>"),
-        ("speckit.implement", "Step 5 · /speckit.implement <feature-name>"),
-        ("speckit.clarify", "Step 6 · /speckit.clarify [feature-name]"),
-        ("speckit.analyze", "/speckit.analyze [feature-name]"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
 }
 
 /// Parse optional YAML-lite front-matter from a template file.
@@ -113,30 +103,28 @@ fn parse_front_matter(content: &str) -> (bool, &str) {
 }
 
 impl SpecFramework {
-    /// Load the built-in spec-kit framework.
+    /// Load the built-in open-spec framework.
     ///
-    /// All seven spec-kit commands automatically clear the conversation context
+    /// All three openspec commands automatically clear the conversation context
     /// before injecting their template — each phase should start with a clean
     /// slate to avoid carrying expensive prior-phase history into the new turn.
-    pub fn spec_kit() -> Self {
-        // All built-in commands are phase boundaries; every one clears context.
-        let clears_context: HashSet<String> = [
-            "speckit.constitution",
-            "speckit.specify",
-            "speckit.plan",
-            "speckit.tasks",
-            "speckit.implement",
-            "speckit.clarify",
-            "speckit.analyze",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    pub fn open_spec() -> Self {
+        let clears_context: HashSet<String> =
+            ["openspec.propose", "openspec.review", "openspec.apply"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
         Self {
-            templates: speckit_templates().into_iter().map(|(k, v)| (k, v.to_string())).collect(),
-            descriptions: speckit_descriptions(),
-            name: "spec-kit".to_string(),
+            templates: openspec_templates()
+                .into_iter()
+                .map(|(k, v)| {
+                    let (_, body) = parse_front_matter(v);
+                    (k, body.to_string())
+                })
+                .collect(),
+            descriptions: openspec_descriptions(),
+            name: "open-spec".to_string(),
             clears_context,
         }
     }
@@ -196,7 +184,7 @@ impl SpecFramework {
     /// - `template` — the prompt text to prepend to the user turn.
     /// - `remaining` — everything after the command name, left-trimmed.
     /// - `clears_context` — when `true` the caller should start a new conversation
-    ///   before injecting the template (automatic for all spec-kit phase commands).
+    ///   before injecting the template (automatic for all openspec phase commands).
     ///
     /// Returns `None` if the input doesn't start with `/` or the command is unknown.
     pub fn resolve<'a>(&self, input: &'a str) -> Option<(&str, &'a str, bool)> {
@@ -233,19 +221,19 @@ impl SpecFramework {
 /// | config value      | result                                    |
 /// |-------------------|-------------------------------------------|
 /// | `"none"` / `""`  | `None` — framework disabled               |
-/// | `"spec-kit"`     | `Some(SpecFramework::spec_kit())`         |
+/// | `"open-spec"`    | `Some(SpecFramework::open_spec())`        |
 /// | any other string  | treated as a filesystem path to a dir of `.md` files |
 pub fn load_from_config(cfg: &str) -> Option<SpecFramework> {
     match cfg.trim() {
         "" | "none" => None,
-        "spec-kit" => Some(SpecFramework::spec_kit()),
+        "open-spec" => Some(SpecFramework::open_spec()),
         path => {
             let p = Path::new(path);
             if p.is_dir() {
                 Some(SpecFramework::from_directory(p))
             } else {
                 warn!(
-                    "spec_framework: '{}' is not 'none', 'spec-kit', or a valid directory — \
+                    "spec_framework: '{}' is not 'none', 'open-spec', or a valid directory — \
                      framework disabled",
                     path
                 );
@@ -264,36 +252,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spec_kit_resolves_known_command() {
-        let fw = SpecFramework::spec_kit();
-        let (template, rest, clears) = fw.resolve("/speckit.specify describe a todo app").unwrap();
-        assert!(template.contains("Phase 2"));
-        assert_eq!(rest, "describe a todo app");
-        assert!(clears, "spec-kit commands should always clear context");
+    fn open_spec_resolves_propose() {
+        let fw = SpecFramework::open_spec();
+        let (template, rest, clears) = fw.resolve("/openspec.propose add-dark-mode").unwrap();
+        assert!(template.contains("PROPOSE"));
+        assert_eq!(rest, "add-dark-mode");
+        assert!(clears, "openspec commands should always clear context");
     }
 
     #[test]
-    fn spec_kit_command_only_no_args() {
-        let fw = SpecFramework::spec_kit();
-        let (_, rest, _) = fw.resolve("/speckit.plan").unwrap();
+    fn open_spec_command_only_no_args() {
+        let fw = SpecFramework::open_spec();
+        let (_, rest, _) = fw.resolve("/openspec.review").unwrap();
         assert_eq!(rest, "");
     }
 
     #[test]
-    fn all_spec_kit_commands_clear_context() {
-        let fw = SpecFramework::spec_kit();
-        for cmd in &[
-            "speckit.constitution",
-            "speckit.specify",
-            "speckit.plan",
-            "speckit.tasks",
-            "speckit.implement",
-            "speckit.clarify",
-            "speckit.analyze",
-        ] {
+    fn all_openspec_commands_clear_context() {
+        let fw = SpecFramework::open_spec();
+        for cmd in &["openspec.propose", "openspec.review", "openspec.apply"] {
             let input = format!("/{cmd}");
             let (_, _, clears) = fw.resolve(&input).unwrap();
             assert!(clears, "{cmd} should have clears_context = true");
+        }
+    }
+
+    #[test]
+    fn all_three_commands_present() {
+        let fw = SpecFramework::open_spec();
+        let cmds = fw.commands();
+        for name in &["openspec.propose", "openspec.review", "openspec.apply"] {
+            assert!(cmds.contains(name), "missing command: {name}");
         }
     }
 
@@ -313,13 +302,13 @@ mod tests {
 
     #[test]
     fn unknown_command_returns_none() {
-        let fw = SpecFramework::spec_kit();
+        let fw = SpecFramework::open_spec();
         assert!(fw.resolve("/nonexistent").is_none());
     }
 
     #[test]
     fn non_slash_input_returns_none() {
-        let fw = SpecFramework::spec_kit();
+        let fw = SpecFramework::open_spec();
         assert!(fw.resolve("just a normal message").is_none());
     }
 
@@ -331,26 +320,15 @@ mod tests {
     }
 
     #[test]
-    fn load_from_config_spec_kit() {
-        let fw = load_from_config("spec-kit").unwrap();
-        assert_eq!(fw.name, "spec-kit");
+    fn load_from_config_open_spec() {
+        let fw = load_from_config("open-spec").unwrap();
+        assert_eq!(fw.name, "open-spec");
         assert!(!fw.commands().is_empty());
     }
 
     #[test]
-    fn all_seven_commands_present() {
-        let fw = SpecFramework::spec_kit();
-        let cmds = fw.commands();
-        for name in &[
-            "speckit.constitution",
-            "speckit.specify",
-            "speckit.plan",
-            "speckit.tasks",
-            "speckit.implement",
-            "speckit.clarify",
-            "speckit.analyze",
-        ] {
-            assert!(cmds.contains(name), "missing command: {name}");
-        }
+    fn load_from_config_spec_kit_falls_through() {
+        // "spec-kit" is no longer a valid built-in — falls through to dir lookup and returns None.
+        assert!(load_from_config("spec-kit").is_none());
     }
 }

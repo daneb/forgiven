@@ -532,7 +532,7 @@ pub struct AgentConfig {
     /// | value            | effect                                               |
     /// |------------------|------------------------------------------------------|
     /// | `"none"` / `""`  | disabled — no slash-command interception (default)  |
-    /// | `"spec-kit"`     | built-in Spec-Driven Development workflow           |
+    /// | `"open-spec"`    | built-in OpenSpec 3-command workflow                |
     /// | `/path/to/dir`   | custom framework loaded from a directory of `.md`   |
     #[serde(default)]
     pub spec_framework: String,

@@ -793,7 +793,7 @@ impl AgentPanel {
         let spec_cmd_ctx: Option<(String, String)> =
             user_text.trim_start().strip_prefix('/').and_then(|s| {
                 let cmd = s.split_whitespace().next()?;
-                if cmd.starts_with("speckit.") {
+                if cmd.starts_with("openspec.") {
                     let rest = s[cmd.len()..].trim_start().to_string();
                     Some((cmd.to_string(), rest))
                 } else {
@@ -822,35 +822,37 @@ impl AgentPanel {
         } else {
             user_text
         };
-        // Phase 2 — SpecSlicer (ADR 0100): for speckit.implement and speckit.tasks,
-        // inject a pre-extracted virtual context block (active task + relevant spec
-        // sections) to save the model a full-file read round on every implement turn.
-        let user_text = if matches!(
-            spec_cmd_ctx.as_ref().map(|(c, _)| c.as_str()),
-            Some("speckit.implement") | Some("speckit.tasks")
-        ) {
-            let feature =
-                spec_cmd_ctx.as_ref().and_then(|(_, r)| r.split_whitespace().next()).unwrap_or("");
-            if !feature.is_empty() {
-                let feature_dir = project_root.join("docs/spec/features").join(feature);
-                match crate::spec_framework::spec_slicer::SpecSlicer::build(&feature_dir) {
-                    Some(vctx) => {
-                        let block = vctx.to_prompt_block();
-                        info!(
-                            "[spec] SpecSlicer: injected virtual context ({} t, task: {:?})",
-                            super::token_count::count(&block),
-                            vctx.active_task.title
-                        );
-                        format!("{user_text}\n\n{block}")
-                    },
-                    None => user_text,
+        // Phase 2 — SpecSlicer (ADR 0100): for openspec.apply, inject a pre-extracted
+        // virtual context block (active task + relevant design sections) to save the
+        // model a full-file read round on every apply turn.
+        let user_text =
+            if matches!(spec_cmd_ctx.as_ref().map(|(c, _)| c.as_str()), Some("openspec.apply")) {
+                let change = spec_cmd_ctx
+                    .as_ref()
+                    .and_then(|(_, r)| r.split_whitespace().next())
+                    .unwrap_or("");
+                if !change.is_empty() {
+                    let change_dir = project_root.join("openspec/changes").join(change);
+                    match crate::spec_framework::spec_slicer::SpecSlicer::build_openspec(
+                        &change_dir,
+                    ) {
+                        Some(vctx) => {
+                            let block = vctx.to_prompt_block();
+                            info!(
+                                "[spec] SpecSlicer: injected virtual context ({} t, task: {:?})",
+                                super::token_count::count(&block),
+                                vctx.active_task.title
+                            );
+                            format!("{user_text}\n\n{block}")
+                        },
+                        None => user_text,
+                    }
+                } else {
+                    user_text
                 }
             } else {
                 user_text
-            }
-        } else {
-            user_text
-        };
+            };
 
         // ── Resolve token + model before computing the context budget ────────
         // Fetching models first ensures context_window_size() returns the real
@@ -979,13 +981,13 @@ impl AgentPanel {
         // is the primary driver of context bloat (ADR 0087).
         // Cap to MAX_CTX_LINES; the model can call read_file for the rest.
         //
-        // Phase 3.1: suppress injection entirely for specKit sessions — the
-        // model works from TASKS.md/SPEC.md, not the active buffer.  Chat-mode
+        // Phase 3.1: suppress injection entirely for openspec sessions — the
+        // model works from tasks.md/design.md, not the active buffer.  Chat-mode
         // rounds keep the snippet for passive orientation.
         const MAX_CTX_LINES: usize = 150;
         let ctx_total_lines = context.as_ref().map(|c| c.lines().count()).unwrap_or(0);
         let suppress_ctx =
-            spec_cmd_ctx.as_ref().map(|(cmd, _)| cmd.starts_with("speckit.")).unwrap_or(false);
+            spec_cmd_ctx.as_ref().map(|(cmd, _)| cmd.starts_with("openspec.")).unwrap_or(false);
         let context_snippet: Option<String> = if suppress_ctx {
             None
         } else {

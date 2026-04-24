@@ -1,14 +1,14 @@
 //! Phase 2 of the context-optimisation roadmap: the Spec Slicer.
 //!
 //! Instead of letting the model read full spec files on every
-//! `/speckit.implement` round, [`SpecSlicer`] pre-extracts:
-//! - the **active task** — the first unchecked `- [ ]` entry in `TASKS.md`
-//! - **relevant spec sections** — sections of `SPEC.md` whose headings or
+//! `/openspec.apply` round, [`SpecSlicer`] pre-extracts:
+//! - the **active task** — the first unchecked `- [ ]` entry in `tasks.md`
+//! - **relevant spec sections** — sections of `design.md` whose headings or
 //!   opening content contain keywords from the active task title
 //!
 //! The result is a compact "virtual context" block (~100–1 300 t) injected into
 //! the user turn before the template text, saving ~2 000–7 000 t of file reads
-//! per implement round.
+//! per apply round.
 //!
 //! See ADR 0100 for design rationale.
 
@@ -140,19 +140,18 @@ impl SpecSlicer {
         scored.into_iter().take(3).map(|(_, s)| s).collect()
     }
 
-    /// Build a [`VirtualContext`] from the feature directory on disk.
+    /// Build a [`VirtualContext`] from an OpenSpec change directory.
     ///
-    /// Reads `<feature_dir>/TASKS.md` and `<feature_dir>/SPEC.md`.
-    /// Returns `None` if `TASKS.md` is missing or has no unchecked tasks.
-    pub fn build(feature_dir: &Path) -> Option<VirtualContext> {
-        let tasks_path = feature_dir.join("TASKS.md");
-        let tasks_md = std::fs::read_to_string(&tasks_path).ok()?;
+    /// Reads `<change_dir>/tasks.md` and `<change_dir>/design.md`.
+    /// Returns `None` if `tasks.md` is missing or has no unchecked tasks.
+    pub fn build_openspec(change_dir: &Path) -> Option<VirtualContext> {
+        let tasks_md = std::fs::read_to_string(change_dir.join("tasks.md")).ok()?;
 
         let active_task = Self::parse_active_task(&tasks_md)?;
 
         let spec_sections =
-            if let Ok(spec_md) = std::fs::read_to_string(feature_dir.join("SPEC.md")) {
-                Self::slice_spec(&spec_md, &active_task)
+            if let Ok(design_md) = std::fs::read_to_string(change_dir.join("design.md")) {
+                Self::slice_spec(&design_md, &active_task)
             } else {
                 vec![]
             };
