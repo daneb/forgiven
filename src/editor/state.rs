@@ -59,24 +59,6 @@ pub(crate) struct MarkdownCache {
     pub lines: Vec<ratatui::text::Line<'static>>,
 }
 
-/// Cached rendered lines for Mode::CsvPreview.
-/// Keyed on `(buffer_idx, lsp_version)` — viewport_width not needed because
-/// CSV table layout is content-driven, not wrap-driven.
-pub(crate) struct CsvCache {
-    pub buffer_idx: usize,
-    pub lsp_version: i32,
-    pub lines: Vec<ratatui::text::Line<'static>>,
-}
-
-/// Cached rendered lines for Mode::JsonPreview.
-/// Keyed on `(buffer_idx, lsp_version)` — viewport_width not needed because
-/// the JSON pretty-printer does not wrap at terminal width.
-pub(crate) struct JsonCache {
-    pub buffer_idx: usize,
-    pub lsp_version: i32,
-    pub lines: Vec<ratatui::text::Line<'static>>,
-}
-
 /// Cached fold hidden-row set and stub map (ADR 0138).
 ///
 /// Keyed on `(buffer_idx, lsp_version, fold_fingerprint)`.  `fold_fingerprint`

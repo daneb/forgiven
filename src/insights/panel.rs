@@ -74,11 +74,16 @@ pub struct InsightsDashboardState {
     pub active_tab: InsightsTab,
     /// Vertical scroll offset within the active tab's content.
     pub scroll: usize,
+    /// Live Copilot quota snapshot (None for non-Copilot providers).
+    pub copilot_quota: Option<crate::agent::CopilotQuota>,
 }
 
 impl InsightsDashboardState {
-    pub fn new(insights: AggregatedInsights) -> Self {
-        Self { insights, active_tab: InsightsTab::Summary, scroll: 0 }
+    pub fn new(
+        insights: AggregatedInsights,
+        copilot_quota: Option<crate::agent::CopilotQuota>,
+    ) -> Self {
+        Self { insights, active_tab: InsightsTab::Summary, scroll: 0, copilot_quota }
     }
 
     pub fn next_tab(&mut self) {
@@ -238,6 +243,46 @@ fn render_summary(frame: &mut Frame, state: &InsightsDashboardState, area: Rect)
             kv!("Total prompt tokens", fmt_tokens(ses.total_prompt_tokens));
             kv!("Total completion tokens", fmt_tokens(ses.total_completion_tokens));
         }
+    }
+
+    // ── Copilot quota ─────────────────────────────────────────────────────
+    if let Some(ref quota) = state.copilot_quota {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "  Copilot Premium Requests",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::default());
+
+        let pct_used = 100.0 - quota.premium_percent_remaining;
+        let used = quota.premium_entitlement.saturating_sub(quota.premium_remaining);
+        let bar_filled = ((pct_used / 100.0) * 30.0).round() as usize;
+        let bar_empty = 30usize.saturating_sub(bar_filled);
+        let bar_color = if pct_used >= 90.0 {
+            Color::Red
+        } else if pct_used >= 70.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("  [", Style::default().fg(Color::DarkGray)),
+            Span::styled("█".repeat(bar_filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(bar_empty), Style::default().fg(Color::DarkGray)),
+            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{pct_used:.1}% used"),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::default());
+        kv!("Used / Included", format!("{used} / {}", quota.premium_entitlement));
+        kv!("Remaining", quota.premium_remaining.to_string());
+        if quota.overage_permitted {
+            kv!("Overage", format!("{} (permitted)", quota.overage_count));
+        }
+        kv!("Resets", quota.reset_date.clone());
     }
 
     // ── Warnings / errors ─────────────────────────────────────────────────

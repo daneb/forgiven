@@ -27,6 +27,7 @@ mod tool_dispatch;
 pub mod tools;
 pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
+pub use auth::CopilotQuota;
 pub use context::{message_importance, ContextBreakdown, SubmitCtx};
 pub use models::suggest_model_for_task;
 pub use provider::ProviderKind;
@@ -426,6 +427,12 @@ pub struct AgentPanel {
     pub codified_context_max_specialists: usize,
     /// Knowledge fetch byte cap.
     pub codified_context_knowledge_max_bytes: usize,
+    /// Live Copilot quota fetched from `copilot_internal/user` after each token
+    /// refresh. `None` for non-Copilot providers or when the fetch fails.
+    pub copilot_quota: Option<CopilotQuota>,
+    /// Copilot business API base URL read from the token exchange response.
+    /// Falls back to the standard endpoint when absent (personal accounts).
+    pub copilot_api_base: String,
 }
 
 /// A model returned by the Copilot `/models` endpoint.

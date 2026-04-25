@@ -3,6 +3,28 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Quota types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Live quota snapshot fetched from `copilot_internal/user`.
+/// Only populated for Copilot provider; None for all others.
+#[derive(Debug, Clone)]
+pub struct CopilotQuota {
+    /// Percentage of premium interactions *remaining* (0.0–100.0).
+    pub premium_percent_remaining: f64,
+    /// Absolute premium interactions remaining.
+    pub premium_remaining: u32,
+    /// Total included premium interactions for the billing period.
+    pub premium_entitlement: u32,
+    /// Whether overage (above entitlement) is permitted.
+    pub overage_permitted: bool,
+    /// Number of overage interactions used.
+    pub overage_count: u32,
+    /// Quota reset date string as returned by the API (e.g. "2026-05-01").
+    pub reset_date: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Token types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -23,6 +45,9 @@ impl std::error::Error for TokenExpiredError {}
 pub(super) struct CopilotApiToken {
     pub token: String,
     pub expires_at: u64,
+    /// Business API base URL from the token exchange response (e.g.
+    /// "https://api.business.githubcopilot.com"). None for personal accounts.
+    pub business_api_url: Option<String>,
 }
 
 impl CopilotApiToken {
@@ -123,6 +148,12 @@ pub(super) async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken>
     let expires_at_str = val.get("expires_at").and_then(|v| v.as_str()).map(|s| s.to_string());
     debug!("Copilot API token acquired (expires_at={:?})", expires_at_str);
 
+    let business_api_url =
+        val.pointer("/endpoints/api").and_then(|v| v.as_str()).map(|s| s.to_string());
+    if let Some(ref url) = business_api_url {
+        info!("Copilot business API endpoint: {url}");
+    }
+
     let tr = TokenResponse { token: token_str, expires_at: expires_at_str };
     let expires_at = tr.expires_at.as_deref().and_then(chrono_unix_from_iso).unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -131,7 +162,7 @@ pub(super) async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken>
             .unwrap_or(1800)
     });
 
-    Ok(CopilotApiToken { token: tr.token, expires_at })
+    Ok(CopilotApiToken { token: tr.token, expires_at, business_api_url })
 }
 
 fn chrono_unix_from_iso(s: &str) -> Option<u64> {
@@ -176,4 +207,55 @@ fn days_before_month(month: u64, year: u64) -> u64 {
         }
     }
     total
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Quota
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the user's Copilot quota snapshot from `copilot_internal/user`.
+/// Returns `None` on any error (endpoint is undocumented; failures are silent).
+pub async fn fetch_copilot_quota(oauth_token: &str) -> Option<CopilotQuota> {
+    let client =
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
+
+    let resp = client
+        .get("https://api.github.com/copilot_internal/user")
+        .header("Authorization", format!("token {oauth_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "forgiven/0.1.0")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        warn!("Copilot quota fetch failed: {}", resp.status());
+        return None;
+    }
+
+    let val: serde_json::Value = resp.json().await.ok()?;
+
+    let pi = val.pointer("/quota_snapshots/premium_interactions")?;
+    let reset_date = val.get("quota_reset_date").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let premium_percent_remaining =
+        pi.get("percent_remaining").and_then(|v| v.as_f64()).unwrap_or(100.0);
+    let premium_remaining = pi.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let premium_entitlement = pi.get("entitlement").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let overage_permitted = pi.get("overage_permitted").and_then(|v| v.as_bool()).unwrap_or(false);
+    let overage_count = pi.get("overage_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    info!(
+        "Copilot quota: {:.1}% remaining ({}/{} premium interactions, resets {})",
+        premium_percent_remaining, premium_remaining, premium_entitlement, reset_date
+    );
+
+    Some(CopilotQuota {
+        premium_percent_remaining,
+        premium_remaining,
+        premium_entitlement,
+        overage_permitted,
+        overage_count,
+        reset_date,
+    })
 }

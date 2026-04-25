@@ -15,8 +15,6 @@ pub enum Mode {
     Agent,             // Copilot Chat / agent panel focused
     Explorer,          // File explorer tree focused
     MarkdownPreview,   // Read-only rendered markdown view (SPC m p toggle)
-    CsvPreview,        // Read-only column-aligned CSV table view (SPC m c toggle)
-    JsonPreview,       // Read-only pretty-printed JSON view (SPC m j toggle)
     Search,            // Project-wide ripgrep search overlay (SPC s g)
     InFileSearch,      // In-file search mode (/)
     RenameFile,        // Rename popup: user edits a filename from the explorer
@@ -165,8 +163,6 @@ pub enum Action {
     // Markdown preview
     MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
-    CsvPreviewToggle,      // SPC m c — toggle column-aligned CSV preview
-    JsonPreviewToggle,     // SPC m j — toggle pretty-printed JSON preview
     SoftWrapToggle,        // SPC m w — toggle soft-wrap (word wrap at viewport edge)
     // Memory
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
@@ -422,10 +418,6 @@ impl KeyHandler {
             .children
             .insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
         md_node.children.insert('b', KeyNode::leaf("open in browser", Action::MarkdownOpenBrowser));
-        md_node.children.insert('c', KeyNode::leaf("toggle CSV preview", Action::CsvPreviewToggle));
-        md_node
-            .children
-            .insert('j', KeyNode::leaf("toggle JSON preview", Action::JsonPreviewToggle));
         md_node.children.insert('w', KeyNode::leaf("toggle soft wrap", Action::SoftWrapToggle));
         tree.insert('m', md_node);
 

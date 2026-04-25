@@ -209,6 +209,8 @@ impl AgentPanel {
             codified_context_constitution_max_tokens: 500,
             codified_context_max_specialists: 2,
             codified_context_knowledge_max_bytes: 8192,
+            copilot_quota: None,
+            copilot_api_base: "https://api.githubcopilot.com".to_string(),
         }
     }
 
@@ -289,12 +291,14 @@ impl AgentPanel {
         let ollama_base_url = self.ollama_base_url.clone();
         let ollama_ctx = self.ollama_context_length;
         let openai_base_url = self.openai_base_url.clone();
+        let copilot_api_base = self.copilot_api_base.clone();
         match fetch_models_for_provider(
             &provider,
             &api_token,
             &ollama_base_url,
             ollama_ctx,
             &openai_base_url,
+            &copilot_api_base,
         )
         .await
         {
@@ -321,12 +325,14 @@ impl AgentPanel {
         let ollama_base_url = self.ollama_base_url.clone();
         let ollama_ctx = self.ollama_context_length;
         let openai_base_url = self.openai_base_url.clone();
+        let copilot_api_base = self.copilot_api_base.clone();
         match fetch_models_for_provider(
             &provider,
             &api_token,
             &ollama_base_url,
             ollama_ctx,
             &openai_base_url,
+            &copilot_api_base,
         )
         .await
         {
@@ -879,12 +885,14 @@ impl AgentPanel {
             let ollama_base_url = self.ollama_base_url.clone();
             let ollama_ctx = self.ollama_context_length;
             let openai_base_url = self.openai_base_url.clone();
+            let copilot_api_base = self.copilot_api_base.clone();
             match fetch_models_for_provider(
                 &provider,
                 &api_token,
                 &ollama_base_url,
                 ollama_ctx,
                 &openai_base_url,
+                &copilot_api_base,
             )
             .await
             {
@@ -911,7 +919,9 @@ impl AgentPanel {
 
         // ── Build provider settings for this invocation ──────────────────────
         let chat_endpoint = match &self.provider {
-            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
+            ProviderKind::Copilot => {
+                format!("{}/chat/completions", self.copilot_api_base)
+            },
             ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
             ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
             ProviderKind::OpenAi => {
@@ -1525,7 +1535,9 @@ Tools:\n\
         let model_id = self.selected_model_id().to_string();
 
         let chat_endpoint = match &self.provider {
-            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
+            ProviderKind::Copilot => {
+                format!("{}/chat/completions", self.copilot_api_base)
+            },
             ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
             ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
             ProviderKind::OpenAi => format!("{}/chat/completions", self.openai_base_url),
@@ -1627,7 +1639,9 @@ Tools:\n\
         let model_id = self.selected_model_id_with_fallback(preferred_model).to_string();
 
         let chat_endpoint = match &self.provider {
-            ProviderKind::Copilot => "https://api.githubcopilot.com/chat/completions".to_string(),
+            ProviderKind::Copilot => {
+                format!("{}/chat/completions", self.copilot_api_base)
+            },
             ProviderKind::Ollama => format!("{}/v1/chat/completions", self.ollama_base_url),
             ProviderKind::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
             ProviderKind::OpenAi => format!("{}/chat/completions", self.openai_base_url),
@@ -2421,7 +2435,11 @@ Tools:\n\
                 let oauth = load_oauth_token()?;
                 let api_token = exchange_token(&oauth).await?;
                 let tok = api_token.token.clone();
+                if let Some(ref url) = api_token.business_api_url {
+                    self.copilot_api_base = url.clone();
+                }
                 self.token = Some(api_token);
+                self.copilot_quota = crate::agent::auth::fetch_copilot_quota(&oauth).await;
                 Ok(tok)
             },
         }

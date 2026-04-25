@@ -3,9 +3,7 @@ use ratatui::text::Span;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{
-    CsvCache, Editor, FoldCache, HighlightCache, JsonCache, MarkdownCache, StickyScrollCache,
-};
+use super::{Editor, FoldCache, HighlightCache, MarkdownCache, StickyScrollCache};
 use crate::highlight::Highlighter;
 use crate::keymap::Mode;
 use crate::ui::{RenderContext, UI};
@@ -73,16 +71,6 @@ pub(crate) trait PreviewLines {
 }
 
 impl PreviewLines for MarkdownCache {
-    fn lines(&self) -> &[ratatui::text::Line<'static>] {
-        &self.lines
-    }
-}
-impl PreviewLines for CsvCache {
-    fn lines(&self) -> &[ratatui::text::Line<'static>] {
-        &self.lines
-    }
-}
-impl PreviewLines for JsonCache {
     fn lines(&self) -> &[ratatui::text::Line<'static>] {
         &self.lines
     }
@@ -194,8 +182,8 @@ impl Editor {
         Some(arc)
     }
 
-    /// Return the scrolled preview lines for MarkdownPreview, CsvPreview, or
-    /// JsonPreview modes.  Returns `None` for all other modes.
+    /// Return the scrolled preview lines for MarkdownPreview mode.
+    /// Returns `None` for all other modes.
     fn render_preview_lines(
         &mut self,
         mode: Mode,
@@ -223,32 +211,6 @@ impl Editor {
                     viewport_width: vw,
                     lines,
                 },
-            );
-            let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
-            Some(all_lines.into_iter().skip(scroll).collect())
-        } else if mode == Mode::CsvPreview {
-            let lsp_ver = self.current_buffer().map(|b| b.lsp_version);
-            let ver = lsp_ver.unwrap_or(0);
-            let content =
-                self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-            let all_lines = cached_preview(
-                &mut self.csv_cache,
-                |c| c.buffer_idx == buf_idx && Some(c.lsp_version) == lsp_ver,
-                || crate::csv_preview::render(&content),
-                |lines| CsvCache { buffer_idx: buf_idx, lsp_version: ver, lines },
-            );
-            let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
-            Some(all_lines.into_iter().skip(scroll).collect())
-        } else if mode == Mode::JsonPreview {
-            let lsp_ver = self.current_buffer().map(|b| b.lsp_version);
-            let ver = lsp_ver.unwrap_or(0);
-            let content =
-                self.current_buffer().map(|buf| buf.lines().join("\n")).unwrap_or_default();
-            let all_lines = cached_preview(
-                &mut self.json_cache,
-                |c| c.buffer_idx == buf_idx && Some(c.lsp_version) == lsp_ver,
-                || crate::json_preview::render(&content),
-                |lines| JsonCache { buffer_idx: buf_idx, lsp_version: ver, lines },
             );
             let scroll = self.preview_scroll.min(all_lines.len().saturating_sub(1));
             Some(all_lines.into_iter().skip(scroll).collect())

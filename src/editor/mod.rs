@@ -15,8 +15,8 @@ mod state;
 mod surround;
 mod text_objects;
 pub(crate) use state::{
-    apply_hunk_verdicts, ClipboardType, CommitMsgState, CsvCache, FoldCache, HighlightCache,
-    JsonCache, MarkdownCache, ReleaseNotesState, SplitState, StickyScrollCache,
+    apply_hunk_verdicts, ClipboardType, CommitMsgState, FoldCache, HighlightCache, MarkdownCache,
+    ReleaseNotesState, SplitState, StickyScrollCache,
 };
 pub use state::{
     DiffLine, HoverPopupState, InlineAssistPhase, InlineAssistState, LocationEntry,
@@ -189,15 +189,11 @@ pub struct Editor {
     // ── File explorer ─────────────────────────────────────────────────────────
     file_explorer: FileExplorer,
 
-    // ── Markdown / CSV / JSON preview ─────────────────────────────────────────
-    /// Scroll offset (in rendered lines) shared by all preview modes.
+    // ── Markdown preview ──────────────────────────────────────────────────────
+    /// Scroll offset (in rendered lines) for preview mode.
     preview_scroll: usize,
     /// Cached rendered markdown lines — avoids re-parsing on every render frame.
     markdown_cache: Option<MarkdownCache>,
-    /// Cached rendered CSV table lines.
-    csv_cache: Option<CsvCache>,
-    /// Cached rendered JSON lines.
-    json_cache: Option<JsonCache>,
 
     /// Cached sticky-scroll header — avoids walking the tree-sitter CST every frame.
     sticky_scroll_cache: Option<StickyScrollCache>,
@@ -408,8 +404,6 @@ impl Editor {
             ),
             preview_scroll: 0,
             markdown_cache: None,
-            csv_cache: None,
-            json_cache: None,
             sticky_scroll_cache: None,
             fold_cache: None,
             last_agent_render: None,

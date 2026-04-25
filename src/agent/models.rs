@@ -108,7 +108,7 @@ fn infer_ollama_context_window(name: &str) -> u32 {
 
 /// Fetch chat/agent-capable models from the Copilot `/models` endpoint.
 /// Returns `ModelVersion` entries sorted alphabetically by id.
-pub(super) async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
+pub(super) async fn fetch_models(api_token: &str, base_url: &str) -> Result<Vec<ModelVersion>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -119,7 +119,7 @@ pub(super) async fn fetch_models(api_token: &str) -> Result<Vec<ModelVersion>> {
 
     loop {
         let resp = client
-            .get("https://api.githubcopilot.com/models")
+            .get(format!("{base_url}/models"))
             .header("Authorization", format!("Bearer {api_token}"))
             .header("User-Agent", "forgiven/0.1.0")
             .header("Copilot-Integration-Id", "vscode-chat")
@@ -508,9 +508,10 @@ pub(super) async fn fetch_models_for_provider(
     ollama_base_url: &str,
     ollama_context_length: Option<u32>,
     openai_base_url: &str,
+    copilot_api_base: &str,
 ) -> Result<Vec<ModelVersion>> {
     match kind {
-        ProviderKind::Copilot => fetch_models(api_token).await,
+        ProviderKind::Copilot => fetch_models(api_token, copilot_api_base).await,
         ProviderKind::Ollama => fetch_models_ollama(ollama_base_url, ollama_context_length).await,
         ProviderKind::Anthropic => Ok(fetch_models_anthropic()),
         ProviderKind::OpenAi => fetch_models_openai(api_token, openai_base_url).await,

@@ -510,31 +510,6 @@ impl Editor {
                 let state = if self.config.soft_wrap { "on" } else { "off" };
                 self.set_status(format!("Soft wrap {state}"));
             },
-            // ── CSV / JSON preview ────────────────────────────────────────────
-            Action::CsvPreviewToggle => {
-                if self.mode == Mode::CsvPreview {
-                    self.mode = Mode::Normal;
-                    self.set_status("Preview closed".to_string());
-                } else {
-                    self.preview_scroll = 0;
-                    self.mode = Mode::CsvPreview;
-                    self.set_status(
-                        "CSV preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string(),
-                    );
-                }
-            },
-            Action::JsonPreviewToggle => {
-                if self.mode == Mode::JsonPreview {
-                    self.mode = Mode::Normal;
-                    self.set_status("Preview closed".to_string());
-                } else {
-                    self.preview_scroll = 0;
-                    self.mode = Mode::JsonPreview;
-                    self.set_status(
-                        "JSON preview  (Esc/q=back, j/k=scroll, Ctrl+D/U=page)".to_string(),
-                    );
-                }
-            },
             // ── Memory save ───────────────────────────────────────────────────
             Action::MemorySave => {
                 const MEMORY_PROMPT: &str = "\
@@ -699,8 +674,9 @@ Skip anything already obvious from reading the code.";
                     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
                 let insights = crate::insights::build_insights(&data_dir);
+                let quota = self.agent_panel.copilot_quota.clone();
                 self.insights_dashboard =
-                    Some(crate::insights::panel::InsightsDashboardState::new(insights));
+                    Some(crate::insights::panel::InsightsDashboardState::new(insights, quota));
                 self.mode = Mode::InsightsDashboard;
             },
             // ── Intent Translator toggle (SPC a t) ───────────────────────────

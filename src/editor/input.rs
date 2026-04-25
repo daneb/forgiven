@@ -107,9 +107,7 @@ impl Editor {
             Mode::PickFile => self.handle_pick_file_mode(key)?,
             Mode::Agent => self.handle_agent_mode(key)?,
             Mode::Explorer => self.handle_explorer_mode(key)?,
-            Mode::MarkdownPreview | Mode::CsvPreview | Mode::JsonPreview => {
-                self.handle_preview_mode(key)?
-            },
+            Mode::MarkdownPreview => self.handle_preview_mode(key)?,
             Mode::Search => self.handle_search_mode(key)?,
             Mode::InFileSearch => self.handle_in_file_search_mode(key)?,
             Mode::RenameFile => self.handle_rename_mode(key)?,
