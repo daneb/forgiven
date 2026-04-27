@@ -333,12 +333,6 @@ pub struct Editor {
     /// True from the moment the companion connects to the Nexus socket.
     /// Reset to false when the companion process is killed.
     pub sidecar_client_connected: bool,
-
-    // ── MCP Ingester (Step 5 — Hybrid Reliability) ────────────────────────────
-    /// URL typed in the ingester prompt popup (Mode::IngesterUrl).
-    ingester_url_buf: String,
-    /// In-flight MCP fetch task; polled each tick.
-    ingester_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
 }
 
 impl Editor {
@@ -491,8 +485,6 @@ impl Editor {
             image_protocol: None,
             companion_process: None,
             sidecar_client_connected: false,
-            ingester_url_buf: String::new(),
-            ingester_rx: None,
         };
 
         // Spin up the filesystem watcher (best-effort; degrades gracefully).
@@ -916,18 +908,6 @@ impl Editor {
             self.sidecar_client_connected = false;
             tracing::info!("Companion closed");
         }
-    }
-
-    /// Open fetched content as a scratch markdown buffer and enter preview mode.
-    pub(crate) fn open_markdown_preview_from_string(&mut self, content: String) {
-        let mut buf = crate::buffer::Buffer::new("[ingested]");
-        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        buf.replace_all_lines(if lines.is_empty() { vec![String::new()] } else { lines });
-        self.preview_scroll = 0;
-        self.markdown_cache = None;
-        self.buffers.push(buf);
-        self.current_buffer_idx = self.buffers.len() - 1;
-        self.mode = crate::keymap::Mode::MarkdownPreview;
     }
 
     /// Flush debounced sidecar events (buffer updates, cursor moves, mode changes).

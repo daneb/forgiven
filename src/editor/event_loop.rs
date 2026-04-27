@@ -470,36 +470,6 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // ── MCP Ingester fetch poll (Step 5 — Hybrid Reliability) ─────────
-            let ingester_done = if let Some(rx) = self.ingester_rx.as_mut() {
-                match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => Some(Err(anyhow::anyhow!("ingester channel closed"))),
-                }
-            } else {
-                None
-            };
-            if let Some(result) = ingester_done {
-                self.ingester_rx = None;
-                needs_render = true;
-                match result {
-                    Ok(markdown) => {
-                        // Forward to companion if connected.
-                        if let Some(ref sidecar) = self.sidecar {
-                            sidecar.send(crate::sidecar::NexusEvent::buffer_update(
-                                &markdown, "markdown", None, 0,
-                            ));
-                        }
-                        self.open_markdown_preview_from_string(markdown);
-                    },
-                    Err(e) => {
-                        self.set_status(format!("Ingester error: {e}"));
-                    },
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
             // ── Nexus sidecar: flush debounced events + detect mode changes ────
             // Detect active-buffer switches here (once per tick) rather than
             // inside flush_sidecar_events() so the arm races no webview timing.
@@ -549,7 +519,6 @@ impl Editor {
                 || self.release_notes.rx.is_some()
                 || self.mcp_rx.is_some()
                 || self.insights_narrative_rx.is_some()
-                || self.ingester_rx.is_some()
             {
                 needs_render = true;
             }

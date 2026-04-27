@@ -126,7 +126,6 @@ impl Editor {
             Mode::InlineAssist => self.handle_inline_assist_mode(key)?,
             Mode::ReviewChanges => self.handle_review_changes_mode(key)?,
             Mode::InsightsDashboard => self.handle_insights_dashboard_mode(key)?,
-            Mode::IngesterUrl => self.handle_ingester_url_mode(key)?,
         }
 
         Ok(())

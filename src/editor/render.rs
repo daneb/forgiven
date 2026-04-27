@@ -657,7 +657,6 @@ impl Editor {
                 },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
-                ingester_url_buf: &self.ingester_url_buf,
             };
             UI::render(frame, &ctx);
         })?;

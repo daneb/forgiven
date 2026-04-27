@@ -249,8 +249,6 @@ pub struct RenderContext<'a> {
     pub soft_wrap: bool,
     /// Syntax highlighter — used for code blocks inside markdown rendering.
     pub highlighter: &'a crate::highlight::Highlighter,
-    /// URL typed in the ingester prompt popup (Mode::IngesterUrl only).
-    pub ingester_url_buf: &'a str,
 }
 
 /// UI rendering for the editor
@@ -566,11 +564,6 @@ impl UI {
         // Render insights dashboard overlay (Mode::InsightsDashboard, ADR 0129)
         if let Some(dashboard) = ctx.insights_dashboard {
             crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
-        }
-
-        // Render URL ingestion popup (Mode::IngesterUrl)
-        if mode == Mode::IngesterUrl {
-            Self::render_ingester_url_popup(frame, ctx.ingester_url_buf, size);
         }
     }
 }

@@ -801,26 +801,4 @@ impl Editor {
         }
         Ok(())
     }
-
-    // ── Ingester URL popup mode key handling (Step 5 — Hybrid Reliability) ────
-
-    pub(super) fn handle_ingester_url_mode(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                self.ingester_url_buf.clear();
-                self.mode = Mode::Normal;
-            },
-            KeyCode::Enter => {
-                self.execute_action(crate::keymap::Action::IngesterFetchUrl)?;
-            },
-            KeyCode::Backspace => {
-                self.ingester_url_buf.pop();
-            },
-            KeyCode::Char(c) => {
-                self.ingester_url_buf.push(c);
-            },
-            _ => {},
-        }
-        Ok(())
-    }
 }

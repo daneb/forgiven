@@ -30,7 +30,6 @@ pub enum Mode {
     InlineAssist,      // Inline AI transform overlay (SPC a i)
     ReviewChanges,     // Multi-file review / change set view (SPC a r, ADR 0113)
     InsightsDashboard, // Collaboration analytics overlay (SPC a I, ADR 0129)
-    IngesterUrl,       // Single-line URL input popup (SPC i u)
 }
 
 /// The semantic kind of a tree-sitter text object.
@@ -179,9 +178,6 @@ pub enum Action {
     InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
     // Companion sidecar (Step 4.5 — Hybrid Reliability)
     CompanionToggle, // SPC p c — toggle the Tauri companion window
-    // MCP Ingester (Step 5 — Hybrid Reliability)
-    IngesterPromptUrl, // SPC i u — open URL ingestion prompt
-    IngesterFetchUrl,  // Enter in IngesterUrl mode — dispatch MCP fetch
     // Intent Translator (docs/intent-translator.md)
     AgentIntentTranslatorToggle, // SPC a t — toggle intent translator for current session
     // Codified Context (docs/codified-context.md)
@@ -458,13 +454,6 @@ impl KeyHandler {
             .children
             .insert('i', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
         tree.insert('d', diag_node);
-
-        // SPC i - Ingest
-        let mut ingest_node = KeyNode::new("ingest");
-        ingest_node
-            .children
-            .insert('u', KeyNode::leaf("fetch URL → markdown", Action::IngesterPromptUrl));
-        tree.insert('i', ingest_node);
 
         tree
     }
@@ -838,82 +827,6 @@ mod tests {
             last = press(handler, KeyCode::Char(ch));
         }
         last
-    }
-
-    // ── SPC i u → IngesterPromptUrl ──────────────────────────────────────────
-
-    #[test]
-    fn spc_i_u_resolves_to_ingester_prompt_url() {
-        let mut h = KeyHandler::new();
-        let action = leader_seq(&mut h, &['i', 'u']);
-        assert_eq!(action, Action::IngesterPromptUrl);
-    }
-
-    #[test]
-    fn spc_i_alone_is_noop_sequence_in_flight() {
-        let mut h = KeyHandler::new();
-        // After SPC i the sequence is still open (no leaf reached yet).
-        press(&mut h, KeyCode::Char(' '));
-        let after_i = press(&mut h, KeyCode::Char('i'));
-        assert_eq!(after_i, Action::Noop, "SPC i alone should not fire an action");
-        // Sequence is still active — leader_active() should be true.
-        assert!(h.leader_active());
-    }
-
-    #[test]
-    fn spc_i_unknown_key_is_noop_and_clears_sequence() {
-        let mut h = KeyHandler::new();
-        press(&mut h, KeyCode::Char(' '));
-        press(&mut h, KeyCode::Char('i'));
-        // 'z' is not a child of the 'i' node.
-        let result = press(&mut h, KeyCode::Char('z'));
-        assert_eq!(result, Action::Noop);
-        assert!(!h.leader_active(), "invalid sequence should clear the leader state");
-    }
-
-    #[test]
-    fn esc_cancels_leader_sequence() {
-        let mut h = KeyHandler::new();
-        press(&mut h, KeyCode::Char(' '));
-        press(&mut h, KeyCode::Char('i'));
-        let result = press(&mut h, KeyCode::Esc);
-        assert_eq!(result, Action::Noop);
-        assert!(!h.leader_active());
-    }
-
-    // ── IngesterFetchUrl is distinct and registered in the Action enum ────────
-
-    #[test]
-    fn ingester_fetch_url_action_exists() {
-        // Verify Action::IngesterFetchUrl can be constructed and compared.
-        let a = Action::IngesterFetchUrl;
-        assert_eq!(a, Action::IngesterFetchUrl);
-        assert_ne!(a, Action::IngesterPromptUrl);
-    }
-
-    // ── Mode::IngesterUrl is distinct from Normal and other text-input modes ──
-
-    #[test]
-    fn ingester_url_mode_is_distinct() {
-        assert_ne!(Mode::IngesterUrl, Mode::Normal);
-        assert_ne!(Mode::IngesterUrl, Mode::Insert);
-        assert_ne!(Mode::IngesterUrl, Mode::RenameFile);
-        assert_ne!(Mode::IngesterUrl, Mode::LspRename);
-    }
-
-    #[test]
-    fn ingester_url_mode_eq_self() {
-        assert_eq!(Mode::IngesterUrl, Mode::IngesterUrl);
-    }
-
-    // ── SPC i does not conflict with existing namespaces ─────────────────────
-
-    #[test]
-    fn spc_i_namespace_does_not_shadow_insert_mode() {
-        // Pressing 'i' in Normal mode (without leader) → Insert, not Ingest.
-        let mut h = KeyHandler::new();
-        let action = press(&mut h, KeyCode::Char('i'));
-        assert_eq!(action, Action::Insert, "'i' without leader should still enter Insert mode");
     }
 
     #[test]

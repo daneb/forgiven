@@ -62,7 +62,6 @@ mod editor;
 mod explorer;
 mod graphics;
 mod highlight;
-mod ingester;
 mod insights;
 mod keymap;
 mod lsp;

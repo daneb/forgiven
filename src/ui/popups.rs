@@ -230,24 +230,6 @@ impl UI {
         frame.render_widget(Paragraph::new(display).block(block), popup_area);
     }
 
-    /// Render the centred ingester URL popup (Mode::IngesterUrl).
-    pub(super) fn render_ingester_url_popup(frame: &mut Frame, url_buf: &str, area: Rect) {
-        let popup_width = 70.min(area.width);
-        let popup_height = 3u16;
-        let x = (area.width.saturating_sub(popup_width)) / 2;
-        let y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-        frame.render_widget(Clear, popup_area);
-
-        let display = format!(" {}_", url_buf);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" Ingest URL (Enter = fetch, Esc = cancel) ");
-        frame.render_widget(Paragraph::new(display).block(block), popup_area);
-    }
-
     /// Render the diagnostics overlay (Mode::Diagnostics).
     /// Shows MCP server status and LSP servers. Any key closes it.
     pub(super) fn render_diagnostics_overlay(
