@@ -74,7 +74,7 @@ These are areas where Forgiven is **ahead** of or **differentiated** from the co
 | Strength | Detail |
 |----------|--------|
 | Context management | LLMLingua compression (ADR 0084/0088), importance-scored history (ADR 0081), per-segment token breakdowns (ADR 0099), context gauge, auto-compress tool results. More sophisticated than Cursor or Zed. |
-| Spec-driven development | spec-kit integration (ADR 0056) with auto-clear context per phase (ADR 0097). Ahead of Kiro's approach in configurability. |
+| Spec-driven development | OpenSpec integration (ADR 0139) — three-command workflow (`propose`/`review`/`apply`); brownfield-first, auto-clears context per phase. Replaced SpecKit (ADR 0056). |
 | Security posture | Zero telemetry, no background network calls, agent sandboxed to project root, `cargo-audit` + `cargo-deny` in CI, `unsafe` forbidden project-wide. Strongest in the space. |
 | MCP ecosystem | Full MCP client (ADR 0045) with status visualisation (ADR 0048), env var secrets (ADR 0050), non-blocking startup (ADR 0053), memory server integration (ADR 0083). |
 | Token awareness | Session rounds counter (ADR 0096), context bloat audit (ADR 0087), prompt caching tracking (ADR 0078), diff-only tool results (ADR 0079), tool call batching (ADR 0080). |

@@ -470,6 +470,74 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── MCP Ingester fetch poll (Step 5 — Hybrid Reliability) ─────────
+            let ingester_done = if let Some(rx) = self.ingester_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(_) => Some(Err(anyhow::anyhow!("ingester channel closed"))),
+                }
+            } else {
+                None
+            };
+            if let Some(result) = ingester_done {
+                self.ingester_rx = None;
+                needs_render = true;
+                match result {
+                    Ok(markdown) => {
+                        // Forward to companion if connected.
+                        if let Some(ref sidecar) = self.sidecar {
+                            sidecar.send(crate::sidecar::NexusEvent::buffer_update(
+                                &markdown, "markdown", None, 0,
+                            ));
+                        }
+                        self.open_markdown_preview_from_string(markdown);
+                    },
+                    Err(e) => {
+                        self.set_status(format!("Ingester error: {e}"));
+                    },
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
+            // ── Nexus sidecar: flush debounced events + detect mode changes ────
+            // Detect active-buffer switches here (once per tick) rather than
+            // inside flush_sidecar_events() so the arm races no webview timing.
+            if self.sidecar.is_some()
+                && Some(self.current_buffer_idx) != self.sidecar_last_buffer_idx
+            {
+                self.sidecar_last_buffer_idx = Some(self.current_buffer_idx);
+                self.sidecar_last_cursor_line = None;
+                // Use now() so the 300 ms debounce fires after the webview is ready.
+                if self.last_sidecar_send.is_none() {
+                    self.last_sidecar_send = Some(std::time::Instant::now());
+                }
+            }
+            // When a new companion client connects, mark a snapshot as pending.
+            // Re-arm the send timer each tick until a buffer_update is delivered.
+            let new_client = if let Some(ref mut s) = self.sidecar {
+                s.new_client_rx.try_recv().is_ok()
+            } else {
+                false
+            };
+            if new_client {
+                self.sidecar_snapshot_pending = true;
+                self.sidecar_client_connected = true;
+            }
+            if self.sidecar_snapshot_pending && self.last_sidecar_send.is_none() {
+                // 300 ms delay ensures webview JS listeners are registered.
+                self.last_sidecar_send = Some(std::time::Instant::now());
+            }
+            self.flush_sidecar_events();
+            let mode_str = format!("{:?}", self.mode);
+            if self.sidecar_last_mode.as_deref() != Some(&mode_str) {
+                self.sidecar_last_mode = Some(mode_str.clone());
+                if let Some(ref s) = self.sidecar {
+                    s.send(crate::sidecar::NexusEvent::mode_change(&mode_str));
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // Force a render whenever background work is in-flight OR the
             // which-key timer is pending (so the popup appears after 500 ms
             // even when no key event arrives to trigger a normal render).
@@ -481,6 +549,7 @@ impl Editor {
                 || self.release_notes.rx.is_some()
                 || self.mcp_rx.is_some()
                 || self.insights_narrative_rx.is_some()
+                || self.ingester_rx.is_some()
             {
                 needs_render = true;
             }

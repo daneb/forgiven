@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Forgiven Previewer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-mode="Normal">
+  <header id="toolbar">
+    <span id="file-path">—</span>
+    <span id="mode-badge">Normal</span>
+    <span id="cursor-pos"></span>
+  </header>
+  <main id="content">
+    <div id="placeholder">
+      <p>Waiting for Forgiven…</p>
+      <p class="hint">Open a file in the editor to preview it here.</p>
+    </div>
+  </main>
+  <!-- marked.js vendored via npm postinstall — sets window.marked -->
+  <script src="vendor/marked.min.js"></script>
+  <!-- mermaid.js vendored UMD build — sets window.mermaid -->
+  <script src="vendor/mermaid.min.js"></script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

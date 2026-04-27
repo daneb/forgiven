@@ -1,0 +1,20 @@
+{
+  "name": "forgiven-companion",
+  "version": "0.1.0",
+  "description": "Tauri v2 sidecar for the Forgiven TUI editor — Nexus markdown previewer",
+  "private": true,
+  "scripts": {
+    "tauri":   "tauri",
+    "dev":     "tauri dev",
+    "build":   "tauri build",
+    "preview": "npx serve ui -p 3000",
+    "postinstall": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "marked": "^13"
+  }
+}

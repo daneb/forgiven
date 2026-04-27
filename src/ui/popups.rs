@@ -230,6 +230,24 @@ impl UI {
         frame.render_widget(Paragraph::new(display).block(block), popup_area);
     }
 
+    /// Render the centred ingester URL popup (Mode::IngesterUrl).
+    pub(super) fn render_ingester_url_popup(frame: &mut Frame, url_buf: &str, area: Rect) {
+        let popup_width = 70.min(area.width);
+        let popup_height = 3u16;
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let display = format!(" {}_", url_buf);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Ingest URL (Enter = fetch, Esc = cancel) ");
+        frame.render_widget(Paragraph::new(display).block(block), popup_area);
+    }
+
     /// Render the diagnostics overlay (Mode::Diagnostics).
     /// Shows MCP server status and LSP servers. Any key closes it.
     pub(super) fn render_diagnostics_overlay(
@@ -313,6 +331,55 @@ impl UI {
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
                 Span::styled(name.to_string(), Style::default().fg(Color::White)),
             ]));
+        }
+
+        // ── Companion / Nexus sidecar ─────────────────────────────────────────
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            " Companion ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+        {
+            let (socket_bound, process_running, client_connected) = data.sidecar_status;
+            let socket_icon = if socket_bound { "✓" } else { "✗" };
+            let socket_color = if socket_bound { Color::Green } else { Color::DarkGray };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {socket_icon} "), Style::default().fg(socket_color)),
+                Span::styled("Nexus socket  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if socket_bound { "bound" } else { "unbound" },
+                    Style::default().fg(socket_color),
+                ),
+            ]));
+
+            let proc_icon = if process_running { "✓" } else { "–" };
+            let proc_color = if process_running { Color::Green } else { Color::DarkGray };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {proc_icon} "), Style::default().fg(proc_color)),
+                Span::styled("Process       ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if process_running { "running" } else { "stopped" },
+                    Style::default().fg(proc_color),
+                ),
+            ]));
+
+            let conn_icon = if client_connected { "✓" } else { "–" };
+            let conn_color = if client_connected { Color::Green } else { Color::DarkGray };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {conn_icon} "), Style::default().fg(conn_color)),
+                Span::styled("Client        ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if client_connected { "connected" } else { "waiting" },
+                    Style::default().fg(conn_color),
+                ),
+            ]));
+
+            if process_running && !client_connected {
+                lines.push(Line::from(vec![Span::styled(
+                    "    companion launched but not yet connected to socket",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                )]));
+            }
         }
 
         // ── Agent session token usage ─────────────────────────────────────────

@@ -47,7 +47,7 @@ with multiple large `read_file` or `search_files` calls.
 ### 0.2 Use the janitor earlier
 
 Run `SPC a j` after completing a logical unit of work — not when the 90%
-warning fires. A clean session before starting a new `/speckit.implement` task
+warning fires. A clean session before starting a new `/openspec.apply` task
 costs one API call but saves 10–15 rounds of growing history.
 
 Rule of thumb: run the janitor when `session_total` in `SPC d` exceeds 100k
@@ -201,7 +201,7 @@ implications beyond cost.
 
 The `context_snippet` is injected into the system prompt on every round,
 regardless of whether the user's task involves the open file. For pure agent
-tasks (`/speckit.implement`) the open file is irrelevant.
+tasks (`/openspec.apply`) the open file is irrelevant.
 
 **Change:** only inject `context_snippet` when:
 - The user explicitly attaches a file via the `@` file picker, OR

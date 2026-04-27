@@ -69,6 +69,37 @@ agent requests. The agent is sandboxed to the project root. `unsafe` code is
 forbidden project-wide. Dependencies are audited with `cargo-audit` and `cargo-deny`
 in CI.
 
+### 6. Composable sidecar architecture
+
+The TUI is the core — but it is not the whole system. Rich media that the terminal
+cannot render (Markdown with images, Mermaid diagrams, live HTML) is delegated to a
+separate process: the **companion window**, a Tauri sidecar connected over a Unix
+domain socket.
+
+This is a deliberate architectural pattern, not a convenience hack. The TUI broadcasts
+editor state (buffer content, cursor position, mode) as newline-delimited JSON events
+over a named socket (`/tmp/forgiven-nexus-{pid}.sock`). Any process that speaks the
+protocol can subscribe — the companion window is the first consumer, but the same
+channel could feed a monitoring dashboard, a remote preview server, or a test-runner
+overlay without any changes to the core editor.
+
+The benefits compound over time:
+
+- **Isolation**: the webview renderer lives in a different process; a crash or CSP
+  violation cannot destabilise the editor.
+- **Technology heterogeneity**: the TUI is Rust/ratatui; the companion is
+  Tauri/WebKit. Each component uses the right runtime for its job without compromise.
+- **Optional by design**: the companion is off by default. Users who live entirely in
+  the terminal pay zero cost for its existence.
+- **Protocol-first evolution**: adding a new sidecar capability means extending the
+  JSON event schema, not refactoring the editor core. The Nexus protocol is the
+  stable contract; the consumer is free to change.
+
+This mirrors how LSP separated language intelligence from editing surfaces — the same
+principle applied to the presentation layer. Rather than embedding increasingly complex
+rendering inside the terminal (blurring what the editor *is*), forgiven externalises
+that complexity into a composable, replaceable sidecar.
+
 ---
 
 ## Features
@@ -156,14 +187,52 @@ See [docs/reference.md](docs/reference.md#file-explorer-modeexplorer) for full k
 ### In-file search (`/`)
 - `/` enters search mode; `Enter` highlights all matches; `n`/`N` jump between them
 
-### File preview (`SPC m …`)
-- `SPC m p` — Markdown: toggle a read-only rendered preview (CommonMark + Mermaid hints)
-- `SPC m b` — Markdown: render to HTML and open in the system browser with Mermaid.js
-- `SPC m c` — CSV: column-aligned table view with highlighted header row
-- `SPC m j` — JSON: pretty-printed view with token-level syntax colouring
+### Preview (`SPC p …`)
+- `SPC p p` — Markdown: toggle a read-only rendered preview (CommonMark + Mermaid hints)
+- `SPC p b` — Markdown: render to HTML and open in the system browser with Mermaid.js
+- `SPC p w` — toggle soft wrap (reflow long lines at viewport edge)
+- `SPC p c` — toggle the **companion window** (Tauri sidecar — see below)
 
-All preview modes share the same scroll keys: `j/k` (line), `Ctrl+D/U` (half-page),
+All inline preview modes share the same scroll keys: `j/k` (line), `Ctrl+D/U` (half-page),
 `g/G` (top/bottom), `Esc`/`q` (exit).
+
+### Companion window (Tauri sidecar)
+
+A detached borderless window that renders rich content — full Markdown, Mermaid
+diagrams, and syntax-highlighted code — alongside the TUI without cluttering the
+terminal viewport.
+
+The companion connects to the editor over a Unix domain socket
+(`/tmp/forgiven-nexus-{pid}.sock`) and receives live updates as you type.
+Content, cursor position, and mode changes are streamed automatically; the window
+stays in sync with zero manual intervention.
+
+**Quick start:**
+
+```bash
+# Build and install both binaries to ~/.local/bin
+make install
+
+# Open the editor — companion is off by default
+forgiven src/main.rs
+
+# Toggle the window with SPC p c
+# Or enable auto-launch in config:
+```
+
+```toml
+# ~/.config/forgiven/config.toml
+[sidecar]
+auto_launch = true   # spawn companion whenever the editor opens
+```
+
+The companion exits automatically when forgiven quits. If you build the companion
+separately, point forgiven to the binary:
+
+```toml
+[sidecar]
+binary_path = "/Applications/Forgiven Previewer.app/Contents/MacOS/forgiven-companion"
+```
 
 ### Other
 - lazygit full-screen overlay (`SPC g g`)
@@ -177,17 +246,16 @@ All preview modes share the same scroll keys: `j/k` (line), `Ctrl+D/U` (half-pag
 ## Quick Start
 
 ```bash
-# Build
+# Build the editor only
 cargo build --release
-
-# Open a project directory
-./target/release/forgiven /path/to/project
-
-# Open specific files
 ./target/release/forgiven src/main.rs
 
+# Build + install both the editor and the companion window to ~/.local/bin
+make install          # requires Node/npm for the companion
+forgiven src/main.rs  # SPC p c to toggle the companion window
+
 # Start with a scratch buffer
-./target/release/forgiven
+forgiven
 ```
 
 ---
@@ -251,7 +319,7 @@ app_name      = "forgiven"                                # forwarded as X-Title
 # ── Agent / prompt framework ─────────────────────────────────────────────
 [agent]
 # "none"       — disabled (default)
-# "spec-kit"   — built-in Spec-Driven Development workflow
+# "open-spec"  — built-in OpenSpec spec-driven workflow (3 commands)
 # "/path/dir"  — custom framework: directory of .md template files
 spec_framework = "none"
 
@@ -311,6 +379,13 @@ GITHUB_TOKEN = "$GITHUB_PERSONAL_ACCESS_TOKEN"
 name    = "memory"
 command = "npx"
 args    = ["-y", "@modelcontextprotocol/server-memory"]
+
+# ── Companion window ─────────────────────────────────────────────────────
+# Tauri sidecar for rich Markdown / Mermaid rendering alongside the TUI.
+# Toggle at runtime with SPC p c.  Build with: make companion
+[sidecar]
+auto_launch = false   # true = spawn companion whenever the editor opens
+# binary_path = "/path/to/forgiven-companion"  # omit to search $PATH / editor dir
 ```
 
 Use `SPC d` (Diagnostics overlay) to inspect running LSP and MCP servers,
@@ -347,7 +422,8 @@ Common sources of context bloat and their mitigations:
 | `rg` (ripgrep) | `brew install ripgrep` / `cargo install ripgrep` | Project-wide search (`SPC s g`) |
 | `lazygit` | `brew install lazygit` / distro package | Git UI (`SPC g g`) |
 | `rust-analyzer` | `rustup component add rust-analyzer` | Rust LSP |
-| `mmdc` | `npm install -g @mermaid-js/mermaid-cli` | Mermaid diagram rendering (`SPC m d`) |
+| `mmdc` | `npm install -g @mermaid-js/mermaid-cli` | Mermaid diagram rendering (`SPC p b`) |
+| Node / npm | [nodejs.org](https://nodejs.org) | Building the companion window (`make companion`) |
 | `llmlingua` | `pip install llmlingua` then configure `mcp_servers/llmlingua_server.py` | Automatic tool-result compression (`auto_compress_tool_results`) |
 
 ---
@@ -378,35 +454,33 @@ forgiven/
 ├── src/
 │   ├── main.rs              # Entry point, CLI parsing, project-root setup
 │   ├── agent/               # Copilot agent chat panel (streaming SSE, tool calls)
-│   │   ├── mod.rs
-│   │   └── tools.rs
-│   ├── buffer/              # Buffer management
-│   │   ├── buffer.rs        # Core text buffer, cursor, edit operations
-│   │   ├── cursor.rs        # Cursor position
-│   │   └── history.rs       # Snapshot undo/redo
-│   ├── config/              # TOML config loader
-│   │   └── mod.rs
+│   ├── buffer/              # Buffer management (text, cursor, snapshot undo/redo)
+│   ├── config/              # TOML config loader (~/.config/forgiven/config.toml)
 │   ├── editor/              # Main event loop and editor state
-│   │   └── mod.rs
 │   ├── explorer/            # File explorer tree sidebar
-│   │   └── mod.rs
 │   ├── highlight/           # Syntax highlighting (syntect, Base16 Ocean Dark)
-│   │   └── mod.rs
 │   ├── treesitter/          # Tree-sitter AST engine (text objects, folding)
-│   │   ├── mod.rs           # TsEngine, TsLang, TsSnapshot
-│   │   └── query.rs         # Node-finding helpers, text_object_range()
-│   ├── keymap/              # Modal keybinding system + which-key
-│   │   └── mod.rs
+│   ├── keymap/              # Modal keybinding system + which-key popup
 │   ├── lsp/                 # LSP client (rust-analyzer, copilot-language-server)
-│   │   └── mod.rs
+│   ├── mcp/                 # MCP client (stdio + HTTP/SSE transports)
 │   ├── markdown/            # CommonMark → ratatui Lines renderer
-│   │   └── mod.rs
 │   ├── search/              # Project-wide ripgrep search (SPC s g)
-│   │   └── mod.rs
+│   ├── sidecar/             # Nexus IPC — UDS server broadcasting events to companion
+│   │   ├── mod.rs
+│   │   ├── protocol.rs      # NexusEvent wire format (newline-delimited JSON)
+│   │   └── server.rs        # SidecarServer — UDS accept-loop task
 │   └── ui/                  # Terminal rendering (ratatui)
-│       └── mod.rs
+├── companion/               # Tauri v2 companion window (Node + Rust)
+│   ├── src-tauri/
+│   │   └── src/
+│   │       ├── lib.rs       # Tauri setup, window positioning
+│   │       └── nexus.rs     # UDS client — reads NexusEvents, emits Tauri events
+│   └── ui/
+│       ├── index.html       # Webview shell (marked.js + mermaid.js)
+│       ├── main.js          # Event listeners, Markdown/Mermaid render
+│       └── style.css        # Dark theme matching TUI colours
 ├── docs/
-│   └── adr/                 # Architecture Decision Records (0001 – 0116)
+│   └── adr/                 # Architecture Decision Records (0001 – 0145)
 └── Cargo.toml
 ```
 
@@ -542,6 +616,12 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0067](docs/adr/0067-agent-input-scroll-follow-cursor.md) | Agent Input Box Scroll-to-Cursor |
 | [0068](docs/adr/0068-which-key-dynamic-height-and-ask-user-dialog-formatting.md) | Which-Key Dynamic Height and Ask-User Dialog Formatting |
 | [0069](docs/adr/0069-model-loading-modernisation.md) | Model Loading Modernisation |
+| [0070](docs/adr/0070-markdown-preview-visual-refresh.md) | Markdown Preview Visual Refresh |
+| [0071](docs/adr/0071-file-watcher-self-save-suppression.md) | File Watcher Self-Save Suppression |
+| [0072](docs/adr/0072-mcp-child-process-cleanup.md) | MCP Child Process Cleanup on Exit |
+| [0073](docs/adr/0073-mcp-http-transport-external-servers.md) | MCP HTTP Transport & Stdio Server Environment Variables |
+| [0074](docs/adr/0074-agentic-loop-token-refresh.md) | Agentic Loop Mid-Session Token Refresh |
+| [0075](docs/adr/0075-slash-menu-description-hints.md) | Slash-Menu Description Hints |
 | [0076](docs/adr/0076-mermaid-diagram-browser-preview.md) | Mermaid Diagram Browser Preview (`Ctrl+M`) |
 | [0077](docs/adr/0077-agent-context-window-management.md) | Agent Context Window Management |
 | [0078](docs/adr/0078-prompt-caching.md) | Prompt Caching — Cached Token Tracking |
@@ -555,11 +635,21 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0086](docs/adr/0086-copilot-model-switch-detection-and-429-handling.md) | Copilot Model-Switch Detection and 429 Rate-Limit Handling |
 | [0087](docs/adr/0087-context-bloat-audit-and-instrumentation.md) | Context Bloat Audit and Session Token Instrumentation |
 | [0088](docs/adr/0088-auto-compress-tool-results-llmlingua.md) | Automatic Tool-Result Compression via LLMLingua |
+| [0089](docs/adr/0089-large-file-split-editor-agent-ui.md) | Large File Split: editor, agent, and ui modules |
+| [0090](docs/adr/0090-visual-indent-markdown-tables-mcp-call-log.md) | Visual indent/dedent, Markdown table rendering, MCP call log |
+| [0091](docs/adr/0091-lsp-hover-and-rename.md) | LSP Hover and Rename |
+| [0092](docs/adr/0092-persistent-session-metrics-jsonl.md) | Persistent Session Metrics JSONL Log |
+| [0093](docs/adr/0093-cap-open-file-context-injection.md) | Cap Open-File Context Injection to 150 Lines |
+| [0094](docs/adr/0094-fetch-models-before-budget-computation.md) | Fetch Models Before Context-Budget Computation |
 | [0095](docs/adr/0095-persistent-log-file.md) | Persistent XDG-Aware Log File |
 | [0096](docs/adr/0096-session-rounds-and-avg-tokens-diagnostic.md) | Session Rounds Counter and Average Tokens per Invocation |
 | [0097](docs/adr/0097-speckit-auto-clear-context-per-phase.md) | SpecKit Auto-Clear Context per Phase |
 | [0098](docs/adr/0098-ollama-local-provider.md) | Ollama Local Provider |
 | [0099](docs/adr/0099-context-breakdown-token-awareness.md) | Context Breakdown: Per-Segment Token Awareness (Phase 1) |
+| [0100](docs/adr/0100-spec-slicer-virtual-context.md) | Spec Slicer: Virtual Context for Implement Phase |
+| [0101](docs/adr/0101-auto-janitor-rolling-summary.md) | Auto-Janitor: Rolling History Compression (Phase 3) |
+| [0102](docs/adr/0102-submit-hot-path-optimisations.md) | Submit Hot-Path Optimisations |
+| [0103](docs/adr/0103-speckit-output-formatting-conventions.md) | Speckit Output Formatting Conventions |
 | [0104](docs/adr/0104-tree-sitter-core-integration.md) | Tree-sitter Core Integration (AST engine foundation) |
 | [0105](docs/adr/0105-tree-sitter-text-objects.md) | Tree-sitter Text Objects (`vif`, `daf`, `yic`, etc.) |
 | [0106](docs/adr/0106-code-folding.md) | AST-Based Code Folding (`za`, `zM`, `zR`) |
@@ -573,6 +663,35 @@ All design decisions are documented in [`docs/adr/`](docs/adr/).
 | [0114](docs/adr/0114-agent-hooks.md) | Agent Hooks (`on_save`, `on_test_fail`) |
 | [0115](docs/adr/0115-agent-brevity-constraints.md) | Agent Brevity Constraints |
 | [0116](docs/adr/0116-multi-provider-llm-backend.md) | Multi-Provider LLM Backend (Anthropic, OpenAI, Gemini, OpenRouter) |
+| [0117](docs/adr/0117-janitor-fixes.md) | Auto-Janitor Fixes: Archive Preservation, Input Save/Restore, Status Variants, Ollama Fallback |
+| [0118](docs/adr/0118-aggregate-file-block-token-cap.md) | Aggregate File-Block Token Cap |
+| [0119](docs/adr/0119-cpu-memory-performance-pass.md) | CPU & Memory Performance Pass (Janitor / Streaming) |
+| [0120](docs/adr/0120-janitor-distinct-streaming-ux.md) | Auto-Janitor Distinct Streaming UX |
+| [0121](docs/adr/0121-janitor-deferred-trigger-and-context-grounding.md) | Auto-Janitor: Deferred Trigger and Context Grounding |
+| [0122](docs/adr/0122-no-duplicate-file-buffers.md) | No Duplicate File Buffers |
+| [0123](docs/adr/0123-context-management-v2-observation-masking-and-disk-persistence.md) | Context Management v2: Observation Masking + Disk Persistence |
+| [0124](docs/adr/0124-agent-input-history-cursor-and-label-rename.md) | Agent Input History, Mid-line Cursor, and Label Rename |
+| [0125](docs/adr/0125-csv-and-json-preview-modes.md) | CSV and JSON Preview Modes |
+| [0126](docs/adr/0126-token-efficiency-llm-interaction-quality-analysis.md) | Token Efficiency and LLM Interaction Quality Analysis |
+| [0127](docs/adr/0127-dependency-audit-and-suppression-policy.md) | Dependency Audit and Advisory Suppression Policy |
+| [0128](docs/adr/0128-investigation-subagent.md) | Investigation Subagent (`SPC a v`) |
+| [0129](docs/adr/0129-insights-dashboard.md) | Insights Dashboard: Collaboration Analytics |
+| [0130](docs/adr/0130-context-efficiency-expand-on-demand-retrieval-policy-compact-prompt.md) | Context Efficiency: Expand-on-Demand Results, Retrieval Policy, and Compact System Prompt |
+| [0131](docs/adr/0131-intent-translator.md) | Intent Translator |
+| [0132](docs/adr/0132-codified-context-three-tier-loader.md) | Codified Context: Three-Tier Context Loader |
+| [0133](docs/adr/0133-markdown-readability-upgrade.md) | Markdown Readability Upgrade |
+| [0134](docs/adr/0134-vim-percent-matching-pair-motion.md) | Vim `%` Matching-Pair Motion |
+| [0135](docs/adr/0135-agent-panel-space-a-cleanup.md) | Agent Panel `SPC a` Cleanup |
+| [0136](docs/adr/0136-blockquote-split-panic-fix.md) | Blockquote Gutter Split Panic Fix |
+| [0137](docs/adr/0137-soft-wrap-toggle-and-long-line-rendering.md) | Soft-Wrap Toggle and Long-Line Rendering Fix |
+| [0138](docs/adr/0138-performance-iteration-cache-unification-and-render-decomposition.md) | Performance Iteration: Cache Unification, Fold Cache, and render() Decomposition |
+| [0139](docs/adr/0139-openspec-replaces-speckit.md) | OpenSpec replaces SpecKit |
+| [0140](docs/adr/0140-copilot-quota-and-business-endpoint.md) | Copilot Quota Display and Business Endpoint Correction |
+| [0141](docs/adr/0141-companion-auto-launch-and-toggle.md) | Companion Auto-launch and Runtime Toggle (`SPC p c`) |
+| [0142](docs/adr/0142-consolidate-preview-keybindings-under-spc-p.md) | Consolidate Preview Keybindings Under `SPC p` |
+| [0143](docs/adr/0143-companion-hyperlinks-and-images.md) | Companion: Hyperlink and Image Support |
+| [0144](docs/adr/0144-mcp-ingester-url-to-markdown.md) | MCP Ingester: URL → Markdown via `SPC i u` |
+| [0145](docs/adr/0145-mcp-fetch-server-requirements.md) | MCP Fetch Server: Requirements and Choices |
 
 ---
 

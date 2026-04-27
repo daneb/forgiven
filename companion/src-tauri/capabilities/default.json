@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/acl/capability.json",
+  "identifier": "default",
+  "description": "Default permissions for the Forgiven Previewer companion window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "opener:allow-open-url",
+    "opener:allow-open-path"
+  ]
+}

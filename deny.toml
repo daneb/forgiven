@@ -31,13 +31,22 @@ allow = [
     "Unicode-DFS-2016",     # unicode-data tables
     "Unicode-3.0",
     "Zlib",
-    "BSL-1.0",          # clipboard-win + error-code (via arboard, Windows clipboard)
-    "CDLA-Permissive-2.0", # webpki-roots (via reqwest rustls-tls)
+    "BSL-1.0",              # clipboard-win + error-code (via arboard, Windows clipboard)
+    "CDLA-Permissive-2.0",  # webpki-roots (via reqwest rustls-tls)
+    "MPL-2.0",              # resvg + usvg (Phase 1 — SVG→PNG pipeline); file-level copyleft only
+    "NCSA",                 # libfuzzer-sys (fuzzing harness pulled in transitively by rav1e via image)
 ]
 
 # Confidence threshold — a score below this treats the detected licence as
 # unknown.  0.8 is a safe default; raise to 0.9 if you want stricter checks.
 confidence-threshold = 0.8
+
+# Crates whose license field is missing or undetectable by cargo-deny.
+# icy_sixel has no SPDX license field in its Cargo.toml manifest; the source
+# is MIT-licensed — skip the check rather than failing the build.
+[[licenses.exceptions]]
+allow = ["MIT"]
+name  = "icy_sixel"
 
 
 # ── Bans ───────────────────────────────────────────────────────────────────────

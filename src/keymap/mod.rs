@@ -14,7 +14,7 @@ pub enum Mode {
     PickFile,          // For file finder UI
     Agent,             // Copilot Chat / agent panel focused
     Explorer,          // File explorer tree focused
-    MarkdownPreview,   // Read-only rendered markdown view (SPC m p toggle)
+    MarkdownPreview,   // Read-only rendered markdown view (SPC p p toggle)
     Search,            // Project-wide ripgrep search overlay (SPC s g)
     InFileSearch,      // In-file search mode (/)
     RenameFile,        // Rename popup: user edits a filename from the explorer
@@ -30,6 +30,7 @@ pub enum Mode {
     InlineAssist,      // Inline AI transform overlay (SPC a i)
     ReviewChanges,     // Multi-file review / change set view (SPC a r, ADR 0113)
     InsightsDashboard, // Collaboration analytics overlay (SPC a I, ADR 0129)
+    IngesterUrl,       // Single-line URL input popup (SPC i u)
 }
 
 /// The semantic kind of a tree-sitter text object.
@@ -161,9 +162,9 @@ pub enum Action {
     GitCommitLast,   // SPC g l — generate commit msg from last commit
     GitReleaseNotes, // SPC g n — generate release notes from last N commits
     // Markdown preview
-    MarkdownPreviewToggle, // SPC m p — toggle markdown preview for .md buffers
-    MarkdownOpenBrowser,   // SPC m b — render current buffer to HTML and open in browser
-    SoftWrapToggle,        // SPC m w — toggle soft-wrap (word wrap at viewport edge)
+    MarkdownPreviewToggle, // SPC p p — toggle markdown preview for .md buffers
+    MarkdownOpenBrowser,   // SPC p b — render current buffer to HTML and open in browser
+    SoftWrapToggle,        // SPC p w — toggle soft-wrap (word wrap at viewport edge)
     // Memory
     MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
     // Janitor
@@ -176,6 +177,11 @@ pub enum Action {
     ReviewChangesOpen, // SPC a r — open review overlay for all agent-touched files
     // Insights dashboard (ADR 0129 Phase 3)
     InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
+    // Companion sidecar (Step 4.5 — Hybrid Reliability)
+    CompanionToggle, // SPC p c — toggle the Tauri companion window
+    // MCP Ingester (Step 5 — Hybrid Reliability)
+    IngesterPromptUrl, // SPC i u — open URL ingestion prompt
+    IngesterFetchUrl,  // Enter in IngesterUrl mode — dispatch MCP fetch
     // Intent Translator (docs/intent-translator.md)
     AgentIntentTranslatorToggle, // SPC a t — toggle intent translator for current session
     // Codified Context (docs/codified-context.md)
@@ -412,15 +418,6 @@ impl KeyHandler {
         );
         tree.insert('g', git_node);
 
-        // SPC m - Markdown / preview
-        let mut md_node = KeyNode::new("markdown/preview");
-        md_node
-            .children
-            .insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
-        md_node.children.insert('b', KeyNode::leaf("open in browser", Action::MarkdownOpenBrowser));
-        md_node.children.insert('w', KeyNode::leaf("toggle soft wrap", Action::SoftWrapToggle));
-        tree.insert('m', md_node);
-
         // SPC s - Search
         let mut search_node = KeyNode::new("search");
         search_node
@@ -435,6 +432,22 @@ impl KeyHandler {
         window_node.children.insert('c', KeyNode::leaf("close split", Action::WindowClose));
         tree.insert('w', window_node);
 
+        // SPC p - Preview (markdown, browser, soft-wrap, companion)
+        let mut preview_node = KeyNode::new("preview");
+        preview_node
+            .children
+            .insert('p', KeyNode::leaf("toggle markdown preview", Action::MarkdownPreviewToggle));
+        preview_node
+            .children
+            .insert('b', KeyNode::leaf("open in browser", Action::MarkdownOpenBrowser));
+        preview_node
+            .children
+            .insert('w', KeyNode::leaf("toggle soft wrap", Action::SoftWrapToggle));
+        preview_node
+            .children
+            .insert('c', KeyNode::leaf("toggle companion window", Action::CompanionToggle));
+        tree.insert('p', preview_node);
+
         // SPC d - Diagnostics
         let mut diag_node = KeyNode::new("diagnostics");
         diag_node
@@ -445,6 +458,13 @@ impl KeyHandler {
             .children
             .insert('i', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
         tree.insert('d', diag_node);
+
+        // SPC i - Ingest
+        let mut ingest_node = KeyNode::new("ingest");
+        ingest_node
+            .children
+            .insert('u', KeyNode::leaf("fetch URL → markdown", Action::IngesterPromptUrl));
+        tree.insert('i', ingest_node);
 
         tree
     }
@@ -793,5 +813,122 @@ impl KeyHandler {
         // Invalid sequence
         self.clear_sequence();
         Action::Noop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn press(handler: &mut KeyHandler, code: KeyCode) -> Action {
+        handler.handle_normal(key(code))
+    }
+
+    fn leader_seq(handler: &mut KeyHandler, chars: &[char]) -> Action {
+        // Space starts the leader sequence.
+        press(handler, KeyCode::Char(' '));
+        let mut last = Action::Noop;
+        for &ch in chars {
+            last = press(handler, KeyCode::Char(ch));
+        }
+        last
+    }
+
+    // ── SPC i u → IngesterPromptUrl ──────────────────────────────────────────
+
+    #[test]
+    fn spc_i_u_resolves_to_ingester_prompt_url() {
+        let mut h = KeyHandler::new();
+        let action = leader_seq(&mut h, &['i', 'u']);
+        assert_eq!(action, Action::IngesterPromptUrl);
+    }
+
+    #[test]
+    fn spc_i_alone_is_noop_sequence_in_flight() {
+        let mut h = KeyHandler::new();
+        // After SPC i the sequence is still open (no leaf reached yet).
+        press(&mut h, KeyCode::Char(' '));
+        let after_i = press(&mut h, KeyCode::Char('i'));
+        assert_eq!(after_i, Action::Noop, "SPC i alone should not fire an action");
+        // Sequence is still active — leader_active() should be true.
+        assert!(h.leader_active());
+    }
+
+    #[test]
+    fn spc_i_unknown_key_is_noop_and_clears_sequence() {
+        let mut h = KeyHandler::new();
+        press(&mut h, KeyCode::Char(' '));
+        press(&mut h, KeyCode::Char('i'));
+        // 'z' is not a child of the 'i' node.
+        let result = press(&mut h, KeyCode::Char('z'));
+        assert_eq!(result, Action::Noop);
+        assert!(!h.leader_active(), "invalid sequence should clear the leader state");
+    }
+
+    #[test]
+    fn esc_cancels_leader_sequence() {
+        let mut h = KeyHandler::new();
+        press(&mut h, KeyCode::Char(' '));
+        press(&mut h, KeyCode::Char('i'));
+        let result = press(&mut h, KeyCode::Esc);
+        assert_eq!(result, Action::Noop);
+        assert!(!h.leader_active());
+    }
+
+    // ── IngesterFetchUrl is distinct and registered in the Action enum ────────
+
+    #[test]
+    fn ingester_fetch_url_action_exists() {
+        // Verify Action::IngesterFetchUrl can be constructed and compared.
+        let a = Action::IngesterFetchUrl;
+        assert_eq!(a, Action::IngesterFetchUrl);
+        assert_ne!(a, Action::IngesterPromptUrl);
+    }
+
+    // ── Mode::IngesterUrl is distinct from Normal and other text-input modes ──
+
+    #[test]
+    fn ingester_url_mode_is_distinct() {
+        assert_ne!(Mode::IngesterUrl, Mode::Normal);
+        assert_ne!(Mode::IngesterUrl, Mode::Insert);
+        assert_ne!(Mode::IngesterUrl, Mode::RenameFile);
+        assert_ne!(Mode::IngesterUrl, Mode::LspRename);
+    }
+
+    #[test]
+    fn ingester_url_mode_eq_self() {
+        assert_eq!(Mode::IngesterUrl, Mode::IngesterUrl);
+    }
+
+    // ── SPC i does not conflict with existing namespaces ─────────────────────
+
+    #[test]
+    fn spc_i_namespace_does_not_shadow_insert_mode() {
+        // Pressing 'i' in Normal mode (without leader) → Insert, not Ingest.
+        let mut h = KeyHandler::new();
+        let action = press(&mut h, KeyCode::Char('i'));
+        assert_eq!(action, Action::Insert, "'i' without leader should still enter Insert mode");
+    }
+
+    #[test]
+    fn spc_p_c_companion_toggle_still_works() {
+        // Regression: adding SPC i must not disturb the adjacent SPC p namespace.
+        let mut h = KeyHandler::new();
+        let action = leader_seq(&mut h, &['p', 'c']);
+        assert_eq!(action, Action::CompanionToggle);
+    }
+
+    #[test]
+    fn spc_f_f_file_find_still_works() {
+        // Regression: SPC f f must still route to FileFind after adding SPC i.
+        let mut h = KeyHandler::new();
+        let action = leader_seq(&mut h, &['f', 'f']);
+        assert_eq!(action, Action::FileFind);
     }
 }

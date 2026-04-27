@@ -301,6 +301,44 @@ pub struct Editor {
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
     config: Config,
+
+    // ── Nexus sidecar IPC (Phase 3 — Hybrid Reliability) ─────────────────────
+    /// UDS server broadcasting buffer/cursor/mode events to the Tauri sidecar.
+    sidecar: Option<crate::sidecar::SidecarServer>,
+    /// Debounce timestamp for buffer-update events (set on every edit, flushed
+    /// after SIDECAR_DEBOUNCE_MS elapses without a further edit).
+    last_sidecar_send: Option<std::time::Instant>,
+    /// Last cursor row sent — avoids spamming cursor_move on every keystroke.
+    sidecar_last_cursor_line: Option<u32>,
+    /// Stringified mode from the previous tick — detects mode transitions.
+    sidecar_last_mode: Option<String>,
+    /// True while the companion has connected but not yet received a snapshot.
+    /// Retries every tick until `current_buffer()` is non-empty and a
+    /// buffer_update is successfully sent.
+    sidecar_snapshot_pending: bool,
+    /// Buffer index sent in the last snapshot — detects buffer switches so
+    /// flush_sidecar_events() can fire an immediate update without patching
+    /// every callsite that changes current_buffer_idx.
+    sidecar_last_buffer_idx: Option<usize>,
+
+    // ── Terminal graphics capability (Phase 1 — Glimpse) ─────────────────────
+    /// Detected inline image protocol for this terminal session.
+    /// `None` until `setup_services()` completes the detection probe.
+    pub image_protocol: Option<crate::graphics::ImageProtocol>,
+
+    // ── Companion process (Step 4.5 — Hybrid Reliability) ────────────────────
+    /// Child process handle for the Tauri companion window.
+    /// `None` when the companion is not running.
+    companion_process: Option<std::process::Child>,
+    /// True from the moment the companion connects to the Nexus socket.
+    /// Reset to false when the companion process is killed.
+    pub sidecar_client_connected: bool,
+
+    // ── MCP Ingester (Step 5 — Hybrid Reliability) ────────────────────────────
+    /// URL typed in the ingester prompt popup (Mode::IngesterUrl).
+    ingester_url_buf: String,
+    /// In-flight MCP fetch task; polled each tick.
+    ingester_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
 }
 
 impl Editor {
@@ -444,6 +482,17 @@ impl Editor {
             )),
             startup_elapsed: None,
             config,
+            sidecar: None,
+            last_sidecar_send: None,
+            sidecar_last_cursor_line: None,
+            sidecar_last_mode: None,
+            sidecar_snapshot_pending: false,
+            sidecar_last_buffer_idx: None,
+            image_protocol: None,
+            companion_process: None,
+            sidecar_client_connected: false,
+            ingester_url_buf: String::new(),
+            ingester_rx: None,
         };
 
         // Spin up the filesystem watcher (best-effort; degrades gracefully).
@@ -611,6 +660,10 @@ impl Editor {
             }
         }
 
+        // Arm sidecar debounce so the companion sees the new file after 300 ms.
+        // Works even when called before the sidecar is bound (setup_services runs later).
+        self.last_sidecar_send = Some(std::time::Instant::now());
+
         Ok(())
     }
 
@@ -621,6 +674,11 @@ impl Editor {
     /// task is spawned immediately and the result is wired in via `mcp_rx` once
     /// the connections complete — the editor opens without waiting for MCP.
     pub async fn setup_services(&mut self) {
+        // ── Terminal graphics detection (must run first — writes escape seqs) ──
+        let protocol = crate::graphics::detect_protocol().await;
+        tracing::info!("Terminal image protocol: {:?}", protocol);
+        self.image_protocol = Some(protocol);
+
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let lsp_servers = self.config.lsp.servers.clone();
@@ -684,6 +742,20 @@ impl Editor {
                 let _ = tx.send(manager);
             });
             self.mcp_rx = Some(rx);
+        }
+
+        // ── Nexus sidecar UDS listener ────────────────────────────────────────
+        let socket_path = crate::sidecar::SidecarServer::socket_path();
+        match crate::sidecar::SidecarServer::bind(&socket_path).await {
+            Ok(server) => {
+                tracing::info!("Nexus UDS listening at {:?}", socket_path);
+                self.sidecar = Some(server);
+            },
+            Err(e) => tracing::warn!("Nexus sidecar unavailable: {e}"),
+        }
+
+        if self.config.sidecar.auto_launch {
+            self.spawn_companion();
         }
     }
 
@@ -776,10 +848,149 @@ impl Editor {
 
     /// Clean up terminal state before exit
     fn cleanup(&mut self) -> Result<()> {
+        // Notify the sidecar that the editor is exiting before tearing down the socket.
+        if let Some(ref s) = self.sidecar {
+            s.send(crate::sidecar::NexusEvent::shutdown());
+        }
+        // Belt-and-suspenders: kill the companion process in case it didn't
+        // receive or handle the shutdown event (e.g. failed to connect).
+        self.kill_companion();
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
         Ok(())
+    }
+
+    /// Spawn the Tauri companion window as a child process.
+    ///
+    /// The companion auto-discovers the Nexus socket via `NEXUS_SOCKET` env var
+    /// so it connects immediately without polling.
+    ///
+    /// Binary resolution order:
+    /// 1. `config.sidecar.binary_path` — explicit user override
+    /// 2. Directory of the running forgiven executable — works after `make install`
+    /// 3. `forgiven-companion` on `$PATH` — fallback for custom setups
+    pub(crate) fn spawn_companion(&mut self) {
+        let socket_path = crate::sidecar::SidecarServer::socket_path();
+        let binary = self.resolve_companion_binary();
+        match std::process::Command::new(&binary)
+            .env("NEXUS_SOCKET", socket_path.to_string_lossy().as_ref())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                self.companion_process = Some(child);
+                tracing::info!("Companion launched: {binary}");
+            },
+            Err(e) => {
+                self.set_status(format!("Companion: could not launch '{binary}' — {e}"));
+                tracing::warn!("Companion launch failed: {e}");
+            },
+        }
+    }
+
+    /// Resolve the companion binary path using the three-level lookup.
+    fn resolve_companion_binary(&self) -> String {
+        // 1. Explicit config override.
+        if let Some(ref p) = self.config.sidecar.binary_path {
+            return p.clone();
+        }
+        // 2. Same directory as the running forgiven binary.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("forgiven-companion");
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+        // 3. Fall back to PATH.
+        "forgiven-companion".to_string()
+    }
+
+    /// Kill the companion child process if it is running.
+    pub(crate) fn kill_companion(&mut self) {
+        if let Some(mut child) = self.companion_process.take() {
+            let _ = child.kill();
+            self.sidecar_client_connected = false;
+            tracing::info!("Companion closed");
+        }
+    }
+
+    /// Open fetched content as a scratch markdown buffer and enter preview mode.
+    pub(crate) fn open_markdown_preview_from_string(&mut self, content: String) {
+        let mut buf = crate::buffer::Buffer::new("[ingested]");
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        buf.replace_all_lines(if lines.is_empty() { vec![String::new()] } else { lines });
+        self.preview_scroll = 0;
+        self.markdown_cache = None;
+        self.buffers.push(buf);
+        self.current_buffer_idx = self.buffers.len() - 1;
+        self.mode = crate::keymap::Mode::MarkdownPreview;
+    }
+
+    /// Flush debounced sidecar events (buffer updates, cursor moves, mode changes).
+    ///
+    /// Called once per event-loop tick. Debouncing mirrors the 300 ms completion
+    /// debounce so rapid typing coalesces into a single buffer_update.
+    pub(crate) fn flush_sidecar_events(&mut self) {
+        const DEBOUNCE_MS: u128 = 300;
+
+        // Nothing to do when no sidecar is running.
+        if self.sidecar.is_none() {
+            return;
+        }
+
+        // ── Debounced buffer update ───────────────────────────────────────────
+        if let Some(t) = self.last_sidecar_send {
+            if t.elapsed().as_millis() >= DEBOUNCE_MS {
+                self.last_sidecar_send = None;
+                // Collect what we need before borrowing self.sidecar.
+                let event = self.current_buffer().map(|buf| {
+                    let content = buf.lines().join("\n");
+                    let file_path =
+                        buf.file_path.as_deref().and_then(|p| p.to_str()).map(String::from);
+                    let cursor_line = buf.cursor.row as u32;
+                    let content_type = buf
+                        .file_path
+                        .as_deref()
+                        .map(LspManager::language_from_path)
+                        .unwrap_or_default();
+                    crate::sidecar::NexusEvent::buffer_update(
+                        &content,
+                        &content_type,
+                        file_path.as_deref(),
+                        cursor_line,
+                    )
+                });
+                if let Some(evt) = event {
+                    if let Some(ref server) = self.sidecar {
+                        server.send(evt);
+                        self.sidecar_snapshot_pending = false;
+                    }
+                }
+            }
+        }
+
+        // ── Cursor move (threshold: ±3 lines to filter Insert-mode jitter) ────
+        let cursor_event = self.current_buffer().and_then(|buf| {
+            let line = buf.cursor.row as u32;
+            let should_send =
+                self.sidecar_last_cursor_line.is_none_or(|prev| line.abs_diff(prev) >= 3);
+            if should_send {
+                let file_path = buf.file_path.as_deref().and_then(|p| p.to_str()).map(String::from);
+                Some((line, file_path))
+            } else {
+                None
+            }
+        });
+        if let Some((line, file_path)) = cursor_event {
+            self.sidecar_last_cursor_line = Some(line);
+            if let Some(ref server) = self.sidecar {
+                server.send(crate::sidecar::NexusEvent::cursor_move(file_path.as_deref(), line));
+            }
+        }
     }
 }
 

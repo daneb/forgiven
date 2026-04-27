@@ -20,6 +20,7 @@ This is the most ambitious option. It should be attempted **only after** a `forg
 
 ## Problem
 
+
 Today, Forgiven's agent loop is a single conversation that carries every tool call, every file read, every MCP response, every reasoning step in one accumulating history. Several known pathologies result:
 
 1. **Context rot across phases.** A long session mixes exploration (round 1–3), planning (round 4), editing (round 5–8), testing (round 9–10), and review (round 11+). By round 10 the prompt contains information from rounds 1–9 that is mostly irrelevant to the current subtask. Research (Chroma, July 2025) documents systematic accuracy degradation as context accumulates.

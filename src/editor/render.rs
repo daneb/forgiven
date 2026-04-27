@@ -518,6 +518,11 @@ impl Editor {
                 } else {
                     None
                 },
+                sidecar_status: (
+                    self.sidecar.is_some(),
+                    self.companion_process.is_some(),
+                    self.sidecar_client_connected,
+                ),
                 codified_context_info: if self.agent_panel.codified_context_enabled {
                     let (ctokens, scount, kcount) = self
                         .agent_panel
@@ -652,6 +657,7 @@ impl Editor {
                 },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
+                ingester_url_buf: &self.ingester_url_buf,
             };
             UI::render(frame, &ctx);
         })?;

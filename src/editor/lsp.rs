@@ -836,5 +836,8 @@ impl Editor {
         self.ghost_text = None;
         self.pending_completion = None;
         self.last_edit_instant = Some(Instant::now());
+        // Mark the sidecar debounce so the next flush_sidecar_events() call
+        // sends a buffer_update after 300 ms of typing inactivity.
+        self.last_sidecar_send = Some(std::time::Instant::now());
     }
 }

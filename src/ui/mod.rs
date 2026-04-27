@@ -124,6 +124,8 @@ pub struct DiagnosticsData<'a> {
     /// Codified context: (constitution_tokens, max_tokens, specialist_count, knowledge_count).
     /// None when the feature is disabled.
     pub codified_context_info: Option<(usize, usize, usize, usize)>,
+    /// Companion sidecar status: (socket_bound, process_running, client_connected).
+    pub sidecar_status: (bool, bool, bool),
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.
@@ -247,6 +249,8 @@ pub struct RenderContext<'a> {
     pub soft_wrap: bool,
     /// Syntax highlighter — used for code blocks inside markdown rendering.
     pub highlighter: &'a crate::highlight::Highlighter,
+    /// URL typed in the ingester prompt popup (Mode::IngesterUrl only).
+    pub ingester_url_buf: &'a str,
 }
 
 /// UI rendering for the editor
@@ -562,6 +566,11 @@ impl UI {
         // Render insights dashboard overlay (Mode::InsightsDashboard, ADR 0129)
         if let Some(dashboard) = ctx.insights_dashboard {
             crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
+        }
+
+        // Render URL ingestion popup (Mode::IngesterUrl)
+        if mode == Mode::IngesterUrl {
+            Self::render_ingester_url_popup(frame, ctx.ingester_url_buf, size);
         }
     }
 }

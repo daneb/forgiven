@@ -1,0 +1,47 @@
+{
+  "productName": "Forgiven Previewer",
+  "version": "0.1.0",
+  "identifier": "dev.forgiven.companion",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src * data: asset: blob:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    },
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Forgiven Previewer",
+        "width": 800,
+        "height": 600,
+        "minWidth": 400,
+        "minHeight": 300,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "visible": true,
+        "center": false,
+        "x": 0,
+        "y": 0
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+[package]
+name = "forgiven-companion"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "forgiven_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "forgiven-companion"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri              = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+tauri-plugin-opener = "2"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+tokio              = { version = "1", features = ["full"] }
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level  = "z"
+lto        = true
+strip      = true
+panic      = "abort"

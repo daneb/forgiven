@@ -19,7 +19,7 @@ Complete reference for keybindings, editing operations, and UI modes.
 | **InFileSearch** | `/` in Normal mode |
 | **Agent** | `SPC a f` |
 | **Search** | `SPC s g` |
-| **MarkdownPreview** | `SPC m p` |
+| **MarkdownPreview** | `SPC p p` |
 | **ApplyDiff** | `Ctrl+A` in Agent mode |
 
 ---
@@ -137,7 +137,7 @@ Which-key popup shows available bindings after a 500 ms pause.
 | `SPC a` | `a/f/n` | Toggle / focus agent panel / new conversation |
 | `SPC e` | `e/f/h` | Toggle / focus file explorer / toggle hidden files |
 | `SPC g` | `g/n` | Open lazygit / generate release notes |
-| `SPC m` | `p/b` | Markdown preview toggle / open in browser |
+| `SPC p` | `p/b/w/c` | Preview toggle / browser / soft wrap / companion window |
 | `SPC s` | `g` | Search text in project (ripgrep) |
 | `SPC d` | — | Diagnostics overlay (LSP, MCP, token usage) |
 
@@ -221,7 +221,7 @@ The **File filter** field accepts an optional glob pattern (e.g. `*.rs`, `src/**
 
 ## Markdown preview (`Mode::MarkdownPreview`)
 
-Toggle with `SPC m p`. Full CommonMark rendering: headings, bold/italic, inline code,
+Toggle with `SPC p p`. Full CommonMark rendering: headings, bold/italic, inline code,
 fenced code blocks, lists, blockquotes, horizontal rules. Mermaid blocks shown with a
 hint to open in browser. Status bar shows `PREVIEW` in Magenta when active.
 
@@ -232,7 +232,7 @@ hint to open in browser. Status bar shows `PREVIEW` in Magenta when active.
 | `g` / `G` | Jump to top / bottom |
 | `q` or `Esc` | Exit preview, return to Normal mode |
 
-`SPC m b` — render the current buffer to HTML and open in the system browser;
+`SPC p b` — render the current buffer to HTML and open in the system browser;
 Mermaid diagrams are rendered via Mermaid.js.
 
 ---

@@ -611,6 +611,19 @@ pub struct TestConfig {
     pub run_on_save: bool,
 }
 
+/// Companion sidecar window configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SidecarConfig {
+    /// Spawn the companion window automatically on editor startup.
+    /// Default: false (opt-in).
+    #[serde(default)]
+    pub auto_launch: bool,
+    /// Path to the companion binary (e.g. the inner executable inside a .app bundle).
+    /// When None, forgiven searches for `forgiven-companion` on $PATH.
+    #[serde(default)]
+    pub binary_path: Option<String>,
+}
+
 /// Top-level editor configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -649,6 +662,9 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub soft_wrap: bool,
+    /// Companion sidecar window settings.
+    #[serde(default)]
+    pub sidecar: SidecarConfig,
 }
 
 fn default_tab_width() -> usize {
@@ -686,6 +702,7 @@ impl Default for Config {
             max_agent_rounds: default_max_agent_rounds(),
             agent_warning_threshold: default_agent_warning_threshold(),
             soft_wrap: false,
+            sidecar: SidecarConfig::default(),
         }
     }
 }

@@ -4,7 +4,6 @@ Config file location: **`~/.config/forgiven/config.toml`**
 (respects `$XDG_CONFIG_HOME` if set)
 
 The file is TOML. All keys are optional — missing keys fall back to the defaults shown below. The editor writes this file itself when you change the model via `Ctrl+T`.
-
 ---
 
 ## Top-level keys
@@ -40,26 +39,22 @@ agent_warning_threshold = 3
 | Value | Effect |
 |-------|--------|
 | `""` or `"none"` | Disabled — no slash-command interception |
-| `"spec-kit"` | Built-in Spec-Driven Development workflow (7 commands below) |
+| `"open-spec"` | Built-in OpenSpec spec-driven workflow (3 commands below) |
 | `/absolute/path/to/dir` | Custom framework: any directory of `.md` files; the file stem becomes the command name |
 
-#### Built-in spec-kit slash commands
+#### Built-in OpenSpec slash commands
 
 | Command | Purpose |
 |---------|---------|
-| `/speckit.constitution` | Project principles & constraints |
-| `/speckit.specify` | Write a feature specification |
-| `/speckit.plan` | Break a spec into a technical plan |
-| `/speckit.tasks` | Generate a task list from a plan |
-| `/speckit.implement` | Implement a task |
-| `/speckit.clarify` | Ask clarifying questions |
-| `/speckit.analyze` | Analyse existing code |
+| `/openspec.propose` | Elicit requirements; writes `proposal.md`, `design.md`, `tasks.md` |
+| `/openspec.review` | Audit artefacts; produce gap report before implementation |
+| `/openspec.apply` | Execute tasks in order; archive completed change |
 
 ### Example
 
 ```toml
 [agent]
-spec_framework = "spec-kit"
+spec_framework = "open-spec"
 ```
 
 ---
@@ -214,6 +209,27 @@ args    = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects
 
 ---
 
+## `[sidecar]` — Companion window
+
+Controls the Tauri companion preview window that renders Markdown and Mermaid diagrams alongside the TUI.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auto_launch` | bool | `false` | Spawn the companion automatically on editor startup. Opt-in: most users won't want a second window every session. |
+| `binary_path` | string | *(none)* | Absolute path to the `forgiven-companion` binary (or the inner executable inside a `.app` bundle on macOS). Omit to search `$PATH`. |
+
+### Example
+
+```toml
+[sidecar]
+auto_launch = true
+binary_path = "/Applications/Forgiven Previewer.app/Contents/MacOS/forgiven-companion"
+```
+
+Toggle the companion at runtime without restarting the editor: **`SPC p c`**.
+
+---
+
 ## Diagnostics overlay
 
 Press **`SPC d`** at any time to open the diagnostics overlay. It shows:
@@ -238,7 +254,7 @@ max_agent_rounds        = 20
 agent_warning_threshold = 3
 
 [agent]
-spec_framework = "spec-kit"
+spec_framework = "open-spec"
 
 [lsp]
 

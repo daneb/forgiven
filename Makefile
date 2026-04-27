@@ -1,4 +1,4 @@
-.PHONY: help check fmt fmt-fix lint audit deny test build install-tools
+.PHONY: help check fmt fmt-fix lint audit deny test build companion install install-tools
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 BOLD  := \033[1m
@@ -41,6 +41,16 @@ test: ## Run the full test suite
 
 build: ## Build an optimised release binary
 	cargo build --release
+
+companion: ## Build the Tauri companion window (requires Node/npm)
+	cd companion && npm install && npm run tauri build
+
+install: build companion ## Build both binaries and install to ~/.local/bin
+	@mkdir -p ~/.local/bin
+	install -m755 target/release/forgiven                                              ~/.local/bin/forgiven
+	install -m755 companion/src-tauri/target/release/forgiven-companion                ~/.local/bin/forgiven-companion
+	@echo "$(GREEN)Installed forgiven and forgiven-companion to ~/.local/bin$(RESET)"
+	@echo "Ensure ~/.local/bin is on your PATH."
 
 # ── Tool installation ──────────────────────────────────────────────────────────
 

@@ -42,6 +42,7 @@ impl UI {
             Mode::InlineAssist => "INLINE AI",
             Mode::ReviewChanges => "REVIEW",
             Mode::InsightsDashboard => "INSIGHTS",
+            Mode::IngesterUrl => "INGEST",
         };
 
         let mode_color = match mode {
@@ -70,6 +71,7 @@ impl UI {
             Mode::InlineAssist => Color::LightCyan,
             Mode::ReviewChanges => Color::LightGreen,
             Mode::InsightsDashboard => Color::Cyan,
+            Mode::IngesterUrl => Color::Yellow,
         };
 
         let mut spans = vec![

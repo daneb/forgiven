@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tokio::sync::oneshot;
 
 use super::{ClipboardType, Editor};
 use crate::agent::{ChatMessage, Role};
@@ -461,6 +462,13 @@ impl Editor {
                 self.agent_panel.new_conversation(&model_name);
                 self.set_status(format!("New conversation started · {model_name}"));
             },
+            Action::CompanionToggle => {
+                if self.companion_process.is_some() {
+                    self.kill_companion();
+                } else {
+                    self.spawn_companion();
+                }
+            },
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
                 if self.file_explorer.visible {
@@ -788,6 +796,31 @@ Skip anything already obvious from reading the code.";
                 self.search_rx = None;
                 self.last_search_instant = None;
                 self.mode = Mode::Search;
+            },
+            // ── MCP Ingester (Step 5 — Hybrid Reliability) ───────────────────
+            Action::IngesterPromptUrl => {
+                self.ingester_url_buf.clear();
+                self.mode = Mode::IngesterUrl;
+            },
+            Action::IngesterFetchUrl => {
+                let url = self.ingester_url_buf.trim().to_string();
+                if url.is_empty() {
+                    self.mode = Mode::Normal;
+                    return Ok(());
+                }
+                self.mode = Mode::Normal;
+                self.ingester_url_buf.clear();
+                if let Some(mcp) = self.mcp_manager.clone() {
+                    let (tx, rx) = oneshot::channel();
+                    self.ingester_rx = Some(rx);
+                    tokio::spawn(async move {
+                        let result = crate::ingester::fetch_url(mcp, url).await;
+                        let _ = tx.send(result);
+                    });
+                    self.set_status("Fetching URL…".to_string());
+                } else {
+                    self.set_status("MCP not connected — cannot fetch URL".to_string());
+                }
             },
             // ── Edit operations ───────────────────────────────────────────────
             Action::DeleteChar => {
