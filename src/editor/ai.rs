@@ -315,11 +315,11 @@ impl Editor {
         // Fall back to the file-language client only if no Copilot client is registered.
         // Two separate lookups avoid a double-mutable-borrow on lsp_manager.
         let language = LspManager::language_from_path(&path);
-        let has_copilot = self.lsp_manager.get_client("copilot").is_some();
+        let has_copilot = self.lsp.manager.get_client("copilot").is_some();
         let client = if has_copilot {
-            self.lsp_manager.get_client("copilot")
+            self.lsp.manager.get_client("copilot")
         } else {
-            self.lsp_manager.get_client(&language)
+            self.lsp.manager.get_client(&language)
         };
 
         if let Some(client) = client {

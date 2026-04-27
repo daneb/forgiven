@@ -256,7 +256,7 @@ impl Editor {
                             self.sticky_scroll_cache = None;
                         }
                         if let Some(ref uri) = closed_uri {
-                            self.lsp_manager.clear_diagnostics_for_uri(uri);
+                            self.lsp.manager.clear_diagnostics_for_uri(uri);
                         }
                         self.set_status(format!("Closed buffer: {}", name));
                     }
@@ -305,7 +305,7 @@ impl Editor {
                         self.sticky_scroll_cache = None;
                     }
                     if let Some(ref uri) = closed_uri {
-                        self.lsp_manager.clear_diagnostics_for_uri(uri);
+                        self.lsp.manager.clear_diagnostics_for_uri(uri);
                     }
                     self.set_status(format!("Closed buffer (discarded): {}", name));
                 }
@@ -379,7 +379,7 @@ impl Editor {
                 if let Some(path) = file_path {
                     let language = LspManager::language_from_path(&path);
                     if let Ok(uri) = LspManager::path_to_uri(&path) {
-                        if let Some(client) = self.lsp_manager.get_client(&language) {
+                        if let Some(client) = self.lsp.manager.get_client(&language) {
                             let _ = client.did_save(uri, Some(text));
                         }
                     }

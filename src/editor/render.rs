@@ -602,7 +602,7 @@ impl Editor {
                 key_sequence: key_sequence.as_str(),
                 buffer_list: buffer_list.as_ref(),
                 file_list: file_list.as_ref(),
-                diagnostics: &self.current_diagnostics,
+                diagnostics: &self.lsp.diagnostics,
                 ghost_text: ghost,
                 agent_panel: agent_ref,
                 highlighted_lines: hl_ref,
@@ -623,7 +623,7 @@ impl Editor {
                 startup_elapsed: self.startup_elapsed,
                 file_info: file_info_data.as_ref(),
                 location_list: if mode == Mode::LocationList {
-                    self.location_list.as_ref()
+                    self.lsp.location_list.as_ref()
                 } else {
                     None
                 },
@@ -632,9 +632,13 @@ impl Editor {
                 } else {
                     None
                 },
-                hover_popup: if mode == Mode::LspHover { self.hover_popup.as_ref() } else { None },
+                hover_popup: if mode == Mode::LspHover {
+                    self.lsp.hover_popup.as_ref()
+                } else {
+                    None
+                },
                 lsp_rename_buffer: if mode == Mode::LspRename {
-                    Some(self.lsp_rename_buffer.as_str())
+                    Some(self.lsp.rename_buffer.as_str())
                 } else {
                     None
                 },

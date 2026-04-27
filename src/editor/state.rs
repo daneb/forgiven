@@ -78,6 +78,38 @@ pub(crate) struct FoldCache {
     pub stub_map: std::collections::HashMap<usize, usize>,
 }
 
+// ── LSP state cluster (ADR 0144) ──────────────────────────────────────────────
+
+/// All LSP-related state owned by the Editor.
+///
+/// Clusters the LSP manager, current diagnostics, in-flight RPC receivers, and
+/// per-mode UI overlays (location list, hover popup, rename input) into one
+/// sub-struct. Replaces eleven loose fields on `Editor` (ADR 0144).
+#[derive(Default)]
+pub(crate) struct LspState {
+    /// Owns the per-language LSP client child processes.
+    pub manager: crate::lsp::LspManager,
+    /// Diagnostics for the current buffer (refreshed when LSP publishes).
+    pub diagnostics: Vec<lsp_types::Diagnostic>,
+
+    // ── In-flight LSP RPCs (polled in event_loop.rs each tick) ────────────────
+    pub pending_goto_definition: Option<oneshot::Receiver<serde_json::Value>>,
+    pub pending_references: Option<oneshot::Receiver<serde_json::Value>>,
+    pub pending_symbols: Option<oneshot::Receiver<serde_json::Value>>,
+    pub pending_hover: Option<oneshot::Receiver<serde_json::Value>>,
+    pub pending_rename: Option<oneshot::Receiver<serde_json::Value>>,
+
+    // ── Per-mode overlay state ────────────────────────────────────────────────
+    /// Mode::LocationList — populated by goto-definition / references / symbols.
+    pub location_list: Option<LocationListState>,
+    /// Mode::LspHover — popup body + scroll.
+    pub hover_popup: Option<HoverPopupState>,
+    /// Mode::LspRename — text typed into the rename prompt.
+    pub rename_buffer: String,
+    /// Mode::LspRename — origin URI + position to send to `textDocument/rename`.
+    pub rename_origin: Option<(lsp_types::Uri, lsp_types::Position)>,
+}
+
 // ── LSP location list ─────────────────────────────────────────────────────────
 
 /// A single navigable entry produced by goto-definition, find-references, or

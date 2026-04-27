@@ -42,14 +42,14 @@ impl Editor {
 
         loop {
             // ── LSP: process incoming notifications / responses ────────────────
-            let lsp_changed = self.lsp_manager.process_messages().unwrap_or(false);
+            let lsp_changed = self.lsp.manager.process_messages().unwrap_or(false);
             if lsp_changed {
                 needs_render = true;
             }
 
             // Surface any human-readable LSP messages (e.g. Copilot auth instructions).
             // These are sticky so they persist until the user presses Esc.
-            for msg in self.lsp_manager.drain_messages() {
+            for msg in self.lsp.manager.drain_messages() {
                 self.set_sticky(msg);
                 needs_render = true;
             }
@@ -60,7 +60,7 @@ impl Editor {
                 if let Some(buf) = self.current_buffer() {
                     if let Some(path) = &buf.file_path {
                         if let Ok(uri) = LspManager::path_to_uri(path) {
-                            self.current_diagnostics = self.lsp_manager.get_diagnostics(&uri);
+                            self.lsp.diagnostics = self.lsp.manager.get_diagnostics(&uri);
                         }
                     }
                 }
@@ -88,7 +88,7 @@ impl Editor {
                     },
                     "NotSignedIn" => {
                         // Auto-escalate: start the device auth flow
-                        if let Some(client) = self.lsp_manager.get_client("copilot") {
+                        if let Some(client) = self.lsp.manager.get_client("copilot") {
                             match client.copilot_sign_in_initiate() {
                                 Ok(rx) => {
                                     self.copilot_auth_rx = Some(rx);
@@ -344,19 +344,19 @@ impl Editor {
                     }
                 }};
             }
-            if let Some(v) = poll_lsp_rx!(self.pending_goto_definition) {
+            if let Some(v) = poll_lsp_rx!(self.lsp.pending_goto_definition) {
                 self.handle_goto_definition_response(v);
             }
-            if let Some(v) = poll_lsp_rx!(self.pending_references) {
+            if let Some(v) = poll_lsp_rx!(self.lsp.pending_references) {
                 self.handle_references_response(v);
             }
-            if let Some(v) = poll_lsp_rx!(self.pending_symbols) {
+            if let Some(v) = poll_lsp_rx!(self.lsp.pending_symbols) {
                 self.handle_symbols_response(v);
             }
-            if let Some(v) = poll_lsp_rx!(self.pending_hover) {
+            if let Some(v) = poll_lsp_rx!(self.lsp.pending_hover) {
                 self.handle_hover_response(v);
             }
-            if let Some(v) = poll_lsp_rx!(self.pending_rename) {
+            if let Some(v) = poll_lsp_rx!(self.lsp.pending_rename) {
                 self.handle_rename_response(v);
             }
             // ──────────────────────────────────────────────────────────────────

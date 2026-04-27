@@ -1001,7 +1001,7 @@ impl Editor {
                             self.sticky_scroll_cache = None;
                         }
                         if let Some(ref uri) = closed_uri {
-                            self.lsp_manager.clear_diagnostics_for_uri(uri);
+                            self.lsp.manager.clear_diagnostics_for_uri(uri);
                         }
                         self.set_status(format!("Closed buffer: {name}"));
                     }
@@ -1032,7 +1032,7 @@ impl Editor {
                         self.sticky_scroll_cache = None;
                     }
                     if let Some(ref uri) = closed_uri {
-                        self.lsp_manager.clear_diagnostics_for_uri(uri);
+                        self.lsp.manager.clear_diagnostics_for_uri(uri);
                     }
                     self.set_status(format!("Closed buffer: {name} (discarded changes)"));
                 }
@@ -1045,7 +1045,7 @@ impl Editor {
                 } else {
                     "idle (type in Insert mode to trigger)"
                 };
-                let has_server = self.lsp_manager.get_client("copilot").is_some();
+                let has_server = self.lsp.manager.get_client("copilot").is_some();
                 self.set_status(format!(
                     "Copilot: server={} | {}",
                     if has_server { "running" } else { "not connected" },
@@ -1054,7 +1054,7 @@ impl Editor {
             },
             "copilot auth" => {
                 // Re-run the auth check + sign-in initiate flow manually.
-                if let Some(client) = self.lsp_manager.get_client("copilot") {
+                if let Some(client) = self.lsp.manager.get_client("copilot") {
                     match client.copilot_check_status() {
                         Ok(rx) => {
                             self.copilot_auth_rx = Some(rx);

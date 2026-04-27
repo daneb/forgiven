@@ -15,8 +15,8 @@ mod state;
 mod surround;
 mod text_objects;
 pub(crate) use state::{
-    apply_hunk_verdicts, ClipboardType, CommitMsgState, FoldCache, HighlightCache, MarkdownCache,
-    ReleaseNotesState, SplitState, StickyScrollCache,
+    apply_hunk_verdicts, ClipboardType, CommitMsgState, FoldCache, HighlightCache, LspState,
+    MarkdownCache, ReleaseNotesState, SplitState, StickyScrollCache,
 };
 pub use state::{
     DiffLine, HoverPopupState, InlineAssistPhase, InlineAssistState, LocationEntry,
@@ -45,7 +45,6 @@ use crate::lsp::LspManager;
 use crate::mcp::McpManager;
 use crate::search::SearchState;
 use crate::spec_framework;
-use lsp_types::Diagnostic;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
@@ -93,11 +92,8 @@ pub struct Editor {
     /// Most-recently-opened files, most recent first. Capped at 5. Persisted across sessions.
     recent_files: Vec<PathBuf>,
 
-    /// LSP manager for language server protocol support
-    lsp_manager: LspManager,
-
-    /// Diagnostics for the current buffer
-    current_diagnostics: Vec<Diagnostic>,
+    /// All LSP state — manager, diagnostics, in-flight RPCs, overlays (ADR 0144).
+    lsp: LspState,
 
     // ── Inline completion / ghost text ────────────────────────────────────────
     /// Current ghost text suggestion and the buffer position it belongs to.
@@ -258,26 +254,6 @@ pub struct Editor {
     /// Polled each tick; cleared and wired into `agent_panel` on first `Ok`.
     mcp_rx: Option<oneshot::Receiver<McpManager>>,
 
-    // ── LSP navigation ────────────────────────────────────────────────────────
-    /// In-flight goto-definition request; polled non-blocking each frame.
-    pending_goto_definition: Option<oneshot::Receiver<serde_json::Value>>,
-    /// In-flight find-references request; polled non-blocking each frame.
-    pending_references: Option<oneshot::Receiver<serde_json::Value>>,
-    /// In-flight document-symbols request; polled non-blocking each frame.
-    pending_symbols: Option<oneshot::Receiver<serde_json::Value>>,
-    /// State for the location list overlay (Mode::LocationList).
-    pub location_list: Option<LocationListState>,
-    /// In-flight hover request; polled non-blocking each frame.
-    pending_hover: Option<oneshot::Receiver<serde_json::Value>>,
-    /// Hover popup state (Mode::LspHover).
-    pub hover_popup: Option<HoverPopupState>,
-    /// Text typed into the LSP rename input popup (Mode::LspRename).
-    pub lsp_rename_buffer: String,
-    /// URI + position of the symbol being renamed; set when entering Mode::LspRename.
-    lsp_rename_origin: Option<(lsp_types::Uri, lsp_types::Position)>,
-    /// In-flight rename request; polled non-blocking each frame.
-    pending_rename: Option<oneshot::Receiver<serde_json::Value>>,
-
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Watches paths of all open buffers; detects external changes.
     file_watcher: Option<RecommendedWatcher>,
@@ -360,8 +336,7 @@ impl Editor {
             file_query: String::new(),
             file_list: Vec::new(),
             recent_files: Self::load_recents(),
-            lsp_manager: LspManager::new(),
-            current_diagnostics: Vec::new(),
+            lsp: LspState::default(),
             ghost_text: None,
             pending_completion: None,
             last_edit_instant: None,
@@ -459,15 +434,6 @@ impl Editor {
             insights_narrative_rx: None,
             mcp_manager: None,
             mcp_rx: None,
-            pending_goto_definition: None,
-            pending_references: None,
-            pending_symbols: None,
-            location_list: None,
-            pending_hover: None,
-            hover_popup: None,
-            lsp_rename_buffer: String::new(),
-            lsp_rename_origin: None,
-            pending_rename: None,
             file_watcher: None,
             watcher_rx: None,
             self_saved: std::collections::HashMap::new(),
@@ -640,7 +606,7 @@ impl Editor {
         let text = self.current_buffer().map(|b| b.lines().join("\n")).unwrap_or_default();
 
         if let Ok(uri) = LspManager::path_to_uri(path) {
-            if let Some(client) = self.lsp_manager.get_client(&language) {
+            if let Some(client) = self.lsp.manager.get_client(&language) {
                 let _ = client.did_open(uri, language.clone(), text);
             }
         }
@@ -675,7 +641,7 @@ impl Editor {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let lsp_servers = self.config.lsp.servers.clone();
         let mcp_servers = self.config.mcp.servers.clone();
-        let notif_tx = self.lsp_manager.notification_tx();
+        let notif_tx = self.lsp.manager.notification_tx();
 
         // ── LSP — filter to workspace-relevant servers, then await ────────────
         let lsp_servers = crate::lsp::filter_servers_for_workspace(&lsp_servers, &workspace_root);
@@ -691,9 +657,9 @@ impl Editor {
                     self.set_status(msg);
                 },
                 Ok(client) => {
-                    self.lsp_manager.insert_client(language.clone(), client);
+                    self.lsp.manager.insert_client(language.clone(), client);
                     if language == "copilot" {
-                        if let Some(c) = self.lsp_manager.get_client("copilot") {
+                        if let Some(c) = self.lsp.manager.get_client("copilot") {
                             match c.copilot_check_status() {
                                 Ok(rx) => self.copilot_auth_rx = Some(rx),
                                 Err(e) => tracing::warn!("copilot checkStatus failed: {e}"),
@@ -717,7 +683,7 @@ impl Editor {
             })
             .collect();
         for (language, uri, text) in notifications {
-            if let Some(client) = self.lsp_manager.get_client(&language) {
+            if let Some(client) = self.lsp.manager.get_client(&language) {
                 let _ = client.did_open(uri, language, text);
             }
         }

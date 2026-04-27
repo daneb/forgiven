@@ -187,10 +187,10 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             match client.hover(uri, position) {
                 Ok(rx) => {
-                    self.pending_hover = Some(rx);
+                    self.lsp.pending_hover = Some(rx);
                     self.set_status("Loading hover…".to_string());
                 },
                 Err(e) => self.set_status(format!("LSP error: {e}")),
@@ -211,7 +211,7 @@ impl Editor {
             self.set_status("No hover info".to_string());
             return;
         }
-        self.hover_popup = Some(HoverPopupState { content, scroll: 0 });
+        self.lsp.hover_popup = Some(HoverPopupState { content, scroll: 0 });
         self.mode = Mode::LspHover;
     }
 
@@ -220,25 +220,25 @@ impl Editor {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('K') => {
                 self.mode = Mode::Normal;
-                self.hover_popup = None;
+                self.lsp.hover_popup = None;
             },
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(p) = &mut self.hover_popup {
+                if let Some(p) = &mut self.lsp.hover_popup {
                     p.scroll = p.scroll.saturating_add(1);
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(p) = &mut self.hover_popup {
+                if let Some(p) = &mut self.lsp.hover_popup {
                     p.scroll = p.scroll.saturating_sub(1);
                 }
             },
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(p) = &mut self.hover_popup {
+                if let Some(p) = &mut self.lsp.hover_popup {
                     p.scroll = p.scroll.saturating_add(10);
                 }
             },
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(p) = &mut self.hover_popup {
+                if let Some(p) = &mut self.lsp.hover_popup {
                     p.scroll = p.scroll.saturating_sub(10);
                 }
             },
@@ -261,7 +261,7 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if self.lsp_manager.get_client(&language).is_none() {
+        if self.lsp.manager.get_client(&language).is_none() {
             self.set_status(format!("No LSP client for '{language}'"));
             return;
         }
@@ -272,8 +272,8 @@ impl Editor {
                 buf.lines().get(buf.cursor.row).map(|l| word_at(l, col)).unwrap_or_default()
             })
             .unwrap_or_default();
-        self.lsp_rename_buffer = word;
-        self.lsp_rename_origin = Some((uri, position));
+        self.lsp.rename_buffer = word;
+        self.lsp.rename_origin = Some((uri, position));
         self.mode = Mode::LspRename;
     }
 
@@ -282,17 +282,17 @@ impl Editor {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                self.lsp_rename_buffer.clear();
-                self.lsp_rename_origin = None;
+                self.lsp.rename_buffer.clear();
+                self.lsp.rename_origin = None;
             },
             KeyCode::Enter => {
                 self.submit_lsp_rename();
             },
             KeyCode::Backspace => {
-                self.lsp_rename_buffer.pop();
+                self.lsp.rename_buffer.pop();
             },
             KeyCode::Char(c) => {
-                self.lsp_rename_buffer.push(c);
+                self.lsp.rename_buffer.push(c);
             },
             _ => {},
         }
@@ -301,13 +301,13 @@ impl Editor {
 
     /// Send the rename request with the text in `lsp_rename_buffer`.
     fn submit_lsp_rename(&mut self) {
-        let new_name = self.lsp_rename_buffer.clone();
+        let new_name = self.lsp.rename_buffer.clone();
         if new_name.is_empty() {
             self.mode = Mode::Normal;
-            self.lsp_rename_origin = None;
+            self.lsp.rename_origin = None;
             return;
         }
-        let (uri, position) = match self.lsp_rename_origin.take() {
+        let (uri, position) = match self.lsp.rename_origin.take() {
             Some(pos) => pos,
             None => {
                 self.mode = Mode::Normal;
@@ -320,10 +320,10 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             match client.rename(uri, position, new_name) {
                 Ok(rx) => {
-                    self.pending_rename = Some(rx);
+                    self.lsp.pending_rename = Some(rx);
                     self.set_status("Renaming…".to_string());
                 },
                 Err(e) => self.set_status(format!("LSP rename error: {e}")),
@@ -463,10 +463,10 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             match client.goto_definition(uri, position) {
                 Ok(rx) => {
-                    self.pending_goto_definition = Some(rx);
+                    self.lsp.pending_goto_definition = Some(rx);
                     self.set_status("Finding definition…".to_string());
                 },
                 Err(e) => self.set_status(format!("LSP error: {e}")),
@@ -490,10 +490,10 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             match client.references(uri, position) {
                 Ok(rx) => {
-                    self.pending_references = Some(rx);
+                    self.lsp.pending_references = Some(rx);
                     self.set_status("Finding references…".to_string());
                 },
                 Err(e) => self.set_status(format!("LSP error: {e}")),
@@ -517,10 +517,10 @@ impl Editor {
             .and_then(|b| b.file_path.as_deref())
             .map(LspManager::language_from_path)
             .unwrap_or_default();
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             match client.document_symbols(uri) {
                 Ok(rx) => {
-                    self.pending_symbols = Some(rx);
+                    self.lsp.pending_symbols = Some(rx);
                     self.set_status("Loading symbols…".to_string());
                 },
                 Err(e) => self.set_status(format!("LSP error: {e}")),
@@ -604,7 +604,7 @@ impl Editor {
                 if entries.is_empty() {
                     self.set_status("No definition found".to_string());
                 } else {
-                    self.location_list = Some(LocationListState {
+                    self.lsp.location_list = Some(LocationListState {
                         title: "Definitions".to_string(),
                         entries,
                         selected: 0,
@@ -643,7 +643,7 @@ impl Editor {
             return;
         }
         let count = entries.len();
-        self.location_list = Some(LocationListState {
+        self.lsp.location_list = Some(LocationListState {
             title: format!("References ({count})"),
             entries,
             selected: 0,
@@ -669,7 +669,7 @@ impl Editor {
             return;
         }
         let count = entries.len();
-        self.location_list =
+        self.lsp.location_list =
             Some(LocationListState { title: format!("Symbols ({count})"), entries, selected: 0 });
         self.mode = Mode::LocationList;
     }
@@ -679,30 +679,30 @@ impl Editor {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Normal;
-                self.location_list = None;
+                self.lsp.location_list = None;
             },
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(list) = &mut self.location_list {
+                if let Some(list) = &mut self.lsp.location_list {
                     if list.selected + 1 < list.entries.len() {
                         list.selected += 1;
                     }
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(list) = &mut self.location_list {
+                if let Some(list) = &mut self.lsp.location_list {
                     if list.selected > 0 {
                         list.selected -= 1;
                     }
                 }
             },
             KeyCode::Enter => {
-                if let Some(list) = &self.location_list {
+                if let Some(list) = &self.lsp.location_list {
                     if let Some(entry) = list.entries.get(list.selected) {
                         let path = entry.file_path.clone();
                         let line = entry.line;
                         let col = entry.col;
                         self.mode = Mode::Normal;
-                        self.location_list = None;
+                        self.lsp.location_list = None;
                         self.navigate_to_location(path, line, col);
                     }
                 }
@@ -714,7 +714,7 @@ impl Editor {
 
     /// Go to next diagnostic in current buffer
     pub(super) fn goto_next_diagnostic(&mut self) {
-        if self.current_diagnostics.is_empty() {
+        if self.lsp.diagnostics.is_empty() {
             self.set_status("No diagnostics".to_string());
             return;
         }
@@ -723,7 +723,8 @@ impl Editor {
 
         // Find next diagnostic after current line and extract position
         let next_diag = self
-            .current_diagnostics
+            .lsp
+            .diagnostics
             .iter()
             .find(|d| d.range.start.line as usize > current_line)
             .map(|d| {
@@ -739,7 +740,7 @@ impl Editor {
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to first diagnostic
-            let first_diag = self.current_diagnostics.first().map(|d| {
+            let first_diag = self.lsp.diagnostics.first().map(|d| {
                 (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
             });
 
@@ -756,7 +757,7 @@ impl Editor {
 
     /// Go to previous diagnostic in current buffer
     pub(super) fn goto_prev_diagnostic(&mut self) {
-        if self.current_diagnostics.is_empty() {
+        if self.lsp.diagnostics.is_empty() {
             self.set_status("No diagnostics".to_string());
             return;
         }
@@ -765,7 +766,8 @@ impl Editor {
 
         // Find previous diagnostic before current line and extract position
         let prev_diag = self
-            .current_diagnostics
+            .lsp
+            .diagnostics
             .iter()
             .rev()
             .find(|d| (d.range.start.line as usize) < current_line)
@@ -782,7 +784,7 @@ impl Editor {
             self.set_status(format!("Diagnostic: {}", msg));
         } else {
             // Wrap around to last diagnostic
-            let last_diag = self.current_diagnostics.last().map(|d| {
+            let last_diag = self.lsp.diagnostics.last().map(|d| {
                 (d.range.start.line as usize, d.range.start.character as usize, d.message.clone())
             });
 
@@ -828,7 +830,7 @@ impl Editor {
         let version = buf.lsp_version;
         let text = buf.lines().join("\n");
 
-        if let Some(client) = self.lsp_manager.get_client(&language) {
+        if let Some(client) = self.lsp.manager.get_client(&language) {
             let _ = client.did_change(uri, version, text);
         }
 
