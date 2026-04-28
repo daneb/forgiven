@@ -417,7 +417,7 @@ impl Editor {
         // Forward Space (when input is empty, so it can't corrupt typed text)
         // and any already-in-progress leader sequence to the normal-mode handler.
         // This mirrors the same forwarding in Visual / VisualLine mode.
-        let input_empty = self.agent_panel.input.is_empty();
+        let input_empty = self.agent_panel.conversation.input.is_empty();
         if (key.code == KeyCode::Char(' ') && input_empty) || self.key_handler.leader_active() {
             let action = self.key_handler.handle_normal(key);
             if !matches!(action, Action::Noop) {
@@ -522,15 +522,15 @@ impl Editor {
             KeyCode::Enter => {
                 // Action slash-command interception: /compress and /translate are
                 // editor actions, not prompt templates — handle them before submit.
-                let trimmed = self.agent_panel.input.trim().to_string();
+                let trimmed = self.agent_panel.conversation.input.trim().to_string();
                 if trimmed == "/compress" {
-                    self.agent_panel.input.clear();
+                    self.agent_panel.conversation.input.clear();
                     self.agent_panel.update_slash_menu();
                     let _ = self.execute_action(Action::AgentJanitorCompress);
                     return Ok(());
                 }
                 if trimmed == "/translate" {
-                    self.agent_panel.input.clear();
+                    self.agent_panel.conversation.input.clear();
                     self.agent_panel.update_slash_menu();
                     let _ = self.execute_action(Action::AgentIntentTranslatorToggle);
                     return Ok(());
@@ -1139,7 +1139,7 @@ impl Editor {
                     Some(summary) => {
                         let report = summary.format_report();
                         self.agent_panel.visible = true;
-                        self.agent_panel.messages.push(crate::agent::ChatMessage {
+                        self.agent_panel.conversation.messages.push(crate::agent::ChatMessage {
                             role: crate::agent::Role::Assistant,
                             content: report,
                             images: vec![],

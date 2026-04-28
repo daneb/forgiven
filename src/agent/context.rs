@@ -87,6 +87,7 @@ impl AgentPanel {
         // Collect all non-separator messages (skip Role::System separators like
         // "── New conversation · …" and "── Context compressed · …").
         let history_text: String = self
+            .conversation
             .messages
             .iter()
             .filter(|m| {
@@ -131,7 +132,7 @@ impl AgentPanel {
         // ── Disk persistence: write full history before archiving ────────────
         // Appends to ~/.local/share/forgiven/history/<session_start_secs>.jsonl
         // so the conversation is recoverable after compression.
-        if let Some(path) = super::history_file_path(self.session_start_secs) {
+        if let Some(path) = super::history_file_path(self.conversation.session_start_secs) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -141,7 +142,7 @@ impl AgentPanel {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                for msg in &self.messages {
+                for msg in &self.conversation.messages {
                     let line = serde_json::json!({
                         "role": msg.role.as_str(),
                         "content": msg.content,
@@ -155,16 +156,16 @@ impl AgentPanel {
 
         // Preserve original conversation in archive so the user can scroll back
         // and see what was there before compression.
-        self.archived_messages.extend(std::mem::take(&mut self.messages));
+        self.conversation.archived_messages.extend(std::mem::take(&mut self.conversation.messages));
         // Cap the archive so repeated janitor runs across a long session don't
         // accumulate unbounded memory.  Drop the oldest messages first.
         const MAX_ARCHIVED: usize = 400;
-        if self.archived_messages.len() > MAX_ARCHIVED {
-            let drop = self.archived_messages.len() - MAX_ARCHIVED;
-            self.archived_messages.drain(..drop);
+        if self.conversation.archived_messages.len() > MAX_ARCHIVED {
+            let drop = self.conversation.archived_messages.len() - MAX_ARCHIVED;
+            self.conversation.archived_messages.drain(..drop);
         }
         self.tasks.clear();
-        self.input = prompt;
+        self.conversation.input = prompt;
         self.janitor_compressing = true;
         // Reset so the warnings can fire again if the next session also approaches the limit.
         self.context_near_limit_warned = false;

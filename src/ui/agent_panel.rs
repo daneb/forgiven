@@ -30,7 +30,7 @@ impl UI {
         // We calculate how many display rows the current input occupies, accounting for
         // both explicit newlines (\n) and word-wrap within each logical line.
         let content_width = area.width.saturating_sub(2) as usize;
-        let explicit_lines: Vec<&str> = panel.input.split('\n').collect();
+        let explicit_lines: Vec<&str> = panel.conversation.input.split('\n').collect();
         let total_wrapped: usize = explicit_lines
             .iter()
             .enumerate()
@@ -86,7 +86,8 @@ impl UI {
         let inner_width = history_area.width.saturating_sub(2) as usize;
         let visible_height = history_area.height.saturating_sub(2) as usize;
 
-        let cur_msg_count = panel.archived_messages.len() + panel.messages.len();
+        let cur_msg_count =
+            panel.conversation.archived_messages.len() + panel.conversation.messages.len();
         let cur_streaming_len = panel.streaming_reply.as_ref().map(|s| s.len()).unwrap_or(0);
 
         let (lines, total_display_rows) = PANEL_CACHE.with(|cell| {
@@ -189,10 +190,10 @@ impl UI {
                     ml.push(Line::from(""));
                 };
 
-                for msg in &panel.archived_messages {
+                for msg in &panel.conversation.archived_messages {
                     render_msg(&mut ml, msg, true);
                 }
-                for msg in &panel.messages {
+                for msg in &panel.conversation.messages {
                     render_msg(&mut ml, msg, false);
                 }
 
@@ -280,9 +281,9 @@ impl UI {
             " ".into()
         };
 
-        let token_span = if panel.last_prompt_tokens > 0 {
+        let token_span = if panel.conversation.last_prompt_tokens > 0 {
             let window = panel.context_window_size();
-            let pct = panel.last_prompt_tokens * 100 / window;
+            let pct = panel.conversation.last_prompt_tokens * 100 / window;
             let color = if pct >= 80 {
                 Color::Red
             } else if pct >= 50 {
@@ -290,11 +291,11 @@ impl UI {
             } else {
                 Color::DarkGray
             };
-            let k_used = panel.last_prompt_tokens as f32 / 1000.0;
+            let k_used = panel.conversation.last_prompt_tokens as f32 / 1000.0;
             let k_total = window as f32 / 1000.0;
             let base = format!("  {k_used:.1}k/{k_total:.0}k");
-            let label = if panel.last_cached_tokens > 0 {
-                let k_cached = panel.last_cached_tokens as f32 / 1000.0;
+            let label = if panel.conversation.last_cached_tokens > 0 {
+                let k_cached = panel.conversation.last_cached_tokens as f32 / 1000.0;
                 format!("{base} ({k_cached:.1}k cached)")
             } else {
                 base
@@ -374,7 +375,7 @@ impl UI {
         }
 
         // ── Input box ─────────────────────────────────────────────────────────
-        let hint = if panel.messages.is_empty() {
+        let hint = if panel.conversation.messages.is_empty() {
             " Ask LLM… ".to_string()
         } else {
             " Message LLM… ".to_string()
@@ -410,19 +411,19 @@ impl UI {
             Line::from(Span::styled(label, paste_style))
         }));
         let typed = if focused {
-            let cursor = panel.input_cursor.min(panel.input.len());
-            let before = &panel.input[..cursor];
-            let after = &panel.input[cursor..];
+            let cursor = panel.conversation.input_cursor.min(panel.conversation.input.len());
+            let before = &panel.conversation.input[..cursor];
+            let after = &panel.conversation.input[cursor..];
             format!("{before}_{after}")
         } else {
-            panel.input.clone()
+            panel.conversation.input.clone()
         };
         for line in typed.split('\n') {
             input_lines.push(Line::from(line.to_string()));
         }
         // Adaptive round-limit hint — shown before the first submit of a new
         // conversation when sessions.jsonl has enough history to make a suggestion.
-        if panel.session_rounds == 0 {
+        if panel.conversation.session_rounds == 0 {
             if let Some(hint_rounds) = panel.round_hint {
                 input_lines.push(Line::from(Span::styled(
                     format!(
@@ -436,10 +437,12 @@ impl UI {
         }
         // Model suggestion hint — shown when the typed text contains complexity
         // signals and the current model differs from the suggested tier.
-        if !panel.input.trim().is_empty() {
-            if let Some(sug_idx) =
-                suggest_model_for_task(&panel.input, &panel.available_models, panel.selected_model)
-            {
+        if !panel.conversation.input.trim().is_empty() {
+            if let Some(sug_idx) = suggest_model_for_task(
+                &panel.conversation.input,
+                &panel.available_models,
+                panel.selected_model,
+            ) {
                 let sug_name = &panel.available_models[sug_idx].id;
                 let cur_name = &panel.available_models[panel.selected_model].id;
                 input_lines.push(Line::from(Span::styled(

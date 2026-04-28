@@ -347,12 +347,7 @@ impl Editor {
                 panel.spec_framework =
                     spec_framework::load_from_config(&config.agent.spec_framework);
                 panel.provider = crate::agent::ProviderKind::from_str(&config.provider.active);
-                panel.ollama_base_url = config.provider.ollama.base_url.clone();
-                panel.ollama_context_length = config.provider.ollama.context_length;
-                panel.ollama_tool_calls = config.provider.ollama.tool_calls;
-                panel.ollama_planning_tools = config.provider.ollama.planning_tools;
-                // Resolve API keys for direct-API providers ($VAR expansion).
-                panel.api_key = match panel.provider {
+                let resolved_api_key = match panel.provider {
                     crate::agent::ProviderKind::Anthropic => {
                         crate::agent::provider::resolve_api_key(&config.provider.anthropic.api_key)
                     },
@@ -367,11 +362,21 @@ impl Editor {
                     },
                     _ => String::new(),
                 };
-                if let Some(ref base) = config.provider.openai.base_url {
-                    panel.openai_base_url = base.clone();
-                }
-                panel.openrouter_site_url = config.provider.openrouter.site_url.clone();
-                panel.openrouter_app_name = config.provider.openrouter.app_name.clone();
+                panel.provider_config = crate::agent::ProviderConfig {
+                    api_key: resolved_api_key,
+                    ollama_base_url: config.provider.ollama.base_url.clone(),
+                    ollama_context_length: config.provider.ollama.context_length,
+                    ollama_tool_calls: config.provider.ollama.tool_calls,
+                    ollama_planning_tools: config.provider.ollama.planning_tools,
+                    openai_base_url: config
+                        .provider
+                        .openai
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                    openrouter_site_url: config.provider.openrouter.site_url.clone(),
+                    openrouter_app_name: config.provider.openrouter.app_name.clone(),
+                };
                 panel.intent_translator_enabled = config.agent.intent_translator.enabled;
                 panel.intent_translator_provider = config.agent.intent_translator.provider.clone();
                 panel.intent_translator_ollama_model =

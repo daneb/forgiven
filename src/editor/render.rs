@@ -481,12 +481,12 @@ impl Editor {
                 .unwrap_or(mcp_failed_empty.as_slice());
             let lsp_servers =
                 self.config.lsp.servers.iter().map(|s| s.language.as_str()).collect::<Vec<_>>();
-            let agent_session_tokens = if self.agent_panel.session_rounds > 0 {
+            let agent_session_tokens = if self.agent_panel.conversation.session_rounds > 0 {
                 Some((
-                    self.agent_panel.total_session_prompt_tokens,
-                    self.agent_panel.total_session_completion_tokens,
+                    self.agent_panel.conversation.total_session_prompt_tokens,
+                    self.agent_panel.conversation.total_session_completion_tokens,
                     self.agent_panel.context_window_size(),
-                    self.agent_panel.session_rounds,
+                    self.agent_panel.conversation.session_rounds,
                 ))
             } else {
                 None
@@ -509,7 +509,7 @@ impl Editor {
                     .as_ref()
                     .map(|m| m.recent_calls())
                     .unwrap_or_default(),
-                tool_retrieval_counts: if self.agent_panel.session_rounds > 0 {
+                tool_retrieval_counts: if self.agent_panel.conversation.session_rounds > 0 {
                     Some((
                         self.agent_panel.session_read_file_count,
                         self.agent_panel.session_symbol_count,

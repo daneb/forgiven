@@ -174,14 +174,14 @@ impl Editor {
         self.agent_panel.visible = true;
 
         // Add a system banner to the chat so the trigger is always visible.
-        self.agent_panel.messages.push(crate::agent::ChatMessage {
+        self.agent_panel.conversation.messages.push(crate::agent::ChatMessage {
             role: crate::agent::Role::System,
             content: format!("── Hook: on_save → {rel_path} ──"),
             images: Vec::new(),
         });
 
         // Inject the hook prompt as the user input and submit.
-        self.agent_panel.input = prompt;
+        self.agent_panel.conversation.input = prompt;
 
         let project_root = cwd;
         let max_rounds = self.config.max_agent_rounds;
@@ -351,12 +351,12 @@ impl Editor {
         self.hooks_firing = true;
 
         self.agent_panel.visible = true;
-        self.agent_panel.messages.push(crate::agent::ChatMessage {
+        self.agent_panel.conversation.messages.push(crate::agent::ChatMessage {
             role: crate::agent::Role::System,
             content: format!("── Hook: on_test_fail → {rel_path} ──"),
             images: Vec::new(),
         });
-        self.agent_panel.input = prompt;
+        self.agent_panel.conversation.input = prompt;
 
         let project_root = cwd;
         let max_rounds = self.config.max_agent_rounds;

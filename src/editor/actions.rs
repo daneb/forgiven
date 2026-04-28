@@ -530,7 +530,7 @@ Steps:\n\
 \n\
 Focus on what would be expensive to re-discover in a future session. \
 Skip anything already obvious from reading the code.";
-                self.agent_panel.input = MEMORY_PROMPT.to_string();
+                self.agent_panel.conversation.input = MEMORY_PROMPT.to_string();
                 // Ensure the agent panel is open and focused.
                 self.agent_panel.visible = true;
                 self.mode = Mode::Agent;
@@ -571,7 +571,7 @@ Skip anything already obvious from reading the code.";
             // ── Auto-Janitor ──────────────────────────────────────────────────
             Action::AgentJanitorCompress => {
                 self.agent_panel.compress_history();
-                if self.agent_panel.input.is_empty() {
+                if self.agent_panel.conversation.input.is_empty() {
                     // compress_history() bailed — nothing to summarise.
                     self.set_status("Janitor: nothing to compress".to_string());
                 } else {
@@ -580,7 +580,7 @@ Skip anything already obvious from reading the code.";
                     self.set_status("Janitor: compressing history…".to_string());
                     // Show a visible marker in the chat so the user knows a
                     // second AI call is starting (the janitor, not a duplicate).
-                    self.agent_panel.messages.push(ChatMessage {
+                    self.agent_panel.conversation.messages.push(ChatMessage {
                         role: Role::System,
                         content: "🗜\u{fe0f} /compress — summarising chat history to free up the \
                                   context window. A structured summary (files changed, key \
@@ -630,7 +630,7 @@ Skip anything already obvious from reading the code.";
             },
             // ── Investigation subagent (Phase 3.3) ──────────────────────────
             Action::AgentInvestigate => {
-                if self.agent_panel.input.trim().is_empty() {
+                if self.agent_panel.conversation.input.trim().is_empty() {
                     self.set_status(
                         "Clear input first (Ctrl+Bksp), type a query, then SPC a v".to_string(),
                     );
@@ -701,7 +701,7 @@ Skip anything already obvious from reading the code.";
                     "🔄 Intent Translator: off — messages are sent as-is. Toggle with /translate \
                      or SPC a t."
                 };
-                self.agent_panel.messages.push(ChatMessage {
+                self.agent_panel.conversation.messages.push(ChatMessage {
                     role: Role::System,
                     content: info.to_string(),
                     images: vec![],

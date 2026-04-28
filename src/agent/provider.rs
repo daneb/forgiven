@@ -38,6 +38,45 @@ pub enum ProviderKind {
     OpenRouter,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider config
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Static per-provider configuration built once from `config.toml`.
+///
+/// Consolidates all provider-specific fields that were previously scattered as
+/// individual fields on `AgentPanel`.  Token/quota state (which changes at
+/// runtime) lives separately on the panel.
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    /// Resolved API key for Anthropic/OpenAI/Gemini/OpenRouter.
+    /// Empty for Copilot (uses OAuth) and Ollama (no auth).
+    pub api_key: String,
+    pub ollama_base_url: String,
+    pub ollama_context_length: Option<u32>,
+    pub ollama_tool_calls: bool,
+    pub ollama_planning_tools: bool,
+    /// Base URL for OpenAI (allows Azure overrides).
+    pub openai_base_url: String,
+    pub openrouter_site_url: String,
+    pub openrouter_app_name: String,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        ProviderConfig {
+            api_key: String::new(),
+            ollama_base_url: "http://localhost:11434".to_string(),
+            ollama_context_length: None,
+            ollama_tool_calls: false,
+            ollama_planning_tools: false,
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            openrouter_site_url: String::new(),
+            openrouter_app_name: String::new(),
+        }
+    }
+}
+
 impl ProviderKind {
     /// Parse the `active` string from config into a `ProviderKind`.
     /// Unrecognised values fall back to `Copilot`.
@@ -125,6 +164,50 @@ impl ProviderKind {
         match self {
             Self::Ollama => 2,
             _ => 5,
+        }
+    }
+
+    /// The `/chat/completions` endpoint URL for this provider.
+    ///
+    /// `copilot_api_base` is the business-API base URL updated on each token
+    /// refresh; it is ignored for all non-Copilot providers.  Pass an empty
+    /// string or the standard endpoint when the dynamic base is unavailable
+    /// (e.g. one-shot calls outside the panel).
+    pub fn chat_endpoint(&self, config: &ProviderConfig, copilot_api_base: &str) -> String {
+        match self {
+            Self::Copilot => format!("{copilot_api_base}/chat/completions"),
+            Self::Ollama => format!("{}/v1/chat/completions", config.ollama_base_url),
+            Self::Anthropic => "https://api.anthropic.com/v1/chat/completions".to_string(),
+            Self::OpenAi => format!("{}/chat/completions", config.openai_base_url),
+            Self::Gemini => {
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string()
+            },
+            Self::OpenRouter => "https://openrouter.ai/api/v1/chat/completions".to_string(),
+        }
+    }
+
+    /// Build the `ProviderSettings` passed to the agentic loop.
+    ///
+    /// `api_token` must already be resolved (OAuth token for Copilot,
+    /// env-expanded key for others, empty string for Ollama).
+    /// Override `supports_tool_calls` / `planning_tools` on the returned value
+    /// when the caller needs non-default behaviour (e.g. inline assist).
+    pub fn build_settings(
+        &self,
+        config: &ProviderConfig,
+        api_token: String,
+        copilot_api_base: &str,
+    ) -> ProviderSettings {
+        ProviderSettings {
+            kind: self.clone(),
+            api_token,
+            chat_endpoint: self.chat_endpoint(config, copilot_api_base),
+            num_ctx: if *self == Self::Ollama { config.ollama_context_length } else { None },
+            supports_tool_calls: *self != Self::Ollama || config.ollama_tool_calls,
+            planning_tools: *self != Self::Ollama || config.ollama_planning_tools,
+            openrouter_site_url: config.openrouter_site_url.clone(),
+            openrouter_app_name: config.openrouter_app_name.clone(),
         }
     }
 }

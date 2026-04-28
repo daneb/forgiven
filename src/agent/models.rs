@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use super::provider::ProviderKind;
+use super::provider::{ProviderConfig, ProviderKind};
 use super::ModelVersion;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -504,17 +504,17 @@ pub(super) async fn fetch_models_openrouter(api_token: &str) -> Result<Vec<Model
 /// so those methods don't need to pattern-match on provider kind themselves.
 pub(super) async fn fetch_models_for_provider(
     kind: &ProviderKind,
+    config: &ProviderConfig,
     api_token: &str,
-    ollama_base_url: &str,
-    ollama_context_length: Option<u32>,
-    openai_base_url: &str,
     copilot_api_base: &str,
 ) -> Result<Vec<ModelVersion>> {
     match kind {
         ProviderKind::Copilot => fetch_models(api_token, copilot_api_base).await,
-        ProviderKind::Ollama => fetch_models_ollama(ollama_base_url, ollama_context_length).await,
+        ProviderKind::Ollama => {
+            fetch_models_ollama(&config.ollama_base_url, config.ollama_context_length).await
+        },
         ProviderKind::Anthropic => Ok(fetch_models_anthropic()),
-        ProviderKind::OpenAi => fetch_models_openai(api_token, openai_base_url).await,
+        ProviderKind::OpenAi => fetch_models_openai(api_token, &config.openai_base_url).await,
         ProviderKind::Gemini => fetch_models_gemini(api_token).await,
         ProviderKind::OpenRouter => fetch_models_openrouter(api_token).await,
     }

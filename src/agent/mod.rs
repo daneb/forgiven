@@ -16,12 +16,16 @@ mod agentic_loop;
 mod auth;
 pub mod codified_context;
 pub mod context;
+pub mod conversation;
 pub mod intent;
 mod models;
 mod panel;
+mod project_tree;
 pub mod provider;
-pub mod session;
+pub mod session_log;
+mod stream_poll;
 mod streaming;
+mod submit;
 pub mod token_count;
 mod tool_dispatch;
 pub mod tools;
@@ -29,9 +33,10 @@ pub use auth::acquire_copilot_token;
 use auth::CopilotApiToken;
 pub use auth::CopilotQuota;
 pub use context::{message_importance, ContextBreakdown, SubmitCtx};
+pub use conversation::Conversation;
 pub use models::suggest_model_for_task;
-pub use provider::ProviderKind;
-pub use session::{
+pub use provider::{ProviderConfig, ProviderKind};
+pub use session_log::{
     append_round_tools, append_session_end_record, append_session_metric,
     append_session_start_record, history_file_path, suggest_max_rounds,
 };
@@ -205,47 +210,13 @@ pub struct AtPickerState {
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
-    /// Active provider.  Set at startup from config; never changed at runtime.
+    /// Active provider kind.  Set at startup from config; never changed at runtime.
     pub provider: ProviderKind,
-    /// Base URL of the Ollama server (e.g. `"http://localhost:11434"`).
-    /// Only used when `provider == ProviderKind::Ollama`.
-    pub ollama_base_url: String,
-    /// Explicit `num_ctx` for Ollama requests.  Pins the active KV-cache size
-    /// on the server so history truncation and Ollama are in sync.
-    pub ollama_context_length: Option<u32>,
-    /// Whether to enable tool calling for Ollama (default: false).
-    /// Set from `[provider.ollama] tool_calls = true` in config.
-    pub ollama_tool_calls: bool,
-    /// Whether to include planning tools (create_task, complete_task, ask_user)
-    /// for Ollama (default: false). Small models misuse these.
-    /// Set from `[provider.ollama] planning_tools = true` in config.
-    pub ollama_planning_tools: bool,
-    /// Resolved API key for Anthropic/OpenAI/Gemini/OpenRouter.
-    /// Empty string for Copilot (uses OAuth) and Ollama (no auth).
-    /// Populated at startup from config after `$VAR` expansion.
-    pub api_key: String,
-    /// Base URL for OpenAI (allows Azure overrides).
-    /// Default: `"https://api.openai.com/v1"`.
-    pub openai_base_url: String,
-    /// `HTTP-Referer` header value for OpenRouter (optional).
-    pub openrouter_site_url: String,
-    /// `X-Title` header value for OpenRouter (optional).
-    pub openrouter_app_name: String,
-    pub messages: Vec<ChatMessage>,
-    /// Messages from sessions that have been compressed by the Auto-Janitor.
-    /// Rendered above the live session in a dimmed style so the user can still
-    /// scroll back to them.  Excluded from the API history sent in `submit()`.
-    /// Cleared by `new_conversation()`.
-    pub archived_messages: Vec<ChatMessage>,
-    pub input: String,
-    /// Submitted-input history (oldest first). Capped at 50 entries.
-    pub input_history: Vec<String>,
-    /// Index into `input_history` while browsing (None = at live input).
-    pub history_idx: Option<usize>,
-    /// Draft input saved when history navigation begins, restored on return.
-    pub input_saved: String,
-    /// Byte offset of the cursor within `self.input`.
-    pub input_cursor: usize,
+    /// Static per-provider configuration (API keys, endpoints, capabilities).
+    /// Populated at startup from `config.toml`; never changed at runtime.
+    pub provider_config: ProviderConfig,
+    /// Message history, input box, and per-session token accounting.
+    pub conversation: Conversation,
     pub scroll: usize,
     token: Option<CopilotApiToken>,
     pub streaming_reply: Option<String>,
@@ -274,24 +245,6 @@ pub struct AgentPanel {
     /// Set by `poll_stream()` when a `StreamEvent::Error` arrives so the
     /// editor run-loop can forward it to the status bar.  Cleared on read.
     pub last_error: Option<String>,
-    /// Token counts from the last API response (0 = not yet received).
-    pub last_prompt_tokens: u32,
-    pub last_completion_tokens: u32,
-    /// Tokens served from the provider's prompt cache in the last response.
-    pub last_cached_tokens: u32,
-    /// Cumulative prompt + completion tokens for the current conversation session.
-    /// NOTE: prompt total is a re-send cost (history is re-sent each round), not
-    /// a count of unique tokens. Divide by session_rounds for average per-invocation cost.
-    /// Reset by `new_conversation()`. Shown in the SPC d diagnostics overlay.
-    pub total_session_prompt_tokens: u32,
-    pub total_session_completion_tokens: u32,
-    /// Number of completed agent invocations in this conversation session.
-    /// Incremented on each StreamEvent::Done. Reset by new_conversation().
-    pub session_rounds: u32,
-    /// Unix timestamp (seconds) when the current conversation's first submit occurred.
-    /// Set on first submit; reset to 0 by new_conversation().
-    /// Used as the filename for disk-persisted history JSONL files.
-    pub session_start_secs: u64,
     /// Cycle index for the Ctrl+K copy-code-block command.
     pub code_block_idx: usize,
     /// Cycle index for the Ctrl+M view-mermaid-diagram command.
