@@ -1,7 +1,7 @@
 # ADR 0117 — Auto-Janitor Fixes: Archive Preservation, Input Save/Restore, Status Variants, Ollama Fallback
 
 **Date:** 2026-04-07
-**Status:** Accepted — Implemented
+**Status:** Superseded by ADR-0123
 
 ---
 

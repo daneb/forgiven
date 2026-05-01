@@ -1,7 +1,7 @@
 # ADR 0121 — Auto-Janitor: Deferred Trigger and Context Grounding
 
 **Date:** 2026-04-08
-**Status:** Accepted
+**Status:** Superseded by ADR-0123
 
 ---
 

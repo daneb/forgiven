@@ -122,6 +122,8 @@ impl UI {
                                 ProviderKind::OpenAi => Color::LightGreen,
                                 ProviderKind::Gemini => Color::LightBlue,
                                 ProviderKind::OpenRouter => Color::LightCyan,
+                                ProviderKind::DeepSeek => Color::Cyan,
+                                ProviderKind::LmStudio => Color::Magenta,
                             };
                             (format!("{emoji} {name}"), color)
                         },
@@ -222,6 +224,8 @@ impl UI {
                             ProviderKind::OpenAi => Color::LightGreen,
                             ProviderKind::Gemini => Color::LightBlue,
                             ProviderKind::OpenRouter => Color::LightCyan,
+                            ProviderKind::DeepSeek => Color::Cyan,
+                            ProviderKind::LmStudio => Color::Magenta,
                         };
                         (label, color)
                     };

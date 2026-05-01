@@ -1,15 +1,17 @@
 //! Provider abstraction — selects between GitHub Copilot, Ollama, Anthropic,
-//! OpenAI, Google Gemini, and OpenRouter.
+//! OpenAI, Google Gemini, OpenRouter, DeepSeek, and LM Studio.
 //!
 //! The active provider is set once at startup from the `[provider]` section of
 //! `~/.config/forgiven/config.toml` and is never changed at runtime.  All agent
 //! interactions route through the chosen provider's endpoint.  Copilot and all
-//! four new providers share the same OpenAI-compatible SSE wire format, so the
+//! other providers share the same OpenAI-compatible SSE wire format, so the
 //! streaming parser and tool-calling loop are unchanged across all providers.
 
 mod anthropic;
 mod copilot;
+mod deepseek;
 mod gemini;
+mod lmstudio;
 mod ollama;
 mod openai;
 mod openrouter;
@@ -43,6 +45,13 @@ pub enum ProviderKind {
     /// OpenRouter aggregator — Bearer `OPENROUTER_API_KEY`, single key for
     /// 300+ models.  Optional `HTTP-Referer` / `X-Title` headers identify the client.
     OpenRouter,
+    /// DeepSeek direct API — Bearer `DEEPSEEK_API_KEY`, OpenAI-compatible endpoint
+    /// at `api.deepseek.com/v1/chat/completions`.  `base_url` may be overridden.
+    DeepSeek,
+    /// Local LM Studio server — no authentication, OpenAI-compatible endpoint at
+    /// `localhost:1234/v1/chat/completions`.  Tool-calling is model-dependent and
+    /// disabled by default.
+    LmStudio,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +76,11 @@ pub struct ProviderConfig {
     pub openai_base_url: String,
     pub openrouter_site_url: String,
     pub openrouter_app_name: String,
+    /// Base URL for DeepSeek (allows self-hosted overrides).
+    pub deepseek_base_url: String,
+    pub lmstudio_base_url: String,
+    pub lmstudio_tool_calls: bool,
+    pub lmstudio_planning_tools: bool,
 }
 
 impl Default for ProviderConfig {
@@ -80,6 +94,10 @@ impl Default for ProviderConfig {
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openrouter_site_url: String::new(),
             openrouter_app_name: String::new(),
+            deepseek_base_url: "https://api.deepseek.com/v1".to_string(),
+            lmstudio_base_url: "http://localhost:1234/v1".to_string(),
+            lmstudio_tool_calls: false,
+            lmstudio_planning_tools: false,
         }
     }
 }
@@ -94,6 +112,8 @@ impl ProviderKind {
             "openai" => Self::OpenAi,
             "gemini" => Self::Gemini,
             "openrouter" => Self::OpenRouter,
+            "deepseek" => Self::DeepSeek,
+            "lmstudio" | "lm_studio" | "lm-studio" => Self::LmStudio,
             _ => Self::Copilot,
         }
     }
@@ -107,6 +127,8 @@ impl ProviderKind {
             Self::OpenAi => "OpenAI",
             Self::Gemini => "Gemini",
             Self::OpenRouter => "OpenRouter",
+            Self::DeepSeek => "DeepSeek",
+            Self::LmStudio => "LM Studio",
         }
     }
 
@@ -124,12 +146,14 @@ impl ProviderKind {
             Self::OpenAi => "🟢",
             Self::Gemini => "🔵",
             Self::OpenRouter => "🌐",
+            Self::DeepSeek => "🔷",
+            Self::LmStudio => "🖥️",
         }
     }
 
     /// Whether this provider requires a `Bearer` token in API requests.
     pub fn requires_auth(&self) -> bool {
-        !matches!(self, Self::Ollama)
+        !matches!(self, Self::Ollama | Self::LmStudio)
     }
 
     /// Whether this provider uses OAuth token exchange for authentication.
@@ -139,10 +163,10 @@ impl ProviderKind {
     }
 
     /// Whether to include `"stream_options": { "include_usage": true }` in chat
-    /// requests.  Ollama's OpenAI-compat layer does not support this field
-    /// reliably; sending it may cause the request to fail on older Ollama builds.
+    /// requests.  Ollama and LM Studio's OpenAI-compat layers do not support this
+    /// field reliably; sending it may cause the request to fail.
     pub fn supports_stream_usage(&self) -> bool {
-        !matches!(self, Self::Ollama)
+        !matches!(self, Self::Ollama | Self::LmStudio)
     }
 
     /// HTTP connect timeout in seconds.
@@ -152,7 +176,7 @@ impl ProviderKind {
     /// request.  All cloud providers use a tight timeout.
     pub fn connect_timeout_secs(&self) -> u64 {
         match self {
-            Self::Ollama => 60,
+            Self::Ollama | Self::LmStudio => 60,
             _ => 15,
         }
     }
@@ -164,7 +188,7 @@ impl ProviderKind {
     /// network jitter and queuing delays.
     pub fn chunk_timeout_secs(&self) -> u64 {
         match self {
-            Self::Ollama => 20,
+            Self::Ollama | Self::LmStudio => 20,
             _ => 60,
         }
     }
@@ -175,7 +199,7 @@ impl ProviderKind {
     /// won't resolve by retrying.  Fail fast so the user sees the error promptly.
     pub fn max_retries(&self) -> usize {
         match self {
-            Self::Ollama => 2,
+            Self::Ollama | Self::LmStudio => 2,
             _ => 5,
         }
     }
@@ -197,6 +221,8 @@ impl ProviderKind {
                     .to_string()
             },
             Self::OpenRouter => "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            Self::DeepSeek => format!("{}/chat/completions", config.deepseek_base_url),
+            Self::LmStudio => format!("{}/chat/completions", config.lmstudio_base_url),
         }
     }
 
@@ -217,8 +243,16 @@ impl ProviderKind {
             api_token,
             chat_endpoint: self.chat_endpoint(config, copilot_api_base),
             num_ctx: if *self == Self::Ollama { config.ollama_context_length } else { None },
-            supports_tool_calls: *self != Self::Ollama || config.ollama_tool_calls,
-            planning_tools: *self != Self::Ollama || config.ollama_planning_tools,
+            supports_tool_calls: match self {
+                Self::Ollama => config.ollama_tool_calls,
+                Self::LmStudio => config.lmstudio_tool_calls,
+                _ => true,
+            },
+            planning_tools: match self {
+                Self::Ollama => config.ollama_planning_tools,
+                Self::LmStudio => config.lmstudio_planning_tools,
+                _ => true,
+            },
             openrouter_site_url: config.openrouter_site_url.clone(),
             openrouter_app_name: config.openrouter_app_name.clone(),
         }
@@ -441,6 +475,15 @@ pub fn make_provider(
             site_url: config.openrouter_site_url.clone(),
             app_name: config.openrouter_app_name.clone(),
         }),
+        ProviderKind::DeepSeek => Box::new(deepseek::DeepSeekProvider {
+            api_key: config.api_key.clone(),
+            base_url: config.deepseek_base_url.clone(),
+        }),
+        ProviderKind::LmStudio => Box::new(lmstudio::LmStudioProvider {
+            base_url: config.lmstudio_base_url.clone(),
+            tool_calls: config.lmstudio_tool_calls,
+            planning_tools: config.lmstudio_planning_tools,
+        }),
     }
 }
 
@@ -542,6 +585,10 @@ mod tests {
         assert_eq!(ProviderKind::from_str("gemini"), ProviderKind::Gemini);
         assert_eq!(ProviderKind::from_str("openrouter"), ProviderKind::OpenRouter);
         assert_eq!(ProviderKind::from_str("copilot"), ProviderKind::Copilot);
+        assert_eq!(ProviderKind::from_str("deepseek"), ProviderKind::DeepSeek);
+        assert_eq!(ProviderKind::from_str("lmstudio"), ProviderKind::LmStudio);
+        assert_eq!(ProviderKind::from_str("lm-studio"), ProviderKind::LmStudio);
+        assert_eq!(ProviderKind::from_str("lm_studio"), ProviderKind::LmStudio);
     }
 
     #[test]
@@ -565,6 +612,8 @@ mod tests {
             ProviderKind::OpenAi,
             ProviderKind::Gemini,
             ProviderKind::OpenRouter,
+            ProviderKind::DeepSeek,
+            ProviderKind::LmStudio,
         ];
         for v in &variants {
             assert!(!v.display_name().is_empty(), "{v:?} has empty display_name");
@@ -575,6 +624,18 @@ mod tests {
     fn ollama_is_not_oauth_and_not_auth() {
         assert!(!ProviderKind::Ollama.is_oauth());
         assert!(!ProviderKind::Ollama.requires_auth());
+    }
+
+    #[test]
+    fn lmstudio_is_not_oauth_and_not_auth() {
+        assert!(!ProviderKind::LmStudio.is_oauth());
+        assert!(!ProviderKind::LmStudio.requires_auth());
+    }
+
+    #[test]
+    fn deepseek_requires_auth_and_is_not_oauth() {
+        assert!(ProviderKind::DeepSeek.requires_auth());
+        assert!(!ProviderKind::DeepSeek.is_oauth());
     }
 
     #[test]

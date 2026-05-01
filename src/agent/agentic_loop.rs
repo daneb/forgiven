@@ -293,7 +293,7 @@ pub(super) async fn start_chat_stream_with_tools(
     model_id: &str,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<reqwest::Response> {
-    info!("Sending completion request model={model_id:?} provider={}", provider.display_name());
+    info!(model = model_id, provider = provider.display_name(), "Sending completion request");
 
     // ── Build request body ────────────────────────────────────────────────────
     let mut body = serde_json::json!({
@@ -388,7 +388,11 @@ pub(super) async fn start_chat_stream_with_tools(
                     if let Some(secs) = retry_after_secs {
                         delay = tokio::time::Duration::from_secs(secs);
                     }
-                    warn!("Rate limited (429), retrying after {}s: {body_text}", delay.as_secs());
+                    warn!(
+                        delay_secs = delay.as_secs(),
+                        body = body_text,
+                        "Rate limited (429), retrying"
+                    );
                     let _ = tx
                         .send(StreamEvent::Retrying {
                             attempt: retry_attempts + 1,

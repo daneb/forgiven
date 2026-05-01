@@ -54,6 +54,14 @@ async fn one_shot_with_provider(
             "https://openrouter.ai/api/v1/chat/completions".to_string(),
             false,
         ),
+        ProviderKind::DeepSeek => (
+            config.api_key.clone(),
+            format!("{}/chat/completions", config.deepseek_base_url),
+            false,
+        ),
+        ProviderKind::LmStudio => {
+            (String::new(), format!("{}/chat/completions", config.lmstudio_base_url), false)
+        },
     };
 
     // For Ollama reasoning models (e.g. gemma4:e4b), disable the thinking/reasoning

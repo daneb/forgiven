@@ -1,7 +1,7 @@
 # ADR 0120 — Auto-Janitor Distinct Streaming UX
 
 **Date:** 2026-04-07
-**Status:** Accepted — Implemented
+**Status:** Superseded by ADR-0123
 
 ---
 

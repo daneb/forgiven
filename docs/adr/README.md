@@ -144,6 +144,15 @@ that motivated it, what was decided, and the consequences.
 | [0134](0134-vim-percent-matching-pair-motion.md) | Vim `%` Matching-Pair Motion | Accepted |
 | [0135](0135-agent-panel-space-a-cleanup.md) | Agent Panel Space-A Cleanup | Accepted |
 | [0136](0136-blockquote-split-panic-fix.md) | Blockquote Gutter Split Panic Fix | Implemented |
+| [0137](0137-soft-wrap-toggle-and-long-line-rendering.md) | Soft-Wrap Toggle and Long-Line Rendering Fix | Implemented |
+| [0138](0138-performance-iteration-cache-unification-and-render-decomposition.md) | Performance Iteration: Cache Unification, Fold Cache, and render() Decomposition | Implemented |
+| [0139](0139-openspec-replaces-speckit.md) | OpenSpec replaces SpecKit | Accepted |
+| [0140](0140-copilot-quota-and-business-endpoint.md) | Copilot Quota Display and Business Endpoint Correction | Accepted |
+| [0141](0141-companion-auto-launch-and-toggle.md) | Companion Auto-launch and Runtime Toggle | Implemented |
+| [0142](0142-consolidate-preview-keybindings-under-spc-p.md) | Consolidate Preview Keybindings Under `SPC p` | Implemented |
+| [0143](0143-companion-hyperlinks-and-images.md) | Companion: Hyperlink and Image Support | Implemented |
+| [0144](0144-editor-decomposition-sub-state-clustering.md) | Editor Decomposition: Sub-State Clustering and Request Multiplexing | Phase 1 Implemented |
+| [0145](0145-deepseek-and-lmstudio-providers.md) | DeepSeek and LM Studio Providers | Accepted |
 
 ## What is an ADR?
 

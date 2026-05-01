@@ -108,10 +108,14 @@ async fn main() -> Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
     let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let json_log_path = log_path.with_extension("jsonl");
+    let json_log_file =
+        std::fs::OpenOptions::new().create(true).append(true).open(&json_log_path)?;
     let log_buf: Arc<Mutex<VecDeque<(String, String)>>> = Arc::new(Mutex::new(VecDeque::new()));
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer().with_writer(log_file))
+        .with(fmt::layer().json().with_writer(json_log_file))
         .with(RingBufLayer { buf: Arc::clone(&log_buf), capacity: 50 })
         .init();
 

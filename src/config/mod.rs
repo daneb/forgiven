@@ -287,6 +287,69 @@ fn default_openrouter_model() -> String {
     "anthropic/claude-sonnet-4-5".to_string()
 }
 
+/// Per-provider settings for the DeepSeek direct API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeepSeekProviderConfig {
+    /// API key — use `"$DEEPSEEK_API_KEY"` to read from the environment (recommended).
+    #[serde(default)]
+    pub api_key: String,
+    /// Preferred model ID (e.g. `"deepseek-chat"`, `"deepseek-coder"`).
+    #[serde(default = "default_deepseek_model")]
+    pub default_model: String,
+    /// Base URL override.  Omit to use `"https://api.deepseek.com/v1"`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for DeepSeekProviderConfig {
+    fn default() -> Self {
+        Self { api_key: String::new(), default_model: default_deepseek_model(), base_url: None }
+    }
+}
+
+fn default_deepseek_model() -> String {
+    "deepseek-chat".to_string()
+}
+
+/// Per-provider settings for a local LM Studio server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LmStudioProviderConfig {
+    /// Preferred model ID — must match the model currently loaded in LM Studio.
+    #[serde(default)]
+    pub default_model: String,
+    /// Base URL of the LM Studio server.
+    ///
+    /// Default: `"http://localhost:1234/v1"`.
+    #[serde(default = "default_lmstudio_base_url")]
+    pub base_url: String,
+    /// Enable the agentic tool-calling loop for LM Studio.
+    ///
+    /// Defaults to `false`.  Tool-calling support depends on the loaded model.
+    #[serde(default)]
+    pub tool_calls: bool,
+    /// Enable `create_task`, `complete_task`, and `ask_user` planning tools.
+    ///
+    /// Defaults to `false`.  Only enable for larger models that handle conditional
+    /// tool instructions reliably.
+    #[serde(default)]
+    pub planning_tools: bool,
+}
+
+impl Default for LmStudioProviderConfig {
+    fn default() -> Self {
+        Self {
+            default_model: String::new(),
+            base_url: default_lmstudio_base_url(),
+            tool_calls: false,
+            planning_tools: false,
+        }
+    }
+}
+
+fn default_lmstudio_base_url() -> String {
+    "http://localhost:1234/v1".to_string()
+}
+
 /// Top-level provider selection block (`[provider]` in `config.toml`).
 ///
 /// Example:
@@ -302,11 +365,19 @@ fn default_openrouter_model() -> String {
 /// base_url       = "http://localhost:11434"
 /// default_model  = "qwen2.5-coder:14b"
 /// context_length = 32768
+///
+/// [provider.deepseek]
+/// api_key       = "$DEEPSEEK_API_KEY"
+/// default_model = "deepseek-chat"
+///
+/// [provider.lmstudio]
+/// default_model = "my-model"
+/// base_url      = "http://localhost:1234/v1"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
     /// Which provider to use: `"copilot"` (default), `"ollama"`, `"anthropic"`,
-    /// `"openai"`, `"gemini"`, or `"openrouter"`.
+    /// `"openai"`, `"gemini"`, `"openrouter"`, `"deepseek"`, or `"lmstudio"`.
     /// Only one provider is active at a time; switching requires a restart.
     #[serde(default = "default_provider_active")]
     pub active: String,
@@ -328,6 +399,12 @@ pub struct ProviderConfig {
     /// OpenRouter aggregator settings.
     #[serde(default)]
     pub openrouter: OpenRouterProviderConfig,
+    /// DeepSeek direct API settings.
+    #[serde(default)]
+    pub deepseek: DeepSeekProviderConfig,
+    /// LM Studio local server settings.
+    #[serde(default)]
+    pub lmstudio: LmStudioProviderConfig,
 }
 
 fn default_provider_active() -> String {
@@ -720,6 +797,8 @@ impl Config {
             "openai" => &self.provider.openai.default_model,
             "gemini" => &self.provider.gemini.default_model,
             "openrouter" => &self.provider.openrouter.default_model,
+            "deepseek" => &self.provider.deepseek.default_model,
+            "lmstudio" | "lm-studio" | "lm_studio" => &self.provider.lmstudio.default_model,
             _ => {
                 // Honour the legacy top-level field when the new nested field
                 // still holds its default ("claude-sonnet-4"), giving precedence
@@ -885,6 +964,36 @@ mod tests {
         cfg.provider.active = "openrouter".to_string();
         cfg.provider.openrouter.default_model = "anthropic/claude-opus-4".to_string();
         assert_eq!(cfg.active_default_model(), "anthropic/claude-opus-4");
+    }
+
+    #[test]
+    fn active_model_deepseek() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "deepseek".to_string();
+        cfg.provider.deepseek.default_model = "deepseek-coder".to_string();
+        assert_eq!(cfg.active_default_model(), "deepseek-coder");
+    }
+
+    #[test]
+    fn active_model_lmstudio() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "lmstudio".to_string();
+        cfg.provider.lmstudio.default_model = "qwen2.5-coder-7b".to_string();
+        assert_eq!(cfg.active_default_model(), "qwen2.5-coder-7b");
+    }
+
+    #[test]
+    fn deepseek_serde_defaults() {
+        let cfg: Config = toml::from_str("[provider.deepseek]\n").unwrap();
+        assert_eq!(cfg.provider.deepseek.default_model, "deepseek-chat");
+        assert_eq!(cfg.provider.deepseek.api_key, "");
+    }
+
+    #[test]
+    fn lmstudio_serde_defaults() {
+        let cfg: Config = toml::from_str("[provider.lmstudio]\n").unwrap();
+        assert_eq!(cfg.provider.lmstudio.base_url, "http://localhost:1234/v1");
+        assert!(!cfg.provider.lmstudio.tool_calls);
     }
 
     #[test]

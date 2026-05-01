@@ -360,6 +360,9 @@ impl Editor {
                     crate::agent::ProviderKind::OpenRouter => {
                         crate::agent::provider::resolve_api_key(&config.provider.openrouter.api_key)
                     },
+                    crate::agent::ProviderKind::DeepSeek => {
+                        crate::agent::provider::resolve_api_key(&config.provider.deepseek.api_key)
+                    },
                     _ => String::new(),
                 };
                 panel.provider_config = crate::agent::ProviderConfig {
@@ -376,6 +379,15 @@ impl Editor {
                         .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
                     openrouter_site_url: config.provider.openrouter.site_url.clone(),
                     openrouter_app_name: config.provider.openrouter.app_name.clone(),
+                    deepseek_base_url: config
+                        .provider
+                        .deepseek
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
+                    lmstudio_base_url: config.provider.lmstudio.base_url.clone(),
+                    lmstudio_tool_calls: config.provider.lmstudio.tool_calls,
+                    lmstudio_planning_tools: config.provider.lmstudio.planning_tools,
                 };
                 panel.intent_translator_enabled = config.agent.intent_translator.enabled;
                 panel.intent_translator_provider = config.agent.intent_translator.provider.clone();

@@ -1,7 +1,7 @@
 # ADR 0101 — Auto-Janitor: Rolling History Compression (Phase 3)
 
 **Date:** 2026-04-03
-**Status:** Accepted
+**Status:** Partially superseded by ADR-0123 (auto-trigger disabled by default; manual janitor via SPC a j retained)
 
 ---
 

@@ -517,6 +517,8 @@ pub(super) async fn fetch_models_for_provider(
         ProviderKind::OpenAi => fetch_models_openai(api_token, &config.openai_base_url).await,
         ProviderKind::Gemini => fetch_models_gemini(api_token).await,
         ProviderKind::OpenRouter => fetch_models_openrouter(api_token).await,
+        ProviderKind::DeepSeek => fetch_models_openai(api_token, &config.deepseek_base_url).await,
+        ProviderKind::LmStudio => fetch_models_openai("", &config.lmstudio_base_url).await,
     }
 }
 

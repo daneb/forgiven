@@ -145,6 +145,11 @@ impl AgentPanel {
                 // "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5"
                 self.selected_model_id().split('/').next_back().unwrap_or("OpenRouter").to_string()
             },
+            ProviderKind::DeepSeek => "DeepSeek".to_string(),
+            ProviderKind::LmStudio => {
+                // "qwen2.5-coder:7b" → "qwen2.5-coder"
+                self.selected_model_id().split(':').next().unwrap_or("LM Studio").to_string()
+            },
         }
     }
 

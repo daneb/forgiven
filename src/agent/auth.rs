@@ -246,8 +246,13 @@ pub async fn fetch_copilot_quota(oauth_token: &str) -> Option<CopilotQuota> {
     let overage_count = pi.get("overage_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     info!(
-        "Copilot quota: {:.1}% remaining ({}/{} premium interactions, resets {})",
-        premium_percent_remaining, premium_remaining, premium_entitlement, reset_date
+        pct_remaining = premium_percent_remaining,
+        remaining = premium_remaining,
+        entitlement = premium_entitlement,
+        reset_date = reset_date,
+        overage_permitted,
+        overage_count,
+        "Copilot quota"
     );
 
     Some(CopilotQuota {

@@ -149,24 +149,25 @@ impl AgentPanel {
                         }
                         .max(1);
                         let pct = prompt_tokens * 100 / window;
-                        let cached_note = if cached_tokens > 0 {
-                            format!("  cached={cached_tokens}t")
-                        } else {
-                            String::new()
-                        };
                         if pct >= 80 {
                             warn!(
-                                "[usage] prompt={prompt_tokens}t ({pct}% of {window}t window)  \
-                                 completion={completion_tokens}t{cached_note}  \
-                                 session_total={}t",
-                                self.conversation.total_session_prompt_tokens
+                                prompt_tokens,
+                                completion_tokens,
+                                cached_tokens,
+                                window_size = window,
+                                budget_pct = pct,
+                                session_total = self.conversation.total_session_prompt_tokens,
+                                "[usage] high context usage"
                             );
                         } else {
                             info!(
-                                "[usage] prompt={prompt_tokens}t ({pct}% of {window}t window)  \
-                                 completion={completion_tokens}t{cached_note}  \
-                                 session_total={}t",
-                                self.conversation.total_session_prompt_tokens
+                                prompt_tokens,
+                                completion_tokens,
+                                cached_tokens,
+                                window_size = window,
+                                budget_pct = pct,
+                                session_total = self.conversation.total_session_prompt_tokens,
+                                "[usage]"
                             );
                         }
                     },

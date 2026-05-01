@@ -20,6 +20,10 @@ make test             # cargo test
 make audit            # cargo-audit CVE scan
 make deny             # cargo-deny licence/advisory check
 
+# Run a single test (partial name match, -- --nocapture to see output)
+cargo test test_name_substring
+cargo test config::tests::active_model_copilot -- --nocapture
+
 # Install required dev tools (once)
 make install-tools    # cargo-audit, cargo-deny
 
@@ -47,11 +51,19 @@ src/
 │   ├── render.rs     # render() — calls ui::render() with a RenderContext
 │   └── state.rs      # Shared sub-state types (HighlightCache, FoldCache, …)
 ├── agent/            # AI chat panel and agentic tool loop
-│   ├── panel.rs      # AgentPanel struct, streaming SSE receive
+│   ├── panel.rs      # AgentPanel struct, accessors, focus, dialogs, scroll
+│   ├── submit.rs     # submit(), start_inline_assist(), start_investigation_agent()
+│   ├── stream_poll.rs # poll_stream() — drives the streaming SSE receive loop
+│   ├── conversation.rs # Conversation struct + message editing methods
+│   ├── context.rs    # Auto-janitor: compress_history(), observation masking
+│   ├── session_log.rs # JSONL session persistence (checkpoint + restore)
+│   ├── project_tree.rs # build_project_tree(), build_structural_map()
 │   ├── agentic_loop.rs # Tool-calling loop (up to max_agent_rounds)
 │   ├── tools.rs      # Tool definitions (read_file, edit_file, run_command, …)
 │   ├── streaming.rs  # SSE parser, delta accumulation
-│   └── provider.rs   # HTTP clients for Copilot, Anthropic, OpenAI, Gemini, OpenRouter
+│   └── provider/     # Provider abstraction (ChatProvider trait + 6 backends)
+│       ├── mod.rs    # ProviderKind enum, ProviderSettings, ChatProvider trait, make_provider()
+│       ├── copilot.rs, anthropic.rs, ollama.rs, openai.rs, gemini.rs, openrouter.rs
 ├── buffer/           # Text buffer, cursor, undo/redo history
 ├── ui/               # Ratatui rendering (widgets, layout, markdown renderer)
 │   ├── mod.rs        # render() entry point, RenderContext struct
@@ -111,6 +123,19 @@ New async features follow this exact pattern: spawn a `tokio::task`, pipe the re
 
 `agent/agentic_loop.rs` drives multi-round tool calling. Tools are defined in `agent/tools.rs` and dispatched in `agent/tool_dispatch.rs`. The open buffer is injected into the system prompt each round (context pressure — close large files before long agent sessions). Token counts are tracked per segment in `agent/token_count.rs`.
 
+### Provider abstraction
+
+`agent/provider/mod.rs` defines the `ChatProvider` trait (object-safe, no async, no generics) and `ProviderSettings` — a concrete, `Clone`-able snapshot built once per `submit()` call and threaded through the agentic loop. `ProviderSettings` implements `ChatProvider` via match on `ProviderKind`. The six per-provider structs (`CopilotProvider`, etc.) implement the same trait and are used via `make_provider()` → `BoxedProvider`; `AgentPanel.provider` is still `ProviderKind` pending a follow-on migration. All provider files carry `#![allow(dead_code)]` until that migration lands.
+
+Key dispatch points: `extra_headers()` (Copilot routing headers, OpenRouter Referer/Title), `format_system_message()` (Anthropic splits into cached + volatile content blocks for prompt caching; all others return a plain `{"role":"system","content":"..."}`), `requires_auth()` / `is_oauth()` (Copilot uses OAuth; Ollama needs no auth).
+
+### Context management
+
+Two active mechanisms (ADR 0123):
+
+1. **Observation masking** — before each API request, assistant messages older than the most recent N are truncated to a one-line stub if they exceed `observation_mask_threshold_chars` (default 2 000). The display history is unchanged; only the API payload is trimmed.
+2. **Manual janitor** (`SPC a j`) — user-triggered LLM summarisation into a User→Assistant exchange so the model "owns" the summary. Auto-trigger is disabled by default (`janitor_threshold_tokens = 0`).
+
 ### Architecture Decision Records
 
-All design decisions (including intentional exclusions like no multi-cursor and no integrated terminal) are in `docs/adr/`. ADRs 0001–0138 are present. Check the ADR index in `README.md` before proposing structural changes.
+All design decisions (including intentional exclusions like no multi-cursor and no integrated terminal) are in `docs/adr/`. ADRs 0001–0144 are present. ADRs marked `Superseded` (e.g. 0117, 0120, 0121 — earlier janitor iterations) are historical; check the status header before treating an ADR as authoritative. Check `docs/adr/README.md` before proposing structural changes.
