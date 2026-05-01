@@ -527,3 +527,133 @@ impl ChatProvider for ProviderSettings {
         self.kind.display_name()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ProviderKind ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_str_recognises_all_variants() {
+        assert_eq!(ProviderKind::from_str("ollama"), ProviderKind::Ollama);
+        assert_eq!(ProviderKind::from_str("anthropic"), ProviderKind::Anthropic);
+        assert_eq!(ProviderKind::from_str("openai"), ProviderKind::OpenAi);
+        assert_eq!(ProviderKind::from_str("gemini"), ProviderKind::Gemini);
+        assert_eq!(ProviderKind::from_str("openrouter"), ProviderKind::OpenRouter);
+        assert_eq!(ProviderKind::from_str("copilot"), ProviderKind::Copilot);
+    }
+
+    #[test]
+    fn from_str_unknown_falls_back_to_copilot() {
+        assert_eq!(ProviderKind::from_str("unknown"), ProviderKind::Copilot);
+        assert_eq!(ProviderKind::from_str(""), ProviderKind::Copilot);
+    }
+
+    #[test]
+    fn from_str_is_case_insensitive() {
+        assert_eq!(ProviderKind::from_str("ANTHROPIC"), ProviderKind::Anthropic);
+        assert_eq!(ProviderKind::from_str("Ollama"), ProviderKind::Ollama);
+    }
+
+    #[test]
+    fn all_variants_have_non_empty_display_name() {
+        let variants = [
+            ProviderKind::Copilot,
+            ProviderKind::Ollama,
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAi,
+            ProviderKind::Gemini,
+            ProviderKind::OpenRouter,
+        ];
+        for v in &variants {
+            assert!(!v.display_name().is_empty(), "{v:?} has empty display_name");
+        }
+    }
+
+    #[test]
+    fn ollama_is_not_oauth_and_not_auth() {
+        assert!(!ProviderKind::Ollama.is_oauth());
+        assert!(!ProviderKind::Ollama.requires_auth());
+    }
+
+    #[test]
+    fn copilot_is_oauth() {
+        assert!(ProviderKind::Copilot.is_oauth());
+    }
+
+    #[test]
+    fn ollama_has_longer_connect_timeout() {
+        assert!(
+            ProviderKind::Ollama.connect_timeout_secs()
+                > ProviderKind::Anthropic.connect_timeout_secs()
+        );
+    }
+
+    #[test]
+    fn ollama_has_fewer_max_retries() {
+        assert!(ProviderKind::Ollama.max_retries() < ProviderKind::Anthropic.max_retries());
+    }
+
+    // ── resolve_api_key ──────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_api_key_literal() {
+        assert_eq!(resolve_api_key("sk-literal-key"), "sk-literal-key");
+    }
+
+    #[test]
+    fn resolve_api_key_env_var_unset_returns_empty() {
+        // Use a name that is extremely unlikely to be set in CI
+        let result = resolve_api_key("$FORGIVEN_TEST_UNSET_VAR_XYZ_12345");
+        assert_eq!(result, "");
+    }
+
+    // ── ProviderSettings / ChatProvider trait ────────────────────────────────
+
+    fn test_settings(kind: ProviderKind) -> ProviderSettings {
+        let config = ProviderConfig::default();
+        kind.build_settings(&config, "test-token".to_string(), "https://api.githubcopilot.com")
+    }
+
+    #[test]
+    fn provider_settings_copilot_endpoint_uses_api_base() {
+        let s = test_settings(ProviderKind::Copilot);
+        assert!(s.chat_endpoint.contains("githubcopilot.com"));
+        assert!(s.chat_endpoint.ends_with("/chat/completions"));
+    }
+
+    #[test]
+    fn provider_settings_anthropic_endpoint_correct() {
+        let s = test_settings(ProviderKind::Anthropic);
+        assert!(s.chat_endpoint.contains("anthropic.com"));
+    }
+
+    #[test]
+    fn provider_settings_ollama_num_ctx_forwarded() {
+        let config =
+            ProviderConfig { ollama_context_length: Some(65536), ..ProviderConfig::default() };
+        let s = ProviderKind::Ollama.build_settings(&config, String::new(), "");
+        assert_eq!(s.num_ctx, Some(65536));
+    }
+
+    #[test]
+    fn provider_settings_non_ollama_num_ctx_none() {
+        let s = test_settings(ProviderKind::Anthropic);
+        assert!(s.num_ctx.is_none());
+    }
+
+    #[test]
+    fn provider_settings_ollama_tool_calls_off_by_default() {
+        let s = test_settings(ProviderKind::Ollama);
+        assert!(!s.supports_tool_calls);
+    }
+
+    #[test]
+    fn provider_settings_implements_chat_provider() {
+        // Compile-time check: ProviderSettings satisfies ChatProvider.
+        fn accepts_provider(_: &dyn ChatProvider) {}
+        let s = test_settings(ProviderKind::Copilot);
+        accepts_provider(&s);
+    }
+}

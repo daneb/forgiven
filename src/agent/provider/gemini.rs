@@ -63,3 +63,43 @@ impl ChatProvider for GeminiProvider {
         "Gemini"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> GeminiProvider {
+        GeminiProvider { api_key: "AIza-test".to_string() }
+    }
+
+    #[test]
+    fn endpoint_is_google_openai_compat() {
+        assert!(provider().endpoint().contains("generativelanguage.googleapis.com"));
+        assert!(provider().endpoint().ends_with("/chat/completions"));
+    }
+
+    #[test]
+    fn display_name_contains_gemini() {
+        assert!(provider().display_name().to_lowercase().contains("gemini"));
+    }
+
+    #[test]
+    fn requires_auth_true() {
+        assert!(provider().requires_auth());
+    }
+
+    #[test]
+    fn is_oauth_false() {
+        assert!(!provider().is_oauth());
+    }
+
+    #[test]
+    fn extra_headers_empty() {
+        assert!(provider().extra_headers().is_empty());
+    }
+
+    #[test]
+    fn num_ctx_is_none() {
+        assert!(provider().num_ctx().is_none());
+    }
+}

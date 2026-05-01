@@ -183,11 +183,9 @@ impl McpSseHandle {
             endpoint_rx.await.context("SSE connection closed before 'endpoint' event")?;
 
         // The path may be relative (e.g. "/message?sessionId=…") or absolute.
-        let post_url = if endpoint_path.starts_with("http") {
-            endpoint_path
-        } else {
-            format!("{}{}", base_url.trim_end_matches('/'), endpoint_path)
-        };
+        // Absolute URLs are validated to share the same origin as base_url (H1 fix).
+        let post_url =
+            resolve_post_url(base_url, &endpoint_path).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(McpSseHandle {
             name: name.to_string(),
@@ -882,5 +880,180 @@ fn extract_tool_result(result: &Value) -> String {
         "(no text content)".to_string()
     } else {
         parts.join("\n")
+    }
+}
+
+/// Resolve the POST URL from an SSE endpoint event.
+///
+/// Relative paths are resolved against `base_url`.  Absolute URLs are accepted
+/// only when their origin (scheme + host + port) matches `base_url` — this
+/// prevents a malicious server from redirecting requests to an arbitrary host.
+fn resolve_post_url(base_url: &str, endpoint_path: &str) -> Result<String, String> {
+    let base = base_url.trim_end_matches('/');
+    if endpoint_path.starts_with("http://") || endpoint_path.starts_with("https://") {
+        let base_origin = url_origin(base);
+        let ep_origin = url_origin(endpoint_path);
+        if ep_origin != base_origin {
+            return Err(format!(
+                "SSE endpoint origin mismatch: expected {base_origin}, got {ep_origin}"
+            ));
+        }
+        Ok(endpoint_path.to_string())
+    } else {
+        Ok(format!("{base}{endpoint_path}"))
+    }
+}
+
+/// Extract the scheme + host + port prefix of a URL (everything before the first path `/`).
+fn url_origin(url: &str) -> String {
+    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let rest = &url[after_scheme..];
+    let path_start = rest.find('/').map(|i| after_scheme + i).unwrap_or(url.len());
+    url[..path_start].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── resolve_post_url (H1 security fix) ───────────────────────────────────
+
+    #[test]
+    fn resolve_url_relative_path() {
+        let result = resolve_post_url("http://localhost:8080", "/messages?sessionId=abc").unwrap();
+        assert_eq!(result, "http://localhost:8080/messages?sessionId=abc");
+    }
+
+    #[test]
+    fn resolve_url_relative_path_strips_trailing_slash() {
+        let result = resolve_post_url("http://localhost:8080/", "/rpc").unwrap();
+        assert_eq!(result, "http://localhost:8080/rpc");
+    }
+
+    #[test]
+    fn resolve_url_same_origin_absolute_accepted() {
+        let result =
+            resolve_post_url("http://localhost:8080", "http://localhost:8080/messages?session=1")
+                .unwrap();
+        assert_eq!(result, "http://localhost:8080/messages?session=1");
+    }
+
+    #[test]
+    fn resolve_url_cross_origin_rejected() {
+        let err =
+            resolve_post_url("http://localhost:8080", "http://evil.example.com/steal").unwrap_err();
+        assert!(err.contains("origin mismatch"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn resolve_url_cross_scheme_rejected() {
+        let err =
+            resolve_post_url("https://localhost:8080", "http://localhost:8080/rpc").unwrap_err();
+        assert!(err.contains("origin mismatch"), "unexpected error: {err}");
+    }
+
+    // ── parse_tools ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tools_empty_array() {
+        let result = serde_json::json!({ "tools": [] });
+        let tools = parse_tools("test-server", &result);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn parse_tools_populated() {
+        let result = serde_json::json!({
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read a file from disk",
+                    "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } } }
+                }
+            ]
+        });
+        let tools = parse_tools("fs", &result);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read_file");
+        assert_eq!(tools[0].description, "Read a file from disk");
+        assert_eq!(tools[0].server_name, "fs");
+    }
+
+    #[test]
+    fn parse_tools_missing_tools_key() {
+        let result = serde_json::json!({ "not_tools": [] });
+        let tools = parse_tools("srv", &result);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn parse_tools_entry_missing_name_skipped() {
+        let result = serde_json::json!({
+            "tools": [
+                { "description": "no name here" },
+                { "name": "valid_tool", "description": "ok" }
+            ]
+        });
+        let tools = parse_tools("srv", &result);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "valid_tool");
+    }
+
+    #[test]
+    fn parse_tools_missing_description_defaults_empty() {
+        let result = serde_json::json!({ "tools": [{ "name": "silent" }] });
+        let tools = parse_tools("srv", &result);
+        assert_eq!(tools[0].description, "");
+    }
+
+    // ── extract_tool_result ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_tool_result_text_content() {
+        let result = serde_json::json!({
+            "content": [{ "type": "text", "text": "hello world" }],
+            "isError": false
+        });
+        assert_eq!(extract_tool_result(&result), "hello world");
+    }
+
+    #[test]
+    fn extract_tool_result_error_flag() {
+        let result = serde_json::json!({
+            "content": [{ "type": "text", "text": "something went wrong" }],
+            "isError": true
+        });
+        let out = extract_tool_result(&result);
+        assert!(out.starts_with("error:"), "expected error prefix, got: {out}");
+        assert!(out.contains("something went wrong"));
+    }
+
+    #[test]
+    fn extract_tool_result_empty_content() {
+        let result = serde_json::json!({ "content": [] });
+        assert_eq!(extract_tool_result(&result), "(no text content)");
+    }
+
+    #[test]
+    fn extract_tool_result_multiple_text_parts_joined() {
+        let result = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "line one" },
+                { "type": "text", "text": "line two" }
+            ]
+        });
+        let out = extract_tool_result(&result);
+        assert_eq!(out, "line one\nline two");
+    }
+
+    #[test]
+    fn extract_tool_result_non_text_content_skipped() {
+        let result = serde_json::json!({
+            "content": [
+                { "type": "image", "data": "base64..." },
+                { "type": "text", "text": "caption" }
+            ]
+        });
+        assert_eq!(extract_tool_result(&result), "caption");
     }
 }

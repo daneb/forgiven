@@ -72,3 +72,61 @@ impl ChatProvider for OpenRouterProvider {
         "OpenRouter"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> OpenRouterProvider {
+        OpenRouterProvider {
+            api_key: "sk-or-test".to_string(),
+            site_url: "https://myapp.example.com".to_string(),
+            app_name: "MyApp".to_string(),
+        }
+    }
+
+    #[test]
+    fn endpoint_is_openrouter() {
+        assert!(provider().endpoint().contains("openrouter.ai"));
+        assert!(provider().endpoint().ends_with("/chat/completions"));
+    }
+
+    #[test]
+    fn extra_headers_includes_referer() {
+        let headers = provider().extra_headers();
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "HTTP-Referer" && v == "https://myapp.example.com"));
+    }
+
+    #[test]
+    fn extra_headers_includes_title() {
+        let headers = provider().extra_headers();
+        assert!(headers.iter().any(|(k, v)| k == "X-Title" && v == "MyApp"));
+    }
+
+    #[test]
+    fn extra_headers_empty_when_no_site_url_or_app_name() {
+        let p = OpenRouterProvider {
+            api_key: "k".to_string(),
+            site_url: String::new(),
+            app_name: String::new(),
+        };
+        assert!(p.extra_headers().is_empty());
+    }
+
+    #[test]
+    fn requires_auth_true() {
+        assert!(provider().requires_auth());
+    }
+
+    #[test]
+    fn is_oauth_false() {
+        assert!(!provider().is_oauth());
+    }
+
+    #[test]
+    fn api_key_returned() {
+        assert_eq!(provider().api_key(), "sk-or-test");
+    }
+}

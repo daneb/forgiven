@@ -1119,3 +1119,126 @@ pub fn parse_first_inline_completion(value: serde_json::Value) -> Option<String>
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── language_from_path ───────────────────────────────────────────────────
+
+    #[test]
+    fn language_rust() {
+        assert_eq!(LspManager::language_from_path(Path::new("foo.rs")), "rust");
+    }
+
+    #[test]
+    fn language_python() {
+        assert_eq!(LspManager::language_from_path(Path::new("script.py")), "python");
+    }
+
+    #[test]
+    fn language_typescript() {
+        assert_eq!(LspManager::language_from_path(Path::new("app.ts")), "typescript");
+    }
+
+    #[test]
+    fn language_cpp_variants() {
+        for ext in &["foo.cpp", "foo.cc", "foo.cxx"] {
+            assert_eq!(LspManager::language_from_path(Path::new(ext)), "cpp", "failed for {ext}");
+        }
+    }
+
+    #[test]
+    fn language_unknown_extension_is_plaintext() {
+        assert_eq!(LspManager::language_from_path(Path::new("data.xyz")), "plaintext");
+    }
+
+    #[test]
+    fn language_no_extension_is_plaintext() {
+        assert_eq!(LspManager::language_from_path(Path::new("Makefile")), "plaintext");
+    }
+
+    // ── parse_first_inline_completion ────────────────────────────────────────
+
+    #[test]
+    fn inline_completion_list_format() {
+        let val = serde_json::json!({
+            "items": [{ "insertText": "fn main() {}" }]
+        });
+        assert_eq!(parse_first_inline_completion(val), Some("fn main() {}".to_string()));
+    }
+
+    #[test]
+    fn inline_completion_bare_array_format() {
+        let val = serde_json::json!([{ "insertText": "let x = 1;" }]);
+        assert_eq!(parse_first_inline_completion(val), Some("let x = 1;".to_string()));
+    }
+
+    #[test]
+    fn inline_completion_insert_text_value_object() {
+        let val = serde_json::json!({
+            "items": [{ "insertText": { "value": "hello world" } }]
+        });
+        assert_eq!(parse_first_inline_completion(val), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn inline_completion_empty_items_returns_none() {
+        let val = serde_json::json!({ "items": [] });
+        assert!(parse_first_inline_completion(val).is_none());
+    }
+
+    #[test]
+    fn inline_completion_missing_insert_text_returns_none() {
+        let val = serde_json::json!({ "items": [{ "filterText": "something" }] });
+        assert!(parse_first_inline_completion(val).is_none());
+    }
+
+    // ── server_relevant_for_workspace ────────────────────────────────────────
+
+    #[test]
+    fn copilot_always_relevant() {
+        let server = crate::config::LspServerConfig {
+            language: "copilot".to_string(),
+            command: "copilot".to_string(),
+            args: vec![],
+            env: Default::default(),
+            initialization_options: None,
+        };
+        assert!(server_relevant_for_workspace(&server, Path::new("/nonexistent")));
+    }
+
+    #[test]
+    fn rust_relevant_when_cargo_toml_present() {
+        let dir = std::env::temp_dir().join(format!("forgiven-lsp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+
+        let server = crate::config::LspServerConfig {
+            language: "rust".to_string(),
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env: Default::default(),
+            initialization_options: None,
+        };
+        assert!(server_relevant_for_workspace(&server, &dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rust_not_relevant_without_cargo_toml() {
+        let dir = std::env::temp_dir().join(format!("forgiven-lsp-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let server = crate::config::LspServerConfig {
+            language: "rust".to_string(),
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env: Default::default(),
+            initialization_options: None,
+        };
+        assert!(!server_relevant_for_workspace(&server, &dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

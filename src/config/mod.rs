@@ -797,3 +797,198 @@ impl Config {
         Some(base.join("forgiven").join("forgiven.log"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_default_serialises_cleanly() {
+        // Config::default() uses Rust's Default derive, not serde defaults.
+        // Verify it round-trips without error and structural fields are intact.
+        let original = Config::default();
+        let toml_str = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.tab_width, 4);
+        assert!(parsed.use_spaces);
+        assert_eq!(parsed.max_agent_rounds, 10);
+        assert!(!parsed.soft_wrap);
+    }
+
+    #[test]
+    fn serde_defaults_applied_when_section_present_but_field_absent() {
+        // When [provider] exists but 'active' is omitted, the serde default fires.
+        let cfg: Config = toml::from_str("[provider]\n").unwrap();
+        assert_eq!(cfg.provider.active, "copilot");
+        assert_eq!(cfg.tab_width, 4);
+        assert!(cfg.use_spaces);
+        assert_eq!(cfg.max_agent_rounds, 10);
+    }
+
+    #[test]
+    fn ollama_serde_defaults() {
+        let cfg: Config = toml::from_str("[provider.ollama]\n").unwrap();
+        assert_eq!(cfg.provider.ollama.base_url, "http://localhost:11434");
+        assert_eq!(cfg.provider.ollama.default_model, "qwen2.5-coder:14b");
+        assert!(!cfg.provider.ollama.tool_calls);
+    }
+
+    #[test]
+    fn anthropic_serde_defaults() {
+        let cfg: Config = toml::from_str("[provider.anthropic]\n").unwrap();
+        assert_eq!(cfg.provider.anthropic.default_model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn active_model_copilot() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "copilot".to_string();
+        cfg.provider.copilot.default_model = "gpt-5".to_string();
+        assert_eq!(cfg.active_default_model(), "gpt-5");
+    }
+
+    #[test]
+    fn active_model_anthropic() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "anthropic".to_string();
+        cfg.provider.anthropic.default_model = "claude-opus-4".to_string();
+        assert_eq!(cfg.active_default_model(), "claude-opus-4");
+    }
+
+    #[test]
+    fn active_model_ollama() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "ollama".to_string();
+        cfg.provider.ollama.default_model = "llama3.3:latest".to_string();
+        assert_eq!(cfg.active_default_model(), "llama3.3:latest");
+    }
+
+    #[test]
+    fn active_model_openai() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "openai".to_string();
+        cfg.provider.openai.default_model = "gpt-4o-mini".to_string();
+        assert_eq!(cfg.active_default_model(), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn active_model_gemini() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "gemini".to_string();
+        cfg.provider.gemini.default_model = "gemini-2.5-flash".to_string();
+        assert_eq!(cfg.active_default_model(), "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn active_model_openrouter() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "openrouter".to_string();
+        cfg.provider.openrouter.default_model = "anthropic/claude-opus-4".to_string();
+        assert_eq!(cfg.active_default_model(), "anthropic/claude-opus-4");
+    }
+
+    #[test]
+    fn active_model_unknown_falls_back_to_copilot_default() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "notareal".to_string();
+        // both nested and legacy are default "claude-sonnet-4" → returns nested
+        assert_eq!(cfg.active_default_model(), "claude-sonnet-4");
+    }
+
+    #[test]
+    fn legacy_default_copilot_model_honoured() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "copilot".to_string();
+        // nested still holds the default sentinel "claude-sonnet-4"
+        cfg.default_copilot_model = "old-gpt-4".to_string();
+        // nested == default && legacy != default → returns legacy
+        assert_eq!(cfg.active_default_model(), "old-gpt-4");
+    }
+
+    #[test]
+    fn nested_copilot_model_beats_legacy() {
+        let mut cfg = Config::default();
+        cfg.provider.active = "copilot".to_string();
+        cfg.provider.copilot.default_model = "claude-sonnet-4-6".to_string();
+        cfg.default_copilot_model = "old-gpt-4".to_string();
+        // nested != default → nested wins regardless of legacy
+        assert_eq!(cfg.active_default_model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn lsp_server_config_parse() {
+        let toml_str = r#"
+[[lsp.servers]]
+language = "rust"
+command  = "rust-analyzer"
+args     = ["--extra-arg"]
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.lsp.servers.len(), 1);
+        let server = &cfg.lsp.servers[0];
+        assert_eq!(server.language, "rust");
+        assert_eq!(server.command, "rust-analyzer");
+        assert_eq!(server.args, &["--extra-arg"]);
+    }
+
+    #[test]
+    fn mcp_server_stdio_parse() {
+        let toml_str = r#"
+[[mcp.servers]]
+name    = "filesystem"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mcp.servers.len(), 1);
+        let server = &cfg.mcp.servers[0];
+        assert_eq!(server.name, "filesystem");
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.args.len(), 3);
+        assert!(server.url.is_none());
+    }
+
+    #[test]
+    fn mcp_server_sse_parse() {
+        let toml_str = r#"
+[[mcp.servers]]
+name = "searxng"
+url  = "http://localhost:8080"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let server = &cfg.mcp.servers[0];
+        assert_eq!(server.name, "searxng");
+        assert_eq!(server.url.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(server.command, "");
+    }
+
+    #[test]
+    fn agent_hook_parse() {
+        let toml_str = r#"
+[[agent.hooks]]
+trigger = "on_save"
+glob    = "*.rs"
+prompt  = "check {file}"
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.agent.hooks.len(), 1);
+        let hook = &cfg.agent.hooks[0];
+        assert_eq!(hook.trigger, "on_save");
+        assert_eq!(hook.glob, "*.rs");
+        assert_eq!(hook.prompt, "check {file}");
+        assert!(!hook.enabled);
+    }
+
+    #[test]
+    fn agent_hook_enabled_defaults_true() {
+        let toml_str = r#"
+[[agent.hooks]]
+trigger = "on_save"
+glob    = "*"
+prompt  = "check"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.agent.hooks[0].enabled);
+    }
+}

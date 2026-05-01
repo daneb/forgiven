@@ -64,3 +64,50 @@ impl ChatProvider for OpenAiProvider {
         "OpenAI"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> OpenAiProvider {
+        OpenAiProvider {
+            api_key: "sk-openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+        }
+    }
+
+    #[test]
+    fn endpoint_appends_path() {
+        assert_eq!(provider().endpoint(), "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn base_url_override_reflected_in_endpoint() {
+        let p = OpenAiProvider {
+            api_key: "k".to_string(),
+            base_url: "https://MY.openai.azure.com/openai/deployments/gpt-4o".to_string(),
+        };
+        assert!(p.endpoint().ends_with("/chat/completions"));
+        assert!(p.endpoint().contains("azure.com"));
+    }
+
+    #[test]
+    fn requires_auth_true() {
+        assert!(provider().requires_auth());
+    }
+
+    #[test]
+    fn is_oauth_false() {
+        assert!(!provider().is_oauth());
+    }
+
+    #[test]
+    fn extra_headers_empty() {
+        assert!(provider().extra_headers().is_empty());
+    }
+
+    #[test]
+    fn api_key_returned() {
+        assert_eq!(provider().api_key(), "sk-openai");
+    }
+}
