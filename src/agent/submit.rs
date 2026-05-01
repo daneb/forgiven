@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use super::agentic_loop::agentic_loop;
 use super::models::fetch_models_for_provider;
 use super::project_tree::{build_project_tree, build_structural_map};
-use super::provider::ProviderKind;
+use super::provider::{ChatProvider as _, ProviderKind};
 use super::{
     append_session_start_record, AgentPanel, AgentStatus, ChatMessage, ContextBreakdown, Role,
     StreamEvent, SubmitCtx,
@@ -429,59 +429,12 @@ Tools:\n\
             )
         };
 
-        // For the Anthropic provider, split the system prompt into a stable
-        // prefix (preamble + structural map + tool_rules) and the volatile
-        // context_snippet so that the stable prefix is eligible for prompt
-        // caching.  Other providers (Copilot, OpenAI) cache automatically on
-        // the prefix — plain string content is correct for them.
-        let system_message = if self.provider == ProviderKind::Anthropic {
-            if let Some(ref _ctx) = context_snippet {
-                // Find where context_snippet starts in the assembled system
-                // string and split there.
-                let ctx_marker = "Currently open file";
-                if let Some(split_pos) = system.find(ctx_marker) {
-                    let stable = &system[..split_pos];
-                    let volatile = &system[split_pos..];
-                    serde_json::json!({
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": stable,
-                                "cache_control": { "type": "ephemeral" }
-                            },
-                            { "type": "text", "text": volatile }
-                        ]
-                    })
-                } else {
-                    // Couldn't find split point — cache the whole thing.
-                    serde_json::json!({
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": system,
-                                "cache_control": { "type": "ephemeral" }
-                            }
-                        ]
-                    })
-                }
-            } else {
-                // No context_snippet — entire system prompt is stable.
-                serde_json::json!({
-                    "role": "system",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": system,
-                            "cache_control": { "type": "ephemeral" }
-                        }
-                    ]
-                })
-            }
-        } else {
-            serde_json::json!({ "role": "system", "content": system })
-        };
+        // Format the system prompt for this provider's wire format.
+        // Anthropic splits into a cached stable prefix and a volatile context
+        // block (see provider/anthropic.rs).  All other providers use a plain
+        // {"role":"system","content":"..."} object.
+        let system_message =
+            provider_settings.format_system_message(&system, context_snippet.as_deref());
         let mut send_messages: Vec<serde_json::Value> = vec![system_message];
 
         // ── Token-aware history truncation with importance scoring ───────────

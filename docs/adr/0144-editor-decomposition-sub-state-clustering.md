@@ -201,3 +201,25 @@ type — *that* phase is the right place for new tests.
 | 3. ExplorerPopupState | Pending | — |
 | 4. SidecarState | Pending | — |
 | 5. RequestDispatcher | Pending | — |
+
+## Related: Phase 0 / C3 — ChatProvider trait (2026-05-01)
+
+Completed separately from the Editor decomposition phases above.
+
+`src/agent/provider/` now contains:
+- `ChatProvider` trait (object-safe, synchronous) with `impl` for `ProviderSettings`
+- Per-provider structs: `CopilotProvider`, `OllamaProvider`, `AnthropicProvider`,
+  `OpenAiProvider`, `GeminiProvider`, `OpenRouterProvider`
+- `make_provider()` factory + `BoxedProvider` type alias
+
+**Inline branches eliminated:**
+
+| File | Before | After |
+|---|---|---|
+| `agentic_loop.rs` | 2 `if provider.kind == X` header blocks (14 lines) | `provider.extra_headers()` |
+| `agentic_loop.rs` | `provider.kind == ProviderKind::Copilot` 401 check | `provider.is_oauth()` |
+| `submit.rs` | 48-line `if self.provider == Anthropic` block | `provider_settings.format_system_message()` |
+| `panel.rs` | 4-arm `match self.provider` in `ensure_token()` | `requires_auth()` + `is_oauth()` guards |
+
+**Not yet done (follow-up):** `AgentPanel.provider: ProviderKind` → `BoxedProvider`
+(requires migrating `editor/ai.rs` and `editor/mod.rs` which access the field directly).

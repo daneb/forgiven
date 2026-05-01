@@ -7,6 +7,13 @@
 //! four new providers share the same OpenAI-compatible SSE wire format, so the
 //! streaming parser and tool-calling loop are unchanged across all providers.
 
+mod anthropic;
+mod copilot;
+mod gemini;
+mod ollama;
+mod openai;
+mod openrouter;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider kind
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +130,12 @@ impl ProviderKind {
     /// Whether this provider requires a `Bearer` token in API requests.
     pub fn requires_auth(&self) -> bool {
         !matches!(self, Self::Ollama)
+    }
+
+    /// Whether this provider uses OAuth token exchange for authentication.
+    /// Only Copilot requires OAuth; all others use a static API key or no auth.
+    pub fn is_oauth(&self) -> bool {
+        matches!(self, Self::Copilot)
     }
 
     /// Whether to include `"stream_options": { "include_usage": true }` in chat
@@ -339,5 +352,178 @@ impl ProviderSettings {
     /// Delegate to `kind.max_retries()`.
     pub fn max_retries(&self) -> usize {
         self.kind.max_retries()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChatProvider trait
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Stateless per-provider dispatch. Object-safe (no async, no generics).
+///
+/// Implemented by both per-provider config structs (panel level, see
+/// `make_provider`) and by `ProviderSettings` (runtime snapshot passed into
+/// the agentic loop).  The latter allows `start_chat_stream_with_tools` to
+/// call `provider.extra_headers()` and `provider.display_name()` without
+/// knowing the concrete type.
+///
+/// Several trait methods (`endpoint`, `requires_auth`, `num_ctx`, etc.) are
+/// wired into `ProviderSettings` via identical inherent methods; those call
+/// sites do not yet route through the trait.  The `#[allow(dead_code)]` below
+/// suppresses the lint until `AgentPanel.provider` is migrated to
+/// `BoxedProvider` in the next step.
+#[allow(dead_code)]
+pub trait ChatProvider: Send + Sync {
+    /// Full URL for the `/chat/completions` endpoint.
+    fn endpoint(&self) -> String;
+    /// Provider-specific extra HTTP headers injected on every chat request.
+    /// Copilot adds four routing headers; OpenRouter adds Referer/Title metadata.
+    fn extra_headers(&self) -> Vec<(String, String)>;
+    /// Format the system prompt for this provider's wire format.
+    /// Anthropic splits into cached + volatile content blocks; all others return
+    /// a plain `{"role":"system","content":"..."}` JSON object.
+    fn format_system_message(&self, system: &str, context: Option<&str>) -> serde_json::Value;
+    /// Whether to include `Authorization: Bearer <token>` in API requests.
+    fn requires_auth(&self) -> bool;
+    /// Whether this provider uses OAuth token exchange rather than a static API key.
+    /// Only Copilot returns `true`.
+    fn is_oauth(&self) -> bool;
+    fn supports_tool_calls(&self) -> bool;
+    fn supports_stream_usage(&self) -> bool;
+    fn supports_planning_tools(&self) -> bool;
+    fn connect_timeout_secs(&self) -> u64;
+    fn chunk_timeout_secs(&self) -> u64;
+    fn max_retries(&self) -> usize;
+    /// Ollama KV-cache size override injected into `"options".num_ctx`.
+    /// `None` for all other providers.
+    fn num_ctx(&self) -> Option<u32>;
+    /// Static API key used in the `Authorization` header.
+    /// Empty for Copilot (uses OAuth-derived token) and Ollama (no auth).
+    fn api_key(&self) -> &str;
+    /// Short human-readable name for logging and UI labels.
+    fn display_name(&self) -> &str;
+}
+
+/// A heap-allocated, type-erased provider implementation.
+#[allow(dead_code)]
+pub type BoxedProvider = Box<dyn ChatProvider>;
+
+/// Build a `BoxedProvider` from config.  Called once at startup and again if
+/// the Copilot base URL changes after a token refresh.
+#[allow(dead_code)]
+pub fn make_provider(
+    kind: ProviderKind,
+    config: &ProviderConfig,
+    copilot_api_base: &str,
+) -> BoxedProvider {
+    match kind {
+        ProviderKind::Copilot => {
+            Box::new(copilot::CopilotProvider { api_base: copilot_api_base.to_owned() })
+        },
+        ProviderKind::Ollama => Box::new(ollama::OllamaProvider {
+            base_url: config.ollama_base_url.clone(),
+            context_length: config.ollama_context_length,
+            tool_calls: config.ollama_tool_calls,
+            planning_tools: config.ollama_planning_tools,
+        }),
+        ProviderKind::Anthropic => {
+            Box::new(anthropic::AnthropicProvider { api_key: config.api_key.clone() })
+        },
+        ProviderKind::OpenAi => Box::new(openai::OpenAiProvider {
+            api_key: config.api_key.clone(),
+            base_url: config.openai_base_url.clone(),
+        }),
+        ProviderKind::Gemini => {
+            Box::new(gemini::GeminiProvider { api_key: config.api_key.clone() })
+        },
+        ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterProvider {
+            api_key: config.api_key.clone(),
+            site_url: config.openrouter_site_url.clone(),
+            app_name: config.openrouter_app_name.clone(),
+        }),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// impl ChatProvider for ProviderSettings
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl ChatProvider for ProviderSettings {
+    fn endpoint(&self) -> String {
+        self.chat_endpoint.clone()
+    }
+
+    fn extra_headers(&self) -> Vec<(String, String)> {
+        match self.kind {
+            ProviderKind::Copilot => vec![
+                ("Copilot-Integration-Id".to_string(), "vscode-chat".to_string()),
+                ("editor-version".to_string(), "forgiven/0.1.0".to_string()),
+                ("editor-plugin-version".to_string(), "forgiven-copilot/0.1.0".to_string()),
+                ("openai-intent".to_string(), "conversation-panel".to_string()),
+            ],
+            ProviderKind::OpenRouter => {
+                let mut headers = Vec::new();
+                if !self.openrouter_site_url.is_empty() {
+                    headers.push(("HTTP-Referer".to_string(), self.openrouter_site_url.clone()));
+                }
+                if !self.openrouter_app_name.is_empty() {
+                    headers.push(("X-Title".to_string(), self.openrouter_app_name.clone()));
+                }
+                headers
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    fn format_system_message(&self, system: &str, context: Option<&str>) -> serde_json::Value {
+        if self.kind == ProviderKind::Anthropic {
+            anthropic::format_anthropic_system_message(system, context)
+        } else {
+            serde_json::json!({ "role": "system", "content": system })
+        }
+    }
+
+    fn requires_auth(&self) -> bool {
+        self.kind.requires_auth()
+    }
+
+    fn is_oauth(&self) -> bool {
+        self.kind.is_oauth()
+    }
+
+    fn supports_tool_calls(&self) -> bool {
+        self.supports_tool_calls
+    }
+
+    fn supports_stream_usage(&self) -> bool {
+        self.kind.supports_stream_usage()
+    }
+
+    fn supports_planning_tools(&self) -> bool {
+        self.planning_tools
+    }
+
+    fn connect_timeout_secs(&self) -> u64 {
+        self.kind.connect_timeout_secs()
+    }
+
+    fn chunk_timeout_secs(&self) -> u64 {
+        self.kind.chunk_timeout_secs()
+    }
+
+    fn max_retries(&self) -> usize {
+        self.kind.max_retries()
+    }
+
+    fn num_ctx(&self) -> Option<u32> {
+        self.num_ctx
+    }
+
+    fn api_key(&self) -> &str {
+        &self.api_token
+    }
+
+    fn display_name(&self) -> &str {
+        self.kind.display_name()
     }
 }

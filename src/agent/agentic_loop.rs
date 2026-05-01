@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::mcp::McpManager;
 
 use super::auth::{exchange_token, load_oauth_token, TokenExpiredError};
-use super::provider::{ProviderKind, ProviderSettings};
+use super::provider::{ChatProvider as _, ProviderSettings};
 use super::streaming::{parse_sse_stream, StreamOutcome};
 use super::tool_dispatch::{dispatch_tools, DispatchOutcome};
 use super::tools;
@@ -67,14 +67,14 @@ pub(super) async fn agentic_loop(
             }
             info!(
                 "Agentic loop: planning tools disabled for {} (planning_tools = false)",
-                provider.kind.display_name()
+                provider.display_name()
             );
         }
         defs
     } else {
         info!(
             "Agentic loop: tool calling disabled for {} — running in chat-only mode",
-            provider.kind.display_name()
+            provider.display_name()
         );
         serde_json::Value::Array(vec![])
     });
@@ -151,7 +151,7 @@ pub(super) async fn agentic_loop(
         // call.  A second 401 after a fresh token means a genuine auth failure.
         // Ollama uses no auth so it never returns TokenExpiredError.
         let api_result = match api_result {
-            Err(ref e) if e.is::<TokenExpiredError>() && provider.kind == ProviderKind::Copilot => {
+            Err(ref e) if e.is::<TokenExpiredError>() && provider.is_oauth() => {
                 warn!("API token expired mid-session — refreshing and retrying this round");
                 match load_oauth_token() {
                     Ok(oauth) => match exchange_token(&oauth).await {
@@ -293,10 +293,7 @@ pub(super) async fn start_chat_stream_with_tools(
     model_id: &str,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<reqwest::Response> {
-    info!(
-        "Sending completion request model={model_id:?} provider={}",
-        provider.kind.display_name()
-    );
+    info!("Sending completion request model={model_id:?} provider={}", provider.display_name());
 
     // ── Build request body ────────────────────────────────────────────────────
     let mut body = serde_json::json!({
@@ -350,28 +347,16 @@ pub(super) async fn start_chat_stream_with_tools(
             req = req.header("Authorization", format!("Bearer {}", provider.api_token));
         }
 
-        // Copilot routing hints — unknown to Ollama and harmless to omit.
-        if provider.kind == ProviderKind::Copilot {
-            req = req
-                .header("Copilot-Integration-Id", "vscode-chat")
-                .header("editor-version", "forgiven/0.1.0")
-                .header("editor-plugin-version", "forgiven-copilot/0.1.0")
-                .header("openai-intent", "conversation-panel");
-        }
-        if provider.kind == ProviderKind::OpenRouter {
-            if !provider.openrouter_site_url.is_empty() {
-                req = req.header("HTTP-Referer", &provider.openrouter_site_url);
-            }
-            if !provider.openrouter_app_name.is_empty() {
-                req = req.header("X-Title", &provider.openrouter_app_name);
-            }
+        // Provider-specific routing headers (Copilot) and metadata headers (OpenRouter).
+        for (k, v) in provider.extra_headers() {
+            req = req.header(k, v);
         }
 
         let resp = req.json(&body).send().await;
 
         let failure_reason = match resp {
             Ok(response) if response.status().is_success() => {
-                info!("{} stream started ({})", provider.kind.display_name(), response.status());
+                info!("{} stream started ({})", provider.display_name(), response.status());
                 return Ok(response);
             },
             Ok(response) => {
@@ -396,7 +381,7 @@ pub(super) async fn start_chat_stream_with_tools(
                         return Err(anyhow::anyhow!(
                             "{} rate limit: quota exhausted (Retry-After: {}s). \
                              Try again later or switch models with Ctrl+T.",
-                            provider.kind.display_name(),
+                            provider.display_name(),
                             retry_after_secs.unwrap_or(0)
                         ));
                     }
@@ -415,7 +400,7 @@ pub(super) async fn start_chat_stream_with_tools(
                     if retry_attempts >= max_retries {
                         return Err(anyhow::anyhow!(
                             "Max retries reached for {} (last error: HTTP 429 Too Many Requests)",
-                            provider.kind.display_name()
+                            provider.display_name()
                         ));
                     }
                     delay *= 2;
@@ -426,7 +411,7 @@ pub(super) async fn start_chat_stream_with_tools(
                 if status.is_client_error() {
                     return Err(anyhow::anyhow!(
                         "{} API error ({status}): {body_text}",
-                        provider.kind.display_name()
+                        provider.display_name()
                     ));
                 }
                 warn!("Retrying due to API error ({status}): {body_text}");
@@ -442,7 +427,7 @@ pub(super) async fn start_chat_stream_with_tools(
         if retry_attempts >= max_retries {
             return Err(anyhow::anyhow!(
                 "Max retries reached for {} (last error: {failure_reason})",
-                provider.kind.display_name()
+                provider.display_name()
             ));
         }
 

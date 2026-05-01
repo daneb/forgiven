@@ -761,35 +761,32 @@ impl AgentPanel {
     }
 
     pub(super) async fn ensure_token(&mut self) -> Result<String> {
-        match self.provider {
-            ProviderKind::Ollama => {
-                // No authentication needed.
-                Ok(String::new())
-            },
-            ProviderKind::Anthropic
-            | ProviderKind::OpenAi
-            | ProviderKind::Gemini
-            | ProviderKind::OpenRouter => Ok(self.provider_config.api_key.clone()),
-            ProviderKind::Copilot => {
-                if let Some(ref t) = self.token {
-                    if !t.is_expired() {
-                        info!("Using cached token, expires at: {}", t.expires_at);
-                        return Ok(t.token.clone());
-                    } else {
-                        warn!("Cached token expired, refreshing...");
-                    }
-                }
-                info!("Refreshing Copilot API token");
-                let oauth = load_oauth_token()?;
-                let api_token = exchange_token(&oauth).await?;
-                let tok = api_token.token.clone();
-                if let Some(ref url) = api_token.business_api_url {
-                    self.copilot_api_base = url.clone();
-                }
-                self.token = Some(api_token);
-                self.copilot_quota = crate::agent::auth::fetch_copilot_quota(&oauth).await;
-                Ok(tok)
-            },
+        if !self.provider.requires_auth() {
+            // Ollama: no authentication needed.
+            return Ok(String::new());
         }
+        if !self.provider.is_oauth() {
+            // Anthropic / OpenAI / Gemini / OpenRouter: static API key.
+            return Ok(self.provider_config.api_key.clone());
+        }
+        // Copilot: OAuth token exchange with caching and automatic refresh.
+        if let Some(ref t) = self.token {
+            if !t.is_expired() {
+                info!("Using cached token, expires at: {}", t.expires_at);
+                return Ok(t.token.clone());
+            } else {
+                warn!("Cached token expired, refreshing...");
+            }
+        }
+        info!("Refreshing Copilot API token");
+        let oauth = load_oauth_token()?;
+        let api_token = exchange_token(&oauth).await?;
+        let tok = api_token.token.clone();
+        if let Some(ref url) = api_token.business_api_url {
+            self.copilot_api_base = url.clone();
+        }
+        self.token = Some(api_token);
+        self.copilot_quota = crate::agent::auth::fetch_copilot_quota(&oauth).await;
+        Ok(tok)
     }
 }
