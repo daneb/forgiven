@@ -246,6 +246,16 @@ pub struct Editor {
     /// In-flight `:insights summarize` LLM task. Polled each tick.
     insights_narrative_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
 
+    // ── Debt dashboard (welcome screen) ──────────────────────────────────────
+    /// In-flight static+structural debt analysis. Polled each tick.
+    pub(crate) debt_rx: Option<oneshot::Receiver<crate::debt::DebtReport>>,
+    /// Computed debt metrics shown on the welcome screen.
+    pub(crate) debt_report: Option<crate::debt::DebtReport>,
+    /// In-flight Ollama narrative for the debt dashboard. Polled each tick.
+    pub(crate) debt_narrative_rx: Option<oneshot::Receiver<Option<String>>>,
+    /// Cached qualitative narrative text from the LLM.
+    pub(crate) debt_narrative: Option<String>,
+
     // ── MCP servers ───────────────────────────────────────────────────────────
     /// Manages connected MCP servers and their tool registries.
     /// Set once the background connection task completes (see `mcp_rx`).
@@ -449,6 +459,10 @@ impl Editor {
                 ..Default::default()
             },
             insights_narrative_rx: None,
+            debt_rx: None,
+            debt_report: None,
+            debt_narrative_rx: None,
+            debt_narrative: None,
             mcp_manager: None,
             mcp_rx: None,
             file_watcher: None,

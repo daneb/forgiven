@@ -457,6 +457,36 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Debt dashboard metrics poll ───────────────────────────────────
+            if let Some(rx) = self.debt_rx.as_mut() {
+                if let Ok(report) = rx.try_recv() {
+                    self.debt_rx = None;
+                    // If Ollama is configured, kick off the narrative in the background.
+                    if self.config.provider.ollama.default_model != "none" {
+                        let base_url = self.config.provider.ollama.base_url.clone();
+                        let model = self.config.provider.ollama.default_model.clone();
+                        let rpt = report.clone();
+                        let (ntx, nrx) = oneshot::channel();
+                        tokio::spawn(async move {
+                            let narrative =
+                                crate::debt::generate_narrative(&rpt, &base_url, &model).await;
+                            let _ = ntx.send(narrative);
+                        });
+                        self.debt_narrative_rx = Some(nrx);
+                    }
+                    self.debt_report = Some(report);
+                    needs_render = true;
+                }
+            }
+            if let Some(rx) = self.debt_narrative_rx.as_mut() {
+                if let Ok(narrative) = rx.try_recv() {
+                    self.debt_narrative_rx = None;
+                    self.debt_narrative = narrative;
+                    needs_render = true;
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             // ── MCP background connection poll ────────────────────────────────
             if let Some(rx) = self.mcp_rx.as_mut() {
                 if let Ok(manager) = rx.try_recv() {

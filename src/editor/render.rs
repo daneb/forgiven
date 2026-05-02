@@ -661,6 +661,8 @@ impl Editor {
                 },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
+                debt_report: self.debt_report.as_ref(),
+                debt_narrative: self.debt_narrative.as_deref(),
             };
             UI::render(frame, &ctx);
         })?;

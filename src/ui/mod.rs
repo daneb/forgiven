@@ -249,6 +249,10 @@ pub struct RenderContext<'a> {
     pub soft_wrap: bool,
     /// Syntax highlighter — used for code blocks inside markdown rendering.
     pub highlighter: &'a crate::highlight::Highlighter,
+    /// Debt metrics for the welcome-screen dashboard; `None` while loading.
+    pub debt_report: Option<&'a crate::debt::DebtReport>,
+    /// Qualitative LLM narrative for the debt dashboard; `None` until Ollama responds.
+    pub debt_narrative: Option<&'a str>,
 }
 
 /// UI rendering for the editor
@@ -425,6 +429,8 @@ impl UI {
                 None,
                 None,
                 soft_wrap,
+                None,
+                None,
             );
 
             // Draw vertical separator
@@ -447,6 +453,8 @@ impl UI {
                 None,
                 None,
                 soft_wrap,
+                None,
+                None,
             );
         } else {
             Self::render_buffer(
@@ -463,6 +471,8 @@ impl UI {
                 fold_data,
                 sticky_header,
                 soft_wrap,
+                ctx.debt_report,
+                ctx.debt_narrative,
             );
         }
 

@@ -23,6 +23,8 @@ impl UI {
         fold_data: Option<&FoldData>,
         sticky_header: Option<&str>,
         soft_wrap: bool,
+        debt_report: Option<&crate::debt::DebtReport>,
+        debt_narrative: Option<&str>,
     ) {
         // ── Markdown preview mode — render pre-computed lines directly ─────────
         if let Some(md_lines) = preview_lines {
@@ -250,7 +252,7 @@ impl UI {
             }
         } else {
             // No buffer open — show the welcome screen.
-            Self::render_welcome(frame, area, startup_elapsed);
+            Self::render_welcome(frame, area, startup_elapsed, debt_report, debt_narrative);
         }
     }
 
@@ -259,6 +261,8 @@ impl UI {
         frame: &mut Frame,
         area: Rect,
         startup_elapsed: Option<std::time::Duration>,
+        debt_report: Option<&crate::debt::DebtReport>,
+        debt_narrative: Option<&str>,
     ) {
         #[rustfmt::skip]
         const CROSS: &[&str] = &[
@@ -283,28 +287,47 @@ impl UI {
         ];
         const TAGLINE: &str = "an AI-first terminal code editor  ·  MIT License";
         const HINTS: &str = "SPC f f  open file    SPC e e  explorer    SPC a a  agent";
-        // Width of the widest logo line (WORDMARK row 1 = 64 display columns).
         const LOGO_W: usize = 64;
 
-        let area_h = area.height as usize;
         let area_w = area.width as usize;
 
-        // Total logo height: cross + blank + wordmark + blank + tagline + blank + hints [+ blank + ready].
-        let logo_h = CROSS.len()
+        // Decide vertical layout: logo block + optional debt block below.
+        let debt_visible = debt_report.is_some();
+        // Debt block: 1 blank + 1 header-separator + 3 data rows (per column) + optional narrative.
+        let narrative_rows: u16 = if debt_narrative.is_some() { 3 } else { 0 };
+        let debt_block_h: u16 = if debt_visible { 6 + narrative_rows } else { 0 };
+
+        let logo_h = (CROSS.len()
             + 1
             + WORDMARK.len()
             + 1
             + 1
             + 1
             + 1
-            + if startup_elapsed.is_some() { 2 } else { 0 };
-        let top_pad = area_h.saturating_sub(logo_h) / 2;
+            + if startup_elapsed.is_some() { 2 } else { 0 }) as u16;
+
+        let (logo_area, debt_area) = if debt_visible && area.height > logo_h + debt_block_h + 2 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(area.height - debt_block_h),
+                    Constraint::Length(debt_block_h),
+                ])
+                .split(area);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (area, None)
+        };
+
+        // ── Logo block (unchanged) ────────────────────────────────────────────
+        let logo_area_h = logo_area.height as usize;
         let left_pad = area_w.saturating_sub(LOGO_W) / 2;
 
         let cross_style = Style::default().fg(Color::Yellow);
         let word_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
         let dim_style = Style::default().fg(Color::DarkGray);
 
+        let top_pad = logo_area_h.saturating_sub(logo_h as usize) / 2;
         let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
 
         for s in CROSS {
@@ -344,7 +367,163 @@ impl UI {
             )));
         }
 
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines), logo_area);
+
+        // ── Debt dashboard ────────────────────────────────────────────────────
+        if let (Some(da), Some(report)) = (debt_area, debt_report) {
+            Self::render_debt_dashboard(frame, da, report, debt_narrative);
+        }
+    }
+
+    /// Three-column debt dashboard rendered below the logo.
+    fn render_debt_dashboard(
+        frame: &mut Frame,
+        area: Rect,
+        report: &crate::debt::DebtReport,
+        narrative: Option<&str>,
+    ) {
+        let dim = Style::default().fg(Color::DarkGray);
+        let accent = Style::default().fg(Color::White);
+        let warn = Style::default().fg(Color::Yellow);
+
+        // Split vertically: separator line + columns + optional narrative
+        let narrative_h: u16 = if narrative.is_some() { 3 } else { 0 };
+        let col_h = area.height.saturating_sub(narrative_h);
+
+        let (col_area, narrative_area) = if narrative.is_some() {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(col_h), Constraint::Length(narrative_h)])
+                .split(area);
+            (rows[0], Some(rows[1]))
+        } else {
+            (area, None)
+        };
+
+        // Three equal columns
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+            ])
+            .split(col_area);
+
+        // ── Intent column ─────────────────────────────────────────────────────
+        let impl_pct = (report.intent.implementation_rate() * 100.0).round() as u32;
+        let intent_title = Line::from(Span::styled("  intent debt", dim));
+        let mut intent_lines = vec![
+            intent_title,
+            Line::from(Span::styled(
+                format!("  {impl_pct}% of ADRs implemented"),
+                if impl_pct >= 90 { accent } else { warn },
+            )),
+        ];
+        if report.intent.accepted_pending > 0 {
+            intent_lines.push(Line::from(Span::styled(
+                format!("  {} accepted, unbuilt", report.intent.accepted_pending),
+                dim,
+            )));
+        }
+        if report.intent.stale_count > 0 {
+            intent_lines.push(Line::from(Span::styled(
+                format!("  {} stale (>18 mo)", report.intent.stale_count),
+                dim,
+            )));
+        }
+        if report.intent.accepted_pending == 0 && report.intent.stale_count == 0 {
+            intent_lines.push(Line::from(Span::styled("  \u{2713} all decisions current", dim)));
+        }
+        intent_lines.push(Line::from(Span::styled(
+            format!("  velocity: {} / 6 mo", report.intent.recent_velocity),
+            dim,
+        )));
+        frame.render_widget(Paragraph::new(intent_lines).block(Block::default()), cols[0]);
+
+        // ── Technical column ──────────────────────────────────────────────────
+        let tech_title = Line::from(Span::styled("  technical debt", dim));
+        let mut tech_lines = vec![tech_title];
+        if report.technical.high_complexity_fns > 0 {
+            tech_lines.push(Line::from(Span::styled(
+                format!("  {} high-complexity fns", report.technical.high_complexity_fns),
+                warn,
+            )));
+            if let Some(site) = report.technical.worst_complexity_sites.first() {
+                let truncated = if site.len() > 28 { &site[..28] } else { site };
+                tech_lines.push(Line::from(Span::styled(format!("  \u{21b3} {truncated}"), dim)));
+            }
+        } else {
+            tech_lines.push(Line::from(Span::styled("  \u{2713} no complex fns", dim)));
+        }
+        let marker_sum = report.technical.todo_macros + report.technical.unwraps_outside_tests;
+        if marker_sum > 0 {
+            tech_lines.push(Line::from(Span::styled(
+                format!("  {} todo!/unwrap() markers", marker_sum),
+                dim,
+            )));
+        }
+        if report.technical.dead_code_suppressed > 0 {
+            tech_lines.push(Line::from(Span::styled(
+                format!("  {} dead_code suppressed", report.technical.dead_code_suppressed),
+                dim,
+            )));
+        }
+        frame.render_widget(Paragraph::new(tech_lines).block(Block::default()), cols[1]);
+
+        // ── Cognitive column ──────────────────────────────────────────────────
+        let cog_title = Line::from(Span::styled("  cognitive debt", dim));
+        let mut cog_lines = vec![cog_title];
+
+        if report.cognitive.has_git_data {
+            let pct = report.cognitive.active_surface_pct.round() as u32;
+            cog_lines.push(Line::from(Span::styled(
+                format!("  {pct}% active (last 30d)"),
+                if pct >= 50 { accent } else { warn },
+            )));
+            if !report.cognitive.stale_modules.is_empty() {
+                cog_lines.push(Line::from(Span::styled(
+                    format!("  stale: {}", report.cognitive.stale_modules.join(", ")),
+                    dim,
+                )));
+            }
+            if report.cognitive.reentry_risk_count > 0 {
+                cog_lines.push(Line::from(Span::styled(
+                    format!("  {} re-entry risk fns", report.cognitive.reentry_risk_count),
+                    warn,
+                )));
+            }
+        } else {
+            cog_lines.push(Line::from(Span::styled("  no git data", dim)));
+        }
+
+        if !report.cognitive.error_hotspots.is_empty() {
+            cog_lines.push(Line::from(Span::styled(
+                format!("  errors: {}", report.cognitive.error_hotspots.join(" ")),
+                dim,
+            )));
+        } else if report.cognitive.has_session_data {
+            cog_lines.push(Line::from(Span::styled("  \u{2713} no tool error spikes", dim)));
+        }
+
+        frame.render_widget(Paragraph::new(cog_lines).block(Block::default()), cols[2]);
+
+        // ── Narrative ─────────────────────────────────────────────────────────
+        if let (Some(na), Some(text)) = (narrative_area, narrative) {
+            let wrap_width = na.width.saturating_sub(4) as usize;
+            let wrapped = word_wrap(text, wrap_width.max(20));
+            let narrative_lines: Vec<Line> = wrapped
+                .into_iter()
+                .take(narrative_h as usize)
+                .map(|l| {
+                    Line::from(Span::styled(
+                        format!("  {l}"),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(narrative_lines), na);
+        }
     }
 
     /// Render a pre-highlighted line (from syntect) with gutter marker, optional selection
@@ -552,4 +731,27 @@ impl UI {
             Line::from(line_spans)
         }
     }
+}
+
+/// Wrap `text` to lines of at most `width` chars, splitting on whitespace.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.len() + 1 + word.len() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    lines
 }
