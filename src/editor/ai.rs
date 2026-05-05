@@ -705,8 +705,6 @@ impl Editor {
             let opener = "open";
             #[cfg(target_os = "linux")]
             let opener = "xdg-open";
-            #[cfg(target_os = "windows")]
-            let opener = "explorer";
             match std::process::Command::new(opener).arg(&path).spawn() {
                 Ok(_) => self.set_status(format!("Opened {file_stem}.html in browser")),
                 Err(e) => self.set_status(format!("Failed to open browser: {e}")),
@@ -830,8 +828,6 @@ impl Editor {
         let opener = "open";
         #[cfg(target_os = "linux")]
         let opener = "xdg-open";
-        #[cfg(target_os = "windows")]
-        let opener = "explorer";
 
         match std::process::Command::new(opener).arg(&path).spawn() {
             Ok(_) => self.set_status(format!("Opened in browser: {}", path.display())),
@@ -907,8 +903,6 @@ impl Editor {
         let opener = "open";
         #[cfg(target_os = "linux")]
         let opener = "xdg-open";
-        #[cfg(target_os = "windows")]
-        let opener = "explorer";
 
         match std::process::Command::new(opener).arg(&path).spawn() {
             Ok(_) => self.set_status(format!(

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::path::PathBuf;
 
 use tokio::io::AsyncWriteExt as _;

@@ -576,8 +576,6 @@ impl Editor {
                                 .collect::<String>(),
                         )
                     };
-                    #[cfg(not(unix))]
-                    let permissions: Option<String> = None;
                     crate::ui::FileInfoData {
                         is_dir: meta.is_dir(),
                         size_bytes: if meta.is_file() { Some(meta.len()) } else { None },

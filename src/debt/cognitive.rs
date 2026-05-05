@@ -135,7 +135,7 @@ fn reentry_risk(src_dir: &Path, recently_touched: &HashSet<PathBuf>) -> (usize, 
         }
     }
 
-    sites.sort_by(|a, b| b.0.cmp(&a.0));
+    sites.sort_by_key(|b| std::cmp::Reverse(b.0));
     let count = sites.len();
     let top: Vec<String> = sites.into_iter().take(REENTRY_RISK_SHOWN).map(|(_, l)| l).collect();
     (count, top)
@@ -174,7 +174,7 @@ fn tool_error_hotspots() -> (Vec<String>, bool) {
     }
 
     let mut ranked: Vec<(usize, String)> = counts.into_iter().map(|(k, v)| (v, k)).collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.0));
     let hotspots: Vec<String> = ranked
         .into_iter()
         .take(ERROR_HOTSPOT_SHOWN)

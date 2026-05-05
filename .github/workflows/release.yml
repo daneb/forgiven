@@ -81,37 +81,10 @@ jobs:
           name: linux-x86_64
           path: forgiven-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
 
-  # ── Windows x86_64 (MSVC) ─────────────────────────────────────────────────
-  build-windows:
-    name: Build (Windows x86_64)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry / build artefacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build (release)
-        run: cargo build --release
-
-      - name: Package
-        run: |
-          Compress-Archive `
-            -Path target\release\forgiven.exe `
-            -DestinationPath forgiven-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-x86_64
-          path: forgiven-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
-
   # ── Publish GitHub Release ────────────────────────────────────────────────
   release:
     name: Create GitHub Release
-    needs: [build-macos, build-linux, build-windows]
+    needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -157,4 +130,3 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/forgiven-*.tar.gz
-            dist/forgiven-*.zip

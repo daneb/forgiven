@@ -1,3 +1,6 @@
+#[cfg(windows)]
+compile_error!("Windows is not supported — build on macOS or Linux.");
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::collections::VecDeque;
@@ -69,6 +72,7 @@ mod lsp;
 mod markdown;
 mod mcp;
 mod search;
+#[cfg(unix)]
 mod sidecar;
 mod spec_framework;
 mod treesitter;

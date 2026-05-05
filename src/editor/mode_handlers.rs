@@ -222,14 +222,14 @@ impl Editor {
     pub(super) fn handle_binary_file_mode(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('o') => {
-                if let Some(ref path) = self.binary_file_path {
+                if let Some(ref _path) = self.binary_file_path {
                     #[cfg(target_os = "macos")]
                     {
-                        std::process::Command::new("open").arg(path).spawn().ok();
+                        std::process::Command::new("open").arg(_path).spawn().ok();
                     }
                     #[cfg(target_os = "linux")]
                     {
-                        std::process::Command::new("xdg-open").arg(path).spawn().ok();
+                        std::process::Command::new("xdg-open").arg(_path).spawn().ok();
                     }
                     self.set_status("Opened in default app".to_string());
                 }

@@ -290,6 +290,7 @@ pub struct Editor {
 
     // ── Nexus sidecar IPC (Phase 3 — Hybrid Reliability) ─────────────────────
     /// UDS server broadcasting buffer/cursor/mode events to the Tauri sidecar.
+    #[cfg(unix)]
     sidecar: Option<crate::sidecar::SidecarServer>,
     /// Debounce timestamp for buffer-update events (set on every edit, flushed
     /// after SIDECAR_DEBOUNCE_MS elapses without a further edit).
@@ -473,6 +474,7 @@ impl Editor {
             )),
             startup_elapsed: None,
             config,
+            #[cfg(unix)]
             sidecar: None,
             last_sidecar_send: None,
             sidecar_last_cursor_line: None,
@@ -734,17 +736,19 @@ impl Editor {
         }
 
         // ── Nexus sidecar UDS listener ────────────────────────────────────────
-        let socket_path = crate::sidecar::SidecarServer::socket_path();
-        match crate::sidecar::SidecarServer::bind(&socket_path).await {
-            Ok(server) => {
-                tracing::info!("Nexus UDS listening at {:?}", socket_path);
-                self.sidecar = Some(server);
-            },
-            Err(e) => tracing::warn!("Nexus sidecar unavailable: {e}"),
-        }
-
-        if self.config.sidecar.auto_launch {
-            self.spawn_companion();
+        #[cfg(unix)]
+        {
+            let socket_path = crate::sidecar::SidecarServer::socket_path();
+            match crate::sidecar::SidecarServer::bind(&socket_path).await {
+                Ok(server) => {
+                    tracing::info!("Nexus UDS listening at {:?}", socket_path);
+                    self.sidecar = Some(server);
+                },
+                Err(e) => tracing::warn!("Nexus sidecar unavailable: {e}"),
+            }
+            if self.config.sidecar.auto_launch {
+                self.spawn_companion();
+            }
         }
     }
 
@@ -838,6 +842,7 @@ impl Editor {
     /// Clean up terminal state before exit
     fn cleanup(&mut self) -> Result<()> {
         // Notify the sidecar that the editor is exiting before tearing down the socket.
+        #[cfg(unix)]
         if let Some(ref s) = self.sidecar {
             s.send(crate::sidecar::NexusEvent::shutdown());
         }
@@ -859,6 +864,7 @@ impl Editor {
     /// 1. `config.sidecar.binary_path` — explicit user override
     /// 2. Directory of the running forgiven executable — works after `make install`
     /// 3. `forgiven-companion` on `$PATH` — fallback for custom setups
+    #[cfg(unix)]
     pub(crate) fn spawn_companion(&mut self) {
         let socket_path = crate::sidecar::SidecarServer::socket_path();
         let binary = self.resolve_companion_binary();
@@ -878,6 +884,9 @@ impl Editor {
             },
         }
     }
+
+    #[cfg(not(unix))]
+    pub(crate) fn spawn_companion(&mut self) {}
 
     /// Resolve the companion binary path using the three-level lookup.
     fn resolve_companion_binary(&self) -> String {
@@ -911,6 +920,7 @@ impl Editor {
     ///
     /// Called once per event-loop tick. Debouncing mirrors the 300 ms completion
     /// debounce so rapid typing coalesces into a single buffer_update.
+    #[cfg(unix)]
     pub(crate) fn flush_sidecar_events(&mut self) {
         const DEBOUNCE_MS: u128 = 300;
 
@@ -969,6 +979,9 @@ impl Editor {
             }
         }
     }
+
+    #[cfg(not(unix))]
+    pub(crate) fn flush_sidecar_events(&mut self) {}
 }
 
 impl Drop for Editor {

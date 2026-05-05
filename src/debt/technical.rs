@@ -91,7 +91,7 @@ pub fn analyse(src_dir: &Path) -> TechnicalDebt {
     }
 
     // Worst-N sites sorted by score descending
-    complexity_sites.sort_by(|a, b| b.0.cmp(&a.0));
+    complexity_sites.sort_by_key(|b| std::cmp::Reverse(b.0));
     debt.worst_complexity_sites =
         complexity_sites.into_iter().take(WORST_SITES_SHOWN).map(|(_, label)| label).collect();
 
