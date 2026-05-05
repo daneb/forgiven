@@ -153,6 +153,8 @@ that motivated it, what was decided, and the consequences.
 | [0143](0143-companion-hyperlinks-and-images.md) | Companion: Hyperlink and Image Support | Implemented |
 | [0144](0144-editor-decomposition-sub-state-clustering.md) | Editor Decomposition: Sub-State Clustering and Request Multiplexing | Phase 1 Implemented |
 | [0145](0145-deepseek-and-lmstudio-providers.md) | DeepSeek and LM Studio Providers | Accepted |
+| [0146](0146-debt-dashboard-welcome-screen.md) | Debt Dashboard on the Welcome Screen | Implemented |
+| [0147](0147-drop-windows-support.md) | Drop Windows Support | Accepted |
 
 ## What is an ADR?
 
