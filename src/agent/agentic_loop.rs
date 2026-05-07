@@ -369,10 +369,22 @@ pub(super) async fn start_chat_stream_with_tools(
                     .and_then(|s| s.parse::<u64>().ok());
                 let body_text = response.text().await.unwrap_or_default();
 
-                // 401 — short-lived API token expired; caller will refresh and retry.
-                // (Only relevant for Copilot; Ollama never sends 401.)
+                // 401 — token expired (Copilot) or bad API key (other providers).
                 if status.as_u16() == 401 {
-                    return Err(anyhow::Error::new(TokenExpiredError));
+                    if provider.is_oauth() {
+                        return Err(anyhow::Error::new(TokenExpiredError));
+                    }
+                    if provider.requires_auth() {
+                        return Err(anyhow::anyhow!(
+                            "{} authentication failed (401). Check your API key.",
+                            provider.display_name()
+                        ));
+                    }
+                    return Err(anyhow::anyhow!(
+                        "{} returned 401 — the server may require authentication or be \
+                         misconfigured. Body: {body_text}",
+                        provider.display_name()
+                    ));
                 }
 
                 if status.as_u16() == 429 {

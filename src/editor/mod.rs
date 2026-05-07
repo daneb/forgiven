@@ -397,6 +397,9 @@ impl Editor {
                         .clone()
                         .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
                     lmstudio_base_url: config.provider.lmstudio.base_url.clone(),
+                    lmstudio_api_key: crate::agent::provider::resolve_api_key(
+                        &config.provider.lmstudio.api_key,
+                    ),
                     lmstudio_tool_calls: config.provider.lmstudio.tool_calls,
                     lmstudio_planning_tools: config.provider.lmstudio.planning_tools,
                 };

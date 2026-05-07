@@ -694,7 +694,7 @@ impl Editor {
                 let was_empty = self.agent_panel.available_models.is_empty();
                 if was_empty {
                     self.set_status("Loading model list…".to_string());
-                    let preferred = self.config.default_copilot_model.clone();
+                    let preferred = self.config.active_default_model().to_string();
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
                             if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
@@ -708,7 +708,7 @@ impl Editor {
                     self.agent_panel.cycle_model();
                     let model_id = self.agent_panel.selected_model_id().to_string();
                     let model_name = self.agent_panel.selected_model_display().to_string();
-                    self.config.default_copilot_model = model_id.clone();
+                    self.config.set_active_default_model(&model_id);
                     if let Err(e) = self.config.save() {
                         tracing::warn!("Failed to save config: {e}");
                     }
@@ -726,7 +726,7 @@ impl Editor {
             // Ctrl+Shift+T — refresh model list from API (picks up new releases).
             KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.set_status("Refreshing model list from API…".to_string());
-                let preferred = self.config.default_copilot_model.clone();
+                let preferred = self.config.active_default_model().to_string();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         if let Err(e) = self.agent_panel.refresh_models(&preferred).await {

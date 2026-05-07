@@ -317,6 +317,11 @@ pub struct LmStudioProviderConfig {
     /// Preferred model ID — must match the model currently loaded in LM Studio.
     #[serde(default)]
     pub default_model: String,
+    /// API token — LM Studio ≥0.3.0 requires `Authorization: Bearer <token>`.
+    /// Use `"$LM_API_TOKEN"` to read from the environment (recommended).
+    /// Leave empty for older LM Studio versions that don't require auth.
+    #[serde(default)]
+    pub api_key: String,
     /// Base URL of the LM Studio server.
     ///
     /// Default: `"http://localhost:1234/v1"`.
@@ -339,6 +344,7 @@ impl Default for LmStudioProviderConfig {
     fn default() -> Self {
         Self {
             default_model: String::new(),
+            api_key: String::new(),
             base_url: default_lmstudio_base_url(),
             tool_calls: false,
             planning_tools: false,
@@ -785,6 +791,28 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Set the preferred model ID for the active provider.
+    ///
+    /// Writes to the correct per-provider `default_model` field so model selection
+    /// (Ctrl+T) persists correctly regardless of which provider is active.
+    pub fn set_active_default_model(&mut self, model: &str) {
+        match self.provider.active.as_str() {
+            "ollama" => self.provider.ollama.default_model = model.to_string(),
+            "anthropic" => self.provider.anthropic.default_model = model.to_string(),
+            "openai" => self.provider.openai.default_model = model.to_string(),
+            "gemini" => self.provider.gemini.default_model = model.to_string(),
+            "openrouter" => self.provider.openrouter.default_model = model.to_string(),
+            "deepseek" => self.provider.deepseek.default_model = model.to_string(),
+            "lmstudio" | "lm-studio" | "lm_studio" => {
+                self.provider.lmstudio.default_model = model.to_string()
+            },
+            _ => {
+                self.provider.copilot.default_model = model.to_string();
+                self.default_copilot_model = model.to_string();
+            },
+        }
+    }
+
     /// Return the preferred model ID for the active provider.
     ///
     /// - For `"copilot"`: returns `provider.copilot.default_model`, falling back to

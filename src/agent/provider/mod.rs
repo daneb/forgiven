@@ -79,6 +79,7 @@ pub struct ProviderConfig {
     /// Base URL for DeepSeek (allows self-hosted overrides).
     pub deepseek_base_url: String,
     pub lmstudio_base_url: String,
+    pub lmstudio_api_key: String,
     pub lmstudio_tool_calls: bool,
     pub lmstudio_planning_tools: bool,
 }
@@ -96,6 +97,7 @@ impl Default for ProviderConfig {
             openrouter_app_name: String::new(),
             deepseek_base_url: "https://api.deepseek.com/v1".to_string(),
             lmstudio_base_url: "http://localhost:1234/v1".to_string(),
+            lmstudio_api_key: String::new(),
             lmstudio_tool_calls: false,
             lmstudio_planning_tools: false,
         }
@@ -129,6 +131,46 @@ impl ProviderKind {
             Self::OpenRouter => "OpenRouter",
             Self::DeepSeek => "DeepSeek",
             Self::LmStudio => "LM Studio",
+        }
+    }
+
+    /// Fallback model ID used when the model list hasn't been fetched yet.
+    pub fn default_model_id(&self) -> &'static str {
+        match self {
+            Self::Copilot => "claude-sonnet-4",
+            Self::Ollama => "qwen2.5-coder:14b",
+            Self::Anthropic => "claude-sonnet-4-6",
+            Self::OpenAi => "gpt-4o",
+            Self::Gemini => "gemini-2.5-pro",
+            Self::OpenRouter => "openai/gpt-4o",
+            Self::DeepSeek => "deepseek-chat",
+            Self::LmStudio => "local-model",
+        }
+    }
+
+    /// Fallback human-readable model name shown when the model list hasn't loaded.
+    pub fn default_model_display(&self) -> &'static str {
+        match self {
+            Self::Copilot => "Claude Sonnet 4",
+            Self::Anthropic => "Claude Sonnet 4.6",
+            Self::OpenAi => "GPT-4o",
+            Self::Gemini => "Gemini 2.5 Pro",
+            Self::OpenRouter => "OpenRouter",
+            Self::DeepSeek => "DeepSeek",
+            Self::Ollama | Self::LmStudio => "Local Model",
+        }
+    }
+
+    /// Fallback context-window size in tokens when the model list hasn't loaded.
+    pub fn default_context_window(&self) -> u32 {
+        match self {
+            Self::Copilot => 128_000,
+            Self::Ollama | Self::LmStudio => 32_768,
+            Self::Anthropic => 200_000,
+            Self::OpenAi => 128_000,
+            Self::Gemini => 1_000_000,
+            Self::OpenRouter => 128_000,
+            Self::DeepSeek => 128_000,
         }
     }
 
@@ -527,6 +569,10 @@ impl ChatProvider for ProviderSettings {
     }
 
     fn requires_auth(&self) -> bool {
+        // LM Studio ≥0.3.0 requires auth; older versions do not.
+        if self.kind == ProviderKind::LmStudio {
+            return !self.api_token.is_empty();
+        }
         self.kind.requires_auth()
     }
 

@@ -59,9 +59,11 @@ async fn one_shot_with_provider(
             format!("{}/chat/completions", config.deepseek_base_url),
             false,
         ),
-        ProviderKind::LmStudio => {
-            (String::new(), format!("{}/chat/completions", config.lmstudio_base_url), false)
-        },
+        ProviderKind::LmStudio => (
+            config.lmstudio_api_key.clone(),
+            format!("{}/chat/completions", config.lmstudio_base_url),
+            false,
+        ),
     };
 
     // For Ollama reasoning models (e.g. gemma4:e4b), disable the thinking/reasoning

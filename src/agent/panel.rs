@@ -84,11 +84,10 @@ impl AgentPanel {
     }
 
     /// The model `id` to send in API requests (e.g. "claude-sonnet-4", "gpt-5.1").
-    /// The Copilot API matches on this `id` field for routing.
-    /// Falls back to "claude-sonnet-4" before the models list has been fetched.
+    /// Falls back to a sensible default for each provider before the models list has been fetched.
     pub fn selected_model_id(&self) -> &str {
         if self.available_models.is_empty() {
-            return "claude-sonnet-4";
+            return self.provider.default_model_id();
         }
         &self.available_models[self.selected_model.min(self.available_models.len() - 1)].id
     }
@@ -105,16 +104,15 @@ impl AgentPanel {
     /// The human-readable display name for the selected model (shown in the UI).
     pub fn selected_model_display(&self) -> &str {
         if self.available_models.is_empty() {
-            return "Claude Sonnet 4";
+            return self.provider.default_model_display();
         }
         &self.available_models[self.selected_model.min(self.available_models.len() - 1)].name
     }
 
     /// Returns the context-window size (in tokens) for the selected model.
-    /// Uses the value reported by the Copilot `/models` API; falls back to 128k.
     pub fn context_window_size(&self) -> u32 {
         if self.available_models.is_empty() {
-            return 128_000;
+            return self.provider.default_context_window();
         }
         self.available_models[self.selected_model.min(self.available_models.len() - 1)]
             .context_window
@@ -766,6 +764,10 @@ impl AgentPanel {
     }
 
     pub(super) async fn ensure_token(&mut self) -> Result<String> {
+        // LM Studio ≥0.3.0 requires an API token; older versions do not.
+        if self.provider == ProviderKind::LmStudio {
+            return Ok(self.provider_config.lmstudio_api_key.clone());
+        }
         if !self.provider.requires_auth() {
             // Ollama: no authentication needed.
             return Ok(String::new());

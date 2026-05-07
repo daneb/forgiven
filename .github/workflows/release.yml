@@ -10,9 +10,9 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── macOS universal binary (arm64 + x86_64 via lipo) ──────────────────────
+  # ── macOS DMG (forgiven universal binary + companion .app) ─────────────────
   build-macos:
-    name: Build (macOS universal)
+    name: Build (macOS DMG)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +25,10 @@ jobs:
       - name: Cache Cargo registry / build artefacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build x86_64
+      - name: Build forgiven x86_64
         run: cargo build --release --target x86_64-apple-darwin
 
-      - name: Build aarch64
+      - name: Build forgiven aarch64
         run: cargo build --release --target aarch64-apple-darwin
 
       - name: Create universal binary
@@ -37,12 +37,37 @@ jobs:
             target/x86_64-apple-darwin/release/forgiven \
             target/aarch64-apple-darwin/release/forgiven
           chmod +x forgiven
-          tar czf forgiven-${{ github.ref_name }}-apple-darwin-universal.tar.gz forgiven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install companion dependencies
+        run: cd companion && npm install
+
+      - name: Build companion (.app bundle)
+        run: cd companion && npm run build -- --bundles app
+        env:
+          CI: true
+          APPLE_SIGNING_IDENTITY: '-'
+
+      - name: Create DMG
+        run: |
+          mkdir -p dmg-staging
+          cp forgiven dmg-staging/
+          cp -R "companion/src-tauri/target/release/bundle/macos/Forgiven Previewer.app" dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create \
+            -volname "Forgiven" \
+            -srcfolder dmg-staging \
+            -ov \
+            -format UDZO \
+            forgiven-${{ github.ref_name }}-apple-darwin-universal.dmg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
-          path: forgiven-${{ github.ref_name }}-apple-darwin-universal.tar.gz
+          name: macos-dmg
+          path: forgiven-${{ github.ref_name }}-apple-darwin-universal.dmg
 
   # ── Linux x86_64 (gnu) ────────────────────────────────────────────────────
   build-linux:
@@ -130,3 +155,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/forgiven-*.tar.gz
+            dist/forgiven-*.dmg

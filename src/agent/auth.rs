@@ -35,7 +35,7 @@ pub(super) struct TokenExpiredError;
 
 impl std::fmt::Display for TokenExpiredError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Copilot API token expired")
+        write!(f, "API token expired")
     }
 }
 

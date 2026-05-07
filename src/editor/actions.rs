@@ -424,7 +424,7 @@ impl Editor {
                     self.mode = Mode::Agent;
                     // Eagerly load models on first show
                     if self.agent_panel.available_models.is_empty() {
-                        let preferred = self.config.default_copilot_model.clone();
+                        let preferred = self.config.active_default_model().to_string();
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
@@ -446,7 +446,7 @@ impl Editor {
                 self.mode = Mode::Agent;
                 // Eagerly load models on first show
                 if self.agent_panel.available_models.is_empty() {
-                    let preferred = self.config.default_copilot_model.clone();
+                    let preferred = self.config.active_default_model().to_string();
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
                             if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
