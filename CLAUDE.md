@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build
 cargo build           # debug
 cargo build --release # optimised
+make build            # cargo build --release
 
 # Quality checks (run in CI order)
 make check            # fmt → lint → audit → deny → test
@@ -23,6 +24,10 @@ make deny             # cargo-deny licence/advisory check
 # Run a single test (partial name match, -- --nocapture to see output)
 cargo test test_name_substring
 cargo test config::tests::active_model_copilot -- --nocapture
+
+# Companion window (Tauri sidecar — requires Node/npm)
+make companion        # cd companion && npm install && npm run tauri build
+make install          # build both binaries and install to ~/.local/bin
 
 # Install required dev tools (once)
 make install-tools    # cargo-audit, cargo-deny
@@ -47,9 +52,19 @@ src/
 │   ├── event_loop.rs # run() — the 50 ms poll loop; polls all receivers each tick
 │   ├── input.rs      # handle_key() dispatch for all modes
 │   ├── mode_handlers.rs # Per-mode key logic (Normal, Visual, Command, …)
-│   ├── lsp.rs        # LSP integration helpers, notify_lsp_change()
+│   ├── actions.rs    # Action enum dispatch (CompanionToggle, MarkdownPreview, …)
 │   ├── render.rs     # render() — calls ui::render() with a RenderContext
-│   └── state.rs      # Shared sub-state types (HighlightCache, FoldCache, …)
+│   ├── state.rs      # Shared sub-state types (HighlightCache, FoldCache, …)
+│   ├── lsp.rs        # LSP integration helpers, notify_lsp_change()
+│   ├── file_ops.rs   # File I/O, buffer lifecycle
+│   ├── pickers.rs    # Buffer and file picker modes
+│   ├── search.rs     # In-file search mode (/)
+│   ├── ai.rs         # Ghost-text completion and inline Copilot logic
+│   ├── inline_assist.rs # Selection → prompt → inline rewrite
+│   ├── folding.rs    # AST-based code folding (za, zM, zR)
+│   ├── text_objects.rs # Tree-sitter text object selection
+│   ├── surround.rs   # Surround operations (ds, cs, ys)
+│   └── hooks.rs      # Agent hooks (on_save, on_test_fail)
 ├── agent/            # AI chat panel and agentic tool loop
 │   ├── panel.rs      # AgentPanel struct, accessors, focus, dialogs, scroll
 │   ├── submit.rs     # submit(), start_inline_assist(), start_investigation_agent()
@@ -60,6 +75,7 @@ src/
 │   ├── project_tree.rs # build_project_tree(), build_structural_map()
 │   ├── agentic_loop.rs # Tool-calling loop (up to max_agent_rounds)
 │   ├── tools.rs      # Tool definitions (read_file, edit_file, run_command, …)
+│   ├── tool_dispatch.rs # Tool execution dispatch
 │   ├── streaming.rs  # SSE parser, delta accumulation
 │   └── provider/     # Provider abstraction (ChatProvider trait + 6 backends)
 │       ├── mod.rs    # ProviderKind enum, ProviderSettings, ChatProvider trait, make_provider()
@@ -111,9 +127,11 @@ New async features follow this exact pattern: spawn a `tokio::task`, pipe the re
 - **LSP**: spawns a child process (`std::process::Command`); two `std::thread` I/O threads (not tokio tasks) read/write via `lsp-server`. Responses are matched to pending requests via `HashMap<RequestId, oneshot::Sender<Value>>`.
 - **MCP**: two transport modes — stdio (child process, tokio tasks) and HTTP+SSE (persistent GET `/sse` + POST endpoint). The manager is constructed in a background task and delivered via `oneshot` to `mcp_rx`.
 
-### Sidecar IPC (Phase 3 — Nexus)
+### Sidecar IPC (Nexus)
 
 `src/sidecar/` implements a UDS server at `/tmp/forgiven-nexus-{pid}.sock`. `SidecarServer::send()` is fire-and-forget (unbounded mpsc channel → background accept-loop task). Events are newline-delimited JSON (`NexusEvent`). The editor sends `buffer_update` (debounced 300 ms), `cursor_move` (±3-line threshold), `mode_change` (per-tick diff), and `shutdown` (on quit).
+
+The companion Tauri app (`companion/`) connects to this socket and renders rich Markdown/Mermaid in a borderless window. It is spawned by `Editor::spawn_companion()` via `resolve_companion_binary()` which searches: (1) explicit config override `sidecar.binary_path`, (2) `forgiven-companion` in the same directory as the running `forgiven` binary, (3) `$PATH`. The companion binary is distributed alongside `forgiven` in the DMG (not inside a `.app` bundle) so the same-directory lookup works regardless of install location.
 
 ### Terminal graphics (Phase 1 — Glimpse)
 

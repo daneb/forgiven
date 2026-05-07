@@ -155,6 +155,7 @@ that motivated it, what was decided, and the consequences.
 | [0145](0145-deepseek-and-lmstudio-providers.md) | DeepSeek and LM Studio Providers | Accepted |
 | [0146](0146-debt-dashboard-welcome-screen.md) | Debt Dashboard on the Welcome Screen | Implemented |
 | [0147](0147-drop-windows-support.md) | Drop Windows Support | Accepted |
+| [0148](0148-companion-plain-binary-distribution.md) | Companion: Plain Binary Distribution | Accepted |
 
 ## What is an ADR?
 

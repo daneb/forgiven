@@ -45,17 +45,14 @@ jobs:
       - name: Install companion dependencies
         run: cd companion && npm install
 
-      - name: Build companion (.app bundle)
-        run: cd companion && npm run build -- --bundles app
-        env:
-          CI: true
-          APPLE_SIGNING_IDENTITY: '-'
+      - name: Build companion (release binary)
+        run: cd companion/src-tauri && cargo build --release
 
       - name: Create DMG
         run: |
           mkdir -p dmg-staging
           cp forgiven dmg-staging/
-          cp -R "companion/src-tauri/target/release/bundle/macos/Forgiven Previewer.app" dmg-staging/
+          cp companion/src-tauri/target/release/forgiven-companion dmg-staging/
           ln -s /Applications dmg-staging/Applications
           hdiutil create \
             -volname "Forgiven" \
