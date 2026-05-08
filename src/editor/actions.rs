@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use super::{ClipboardType, Editor};
 use crate::agent::{ChatMessage, Role};
+use crate::buffer::Buffer;
 use crate::keymap::{Action, Mode};
 use crate::lsp::LspManager;
 use crate::search::SearchState;
@@ -1164,6 +1165,26 @@ Skip anything already obvious from reading the code.";
                 // Dropping inline_assist fires abort_tx (oneshot sender drops = sends).
                 self.inline_assist = None;
                 self.mode = Mode::Normal;
+            },
+            Action::AgentOpenLastResponse => {
+                let content = self
+                    .agent_panel
+                    .conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, Role::Assistant))
+                    .map(|m| m.content.clone());
+                if let Some(text) = content {
+                    let mut buf = Buffer::new("*agent-response*");
+                    buf.insert_text_block(&text);
+                    self.buffers.push(buf);
+                    self.current_buffer_idx = self.buffers.len() - 1;
+                    self.mode = Mode::Normal;
+                    self.set_status("Opened last agent response in buffer".to_string());
+                } else {
+                    self.set_status("No assistant response to open".to_string());
+                }
             },
         }
         Ok(())

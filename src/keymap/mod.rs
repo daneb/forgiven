@@ -253,6 +253,8 @@ pub enum Action {
     InlineAssistAccept,
     /// Cancel and discard (Esc at any phase)
     InlineAssistCancel,
+    /// `SPC a o` — open the last assistant response in a new buffer
+    AgentOpenLastResponse,
 }
 
 /// Represents a keybinding tree node
@@ -371,6 +373,10 @@ impl KeyHandler {
             .children
             .insert('v', KeyNode::leaf("investigate (single-round)", Action::AgentInvestigate));
         agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
+        agent_node.children.insert(
+            'o',
+            KeyNode::leaf("open last response in buffer", Action::AgentOpenLastResponse),
+        );
         // SPC a x - Codified context file openers (sub-tree to free top-level slots)
         let mut ctx_node = KeyNode::new("codified context");
         ctx_node.children.insert(

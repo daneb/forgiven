@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "forgiven"
-version = "0.9.2-alpha.14"
+version = "0.9.2-alpha.15"
 dependencies = [
  "anyhow",
  "arboard",
