@@ -255,6 +255,16 @@ pub struct RenderContext<'a> {
     pub debt_narrative: Option<&'a str>,
 }
 
+/// Agent panel default width as a percentage of total terminal width when the panel
+/// is visible alongside the editor but WITHOUT the file explorer.
+/// Tune this constant to adjust the agent-to-editor split without touching layout code.
+const AGENT_PANEL_PCT_ALONE: u16 = 55;
+
+/// Agent panel default width as a percentage of total terminal width when the panel
+/// is visible alongside BOTH the editor and the file explorer.
+/// The explorer takes a fixed 25 columns; the editor fills whatever remains.
+const AGENT_PANEL_PCT_WITH_EXPLORER: u16 = 50;
+
 /// UI rendering for the editor
 pub struct UI;
 
@@ -320,7 +330,40 @@ impl UI {
             return;
         }
 
-        // ── Horizontal splits: [explorer/tasks?] | [editor] | [agent?] ─────────────
+        // ── Layout: panel split ratios, pane ownership, and z-order ──────────────
+        //
+        // HORIZONTAL COLUMNS (left → right):
+        //   1. Explorer sidebar : Constraint::Length(25)                  — fixed 25-col tree
+        //   2. Editor area      : Constraint::Min(1)                      — grows to fill remainder
+        //   3. Agent panel      : Constraint::Percentage(AGENT_PANEL_PCT) — see constants below
+        //
+        // Split cases:
+        //   Explorer + Agent visible  → agent = AGENT_PANEL_PCT_WITH_EXPLORER %
+        //   Agent only (no explorer)  → agent = AGENT_PANEL_PCT_ALONE %
+        //   Explorer only (no agent)  → editor fills all remaining cols (Constraint::Min(1))
+        //   Neither                   → editor fills entire terminal width
+        //
+        // VERTICAL SPLIT (when two buffers open side-by-side):
+        //   Left pane  : Percentage(50)
+        //   Separator  : Length(1)  — single │ glyph in DarkGray
+        //   Right pane : Percentage(50)
+        //
+        // Z-ORDER (paint order — later items render on top of earlier ones):
+        //   1. Editor buffer    (background; clips to editor_area)
+        //   2. Explorer sidebar (left overlay, clips to left_sidebar_area)
+        //   3. Agent panel      (right overlay, clips to agent_area)
+        //   4. Status line      (always above editor, below any modal)
+        //   5. Modal popups     (rename, delete, binary, commit-msg, etc. — topmost)
+        //
+        // AGENT PANEL VERTICAL LAYOUT (inside agent_area):
+        //   title_bar  : Length(1)  — provider · model · session id          (P0-S4)
+        //   history    : Min(1)     — scrollable message history
+        //   task_strip : Length(N)  — agentic plan steps (omitted when empty)
+        //   token_bar  : Length(1)  — token budget footer                     (P0-S3)
+        //   input      : Length(H)  — user input box (1–10 text lines + badges + 2 borders)
+        //
+        // ─────────────────────────────────────────────────────────────────────────────
+
         let explorer_visible = file_explorer.map(|e| e.visible).unwrap_or(false);
         let agent_visible = agent_panel.map(|p| p.visible).unwrap_or(false);
         let left_sidebar_visible = explorer_visible;
@@ -333,7 +376,7 @@ impl UI {
                         .constraints([
                             Constraint::Length(25),
                             Constraint::Min(1),
-                            Constraint::Percentage(35),
+                            Constraint::Percentage(AGENT_PANEL_PCT_WITH_EXPLORER),
                         ])
                         .split(size);
                     (Some(cols[0]), cols[1], Some(cols[2]))
@@ -348,7 +391,10 @@ impl UI {
                 (false, true) => {
                     let cols = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .constraints([
+                            Constraint::Percentage(100 - AGENT_PANEL_PCT_ALONE),
+                            Constraint::Percentage(AGENT_PANEL_PCT_ALONE),
+                        ])
                         .split(size);
                     (None, cols[0], Some(cols[1]))
                 },
@@ -575,5 +621,96 @@ impl UI {
         if let Some(dashboard) = ctx.insights_dashboard {
             crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    use super::*;
+    use crate::agent::AgentPanel;
+    use crate::highlight::Highlighter;
+
+    /// Build a minimal RenderContext that exercises the agent panel rendering path.
+    /// All optional fields are None; the agent panel is visible and focused.
+    fn render_with_agent_panel_at(cols: u16, rows: u16) {
+        let backend = TestBackend::new(cols, rows);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut panel = AgentPanel::new();
+        panel.visible = true;
+
+        let highlighter = Highlighter::new();
+
+        terminal
+            .draw(|frame| {
+                let ctx = RenderContext {
+                    mode: Mode::Agent,
+                    buffer_data: None,
+                    status_message: None,
+                    command_buffer: None,
+                    which_key_options: None,
+                    key_sequence: "",
+                    buffer_list: None,
+                    file_list: None,
+                    diagnostics: &[],
+                    ghost_text: None,
+                    agent_panel: Some(&panel),
+                    highlighted_lines: None,
+                    file_explorer: None,
+                    preview_lines: None,
+                    search_state: None,
+                    rename_buffer: None,
+                    delete_name: None,
+                    new_folder_buffer: None,
+                    split_buffer_data: None,
+                    split_highlighted_lines: None,
+                    split_right_focused: false,
+                    commit_msg: None,
+                    commit_msg_cursor: 0,
+                    release_notes: None,
+                    diag_overlay: None,
+                    binary_file_path: None,
+                    startup_elapsed: None,
+                    file_info: None,
+                    location_list: None,
+                    in_file_search_query: None,
+                    hover_popup: None,
+                    lsp_rename_buffer: None,
+                    fold_data: None,
+                    sticky_header: None,
+                    inline_assist: None,
+                    review_changes: None,
+                    insights_dashboard: None,
+                    soft_wrap: false,
+                    highlighter: &highlighter,
+                    debt_report: None,
+                    debt_narrative: None,
+                };
+                UI::render(frame, &ctx);
+            })
+            .unwrap();
+
+        // Verify the buffer dimensions match what was requested — overflow or a
+        // geometry panic would have already aborted the draw call above.
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(buf.area().width, cols, "buffer width mismatch at {cols} cols");
+        assert_eq!(buf.area().height, rows, "buffer height mismatch at {cols} cols");
+    }
+
+    #[test]
+    fn agent_panel_renders_at_80_cols() {
+        render_with_agent_panel_at(80, 40);
+    }
+
+    #[test]
+    fn agent_panel_renders_at_120_cols() {
+        render_with_agent_panel_at(120, 40);
+    }
+
+    #[test]
+    fn agent_panel_renders_at_200_cols() {
+        render_with_agent_panel_at(200, 40);
     }
 }
