@@ -154,6 +154,31 @@ pub fn split_thinking(content: &str) -> Vec<ContentSegment> {
 // Agent panel state
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Navigation cursor state for the agent panel (P1-S4, ADR 0149).
+///
+/// Activated by Tab while the agent panel is focused.  When active, j/k move
+/// `cursor_line` through the rendered history and `y` yanks the current line to
+/// the system clipboard.  Tab or Esc returns to input mode.
+#[derive(Debug, Clone)]
+pub struct AgentNavState {
+    /// Whether nav mode is currently active.
+    pub active: bool,
+    /// Index into the flat rendered-line list produced by `render_agent_panel`.
+    pub cursor_line: usize,
+}
+
+impl AgentNavState {
+    pub fn new() -> Self {
+        Self { active: false, cursor_line: 0 }
+    }
+}
+
+impl Default for AgentNavState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single planned step shown in the agent panel's task strip.
 #[derive(Debug, Clone)]
 pub struct AgentTask {
@@ -386,6 +411,9 @@ pub struct AgentPanel {
     /// Copilot business API base URL read from the token exchange response.
     /// Falls back to the standard endpoint when absent (personal accounts).
     pub copilot_api_base: String,
+    /// Navigation cursor state (P1-S4, ADR 0149).
+    /// Active when the user presses Tab while focused on the agent panel.
+    pub nav_state: AgentNavState,
 }
 
 /// A model returned by the Copilot `/models` endpoint.

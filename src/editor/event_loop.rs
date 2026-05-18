@@ -125,12 +125,12 @@ impl Editor {
                 self.hooks_firing = false;
             }
             if agent_active {
-                // Rate-limit agent-only renders to ≤10 Hz (100 ms between frames).
+                // Rate-limit agent-only renders to ≤20 Hz (50 ms between frames).
                 // If another source (keyboard, watcher) already set `needs_render`
                 // we render immediately; the cap only kicks in when streaming is
                 // the sole reason to repaint.
                 const AGENT_RENDER_INTERVAL: std::time::Duration =
-                    std::time::Duration::from_millis(100);
+                    std::time::Duration::from_millis(50);
                 if needs_render {
                     // Another source is already dirty — update stamp and render now.
                     self.last_agent_render = Some(std::time::Instant::now());
