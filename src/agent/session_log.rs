@@ -320,7 +320,7 @@ pub fn load_most_recent_session(root: &Path) -> Option<SavedSession> {
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
         .collect();
     // Filenames are `<unix_ts>.json`; descending sort gives newest first.
-    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
     let path = entries.first()?.path();
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()
