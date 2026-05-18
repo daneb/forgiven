@@ -2,6 +2,21 @@ use super::markdown::render_message_content;
 use super::*;
 use crate::agent::suggest_model_for_task;
 
+/// Format a token count with comma separators: 12450 → "12,450".
+fn fmt_tokens(n: u32) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
 impl UI {
     /// Render the Copilot Chat / agent panel on the right side.
     pub(super) fn render_agent_panel(
@@ -50,26 +65,42 @@ impl UI {
         let task_strip_height =
             if panel.tasks.is_empty() { 0 } else { (panel.tasks.len() as u16 + 2).min(8) };
 
-        // Split area vertically: history (top) + [task strip] + input (dynamic bottom).
+        // Split area vertically:
+        //   title_bar (1 row)   — provider · model · session  [P0-S4]
+        //   history (Min)       — scrollable chat history
+        //   [task strip (N)]    — agentic plan steps, omitted when empty
+        //   token_bar (1 row)   — token budget footer          [P0-S3]
+        //   input (dynamic)     — user input box
         let vchunks = if task_strip_height > 0 {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Length(1),
                     Constraint::Min(1),
                     Constraint::Length(task_strip_height),
+                    Constraint::Length(1),
                     Constraint::Length(input_height),
                 ])
                 .split(area)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(input_height)])
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(input_height),
+                ])
                 .split(area)
         };
 
-        let history_area = vchunks[0];
-        let (task_area, input_area) =
-            if task_strip_height > 0 { (Some(vchunks[1]), vchunks[2]) } else { (None, vchunks[1]) };
+        let title_bar_area = vchunks[0];
+        let history_area = vchunks[1];
+        let (task_area, token_bar_area, input_area) = if task_strip_height > 0 {
+            (Some(vchunks[2]), vchunks[3], vchunks[4])
+        } else {
+            (None, vchunks[2], vchunks[3])
+        };
 
         // ── Chat history (cache-aware) ────────────────────────────────────────
         // render_message_content() runs the markdown parser + split_thinking()
@@ -278,9 +309,6 @@ impl UI {
         let row_offset = max_scroll.saturating_sub(scroll) as u16;
 
         // Nav cursor highlight (P1-S5, ADR 0149).
-        // Patch the nav cursor line with a dim blue background so it is visually distinct.
-        // We use the existing Color::Rgb(40, 60, 90) already used in the at-picker for
-        // consistency — no new colours introduced.
         if panel.nav_state.active {
             let cursor = panel.nav_state.cursor_line;
             if cursor < lines.len() {
@@ -291,8 +319,30 @@ impl UI {
             }
         }
 
-        // Build a title that shows the active model, live status, and scroll position.
-        let model_label = panel.selected_model_display();
+        // ── P0-S4: Panel title bar — provider · model · session ──────────────────
+        let title_bar_style = if focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let session_id = if panel.conversation.session_start_secs == 0 {
+            "new".to_string()
+        } else {
+            format!("{:04x}", (panel.conversation.session_start_secs & 0xFFFF) as u16)
+        };
+        let title_bar_text = format!(
+            " {}  ·  {}  ·  {} ",
+            panel.provider.display_name(),
+            panel.selected_model_display(),
+            session_id,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(title_bar_text, title_bar_style))),
+            title_bar_area,
+        );
+
+        // Border title now shows only scroll position and live status (model/provider
+        // moved to the title_bar above; token budget moved to token_bar below).
         let status_suffix =
             panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
         let scroll_suffix: std::borrow::Cow<'static, str> = if panel.nav_state.active {
@@ -306,37 +356,7 @@ impl UI {
         } else {
             " ".into()
         };
-
-        let token_span = if panel.conversation.last_prompt_tokens > 0 {
-            let window = panel.context_window_size();
-            let pct = panel.conversation.last_prompt_tokens * 100 / window;
-            let color = if pct >= 80 {
-                Color::Red
-            } else if pct >= 50 {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-            let k_used = panel.conversation.last_prompt_tokens as f32 / 1000.0;
-            let k_total = window as f32 / 1000.0;
-            let base = format!("  {k_used:.1}k/{k_total:.0}k");
-            let label = if panel.conversation.last_cached_tokens > 0 {
-                let k_cached = panel.conversation.last_cached_tokens as f32 / 1000.0;
-                format!("{base} ({k_cached:.1}k cached)")
-            } else {
-                base
-            };
-            Span::styled(label, Style::default().fg(color))
-        } else {
-            Span::raw("")
-        };
-
-        let panel_title = format!(" {} [{model_label}]", panel.provider.display_name());
-        let title_line = Line::from(vec![
-            Span::raw(panel_title),
-            token_span,
-            Span::raw(format!("{status_suffix}{scroll_suffix}")),
-        ]);
+        let title_line = Line::from(Span::raw(format!(" AI Chat{status_suffix}{scroll_suffix}")));
 
         // MCP status bottom-bar — rebuilt only when manager presence or failed-
         // server count changes (both are stable after startup), then cloned from
@@ -399,6 +419,45 @@ impl UI {
         if let Some(area) = task_area {
             Self::render_task_strip(frame, &panel.tasks, border_style, area);
         }
+
+        // ── P0-S3: Token budget status bar ────────────────────────────────────
+        let token_bar_line = if panel.conversation.last_prompt_tokens > 0 {
+            let window = panel.context_window_size();
+            let used = panel.conversation.last_prompt_tokens;
+            let pct = used * 100 / window.max(1);
+            let color = if pct >= 80 {
+                Color::Red
+            } else if pct >= 50 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            let cached_suffix = if panel.conversation.last_cached_tokens > 0 {
+                format!("  ({} cached)", fmt_tokens(panel.conversation.last_cached_tokens))
+            } else {
+                String::new()
+            };
+            Line::from(vec![
+                Span::styled(
+                    " Tokens: ",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    format!(
+                        "{} / {} ({pct}%){cached_suffix} ",
+                        fmt_tokens(used),
+                        fmt_tokens(window),
+                    ),
+                    Style::default().fg(color).add_modifier(Modifier::DIM),
+                ),
+            ])
+        } else {
+            Line::from(Span::styled(
+                " Tokens: — ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            ))
+        };
+        frame.render_widget(Paragraph::new(token_bar_line), token_bar_area);
 
         // ── Input box ─────────────────────────────────────────────────────────
         let hint = if panel.conversation.messages.is_empty() {

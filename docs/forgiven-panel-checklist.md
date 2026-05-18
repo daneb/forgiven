@@ -10,11 +10,11 @@
 
 Goal: make the agent panel a first-class citizen in the layout, not a sidebar afterthought.
 
-- [ ] **P0-S1** — Audit current layout split ratios and panel z-order; document baseline
-- [ ] **P0-S2** — Promote agent panel to primary pane (increase default width allocation)
-- [ ] **P0-S3** — Add token budget status bar at panel bottom (live count, % of context window)
-- [ ] **P0-S4** — Add panel title bar with current model, provider, and session name
-- [ ] **P0-S5** — Tests: layout renders at 80-col, 120-col, 200-col terminal widths without overflow
+- [x] **P0-S1** — Audit current layout split ratios and panel z-order; document baseline
+- [x] **P0-S2** — Promote agent panel to primary pane (increase default width allocation)
+- [x] **P0-S3** — Add token budget status bar at panel bottom (live count, % of context window)
+- [x] **P0-S4** — Add panel title bar with current model, provider, and session name
+- [x] **P0-S5** — Tests: layout renders at 80-col, 120-col, 200-col terminal widths without overflow
 
 ---
 
@@ -84,9 +84,9 @@ Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 
 | Phase | Slices | Done | Status |
 |-------|--------|------|--------|
-| P0 — Centrality | 5 | 0 | Not started |
+| P0 — Centrality | 5 | 5 | Complete |
 | P1 — Streaming & Copy | 8 | 8 | Complete |
 | P2 — Harness | 11 | 0 | Not started |
 | P3 — Compaction | 7 | 0 | Not started |
 | Cross-cutting | 4 | 0 | Not started |
-| **Total** | **35** | **8** | — |
+| **Total** | **35** | **13** | — |
