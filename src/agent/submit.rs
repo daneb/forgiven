@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use super::agentic_loop::agentic_loop;
 use super::models::fetch_models_for_provider;
-use super::project_tree::{build_project_tree, build_structural_map};
+use super::project_tree::{build_project_tree, build_ranked_repo_map};
 use super::provider::{ChatProvider as _, ProviderKind};
 use super::{
     append_session_start_record, AgentPanel, AgentStatus, ChatMessage, ContextBreakdown, Role,
@@ -326,10 +326,12 @@ impl AgentPanel {
                 tree
             },
         };
+        // P2-S4: ranked repo-map (PageRank over cross-file references, capped at 4096 tokens).
+        const REPO_MAP_TOKENS: usize = 4096;
         let structural_map = match self.cached_structural_map.as_ref() {
             Some((map, ts)) if ts.elapsed() < TREE_TTL => map.clone(),
             _ => {
-                let map = build_structural_map(&project_root);
+                let map = build_ranked_repo_map(&project_root, REPO_MAP_TOKENS);
                 self.cached_structural_map = Some((map.clone(), std::time::Instant::now()));
                 map
             },

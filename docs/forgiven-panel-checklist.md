@@ -41,12 +41,12 @@ Goal: eliminate lethargy; make output feel instant and easy to interact with.
 Goal: project init, multi-language repo map via PageRank, session resume, planning mode.
 
 ### 2a. Repo map upgrade
-- [ ] **P2-S1** — Extend `build_structural_map()` to collect non-.rs files (py, ts, go, java, etc.)
-- [ ] **P2-S2** — Build symbol reference graph from existing `extract_symbols()` output
-- [ ] **P2-S3** — Implement PageRank over reference graph (damping=0.85, convergence 1e-6) — no new crates
-- [ ] **P2-S4** — Replace structural map injection with ranked repo-map (top-N files by score)
-- [ ] **P2-S5** — Token budget: repo map capped at configurable token limit (default 4,096)
-- [ ] **P2-S6** — Tests: PageRank stable on acyclic graph; ranking order matches known reference counts
+- [x] **P2-S1** — Extend `build_structural_map()` to collect non-.rs files (py, ts, go, java, etc.)
+- [x] **P2-S2** — Build symbol reference graph from existing `extract_symbols()` output
+- [x] **P2-S3** — Implement PageRank over reference graph (damping=0.85, convergence 1e-6) — no new crates
+- [x] **P2-S4** — Replace structural map injection with ranked repo-map (top-N files by score)
+- [x] **P2-S5** — Token budget: repo map capped at configurable token limit (default 4,096)
+- [x] **P2-S6** — Tests: PageRank stable on acyclic graph; ranking order matches known reference counts
 
 ### 2b. Session harness
 - [ ] **P2-S7** — Project init flow: on first run, emit constitution prompt and persist to `.forgiven/constitution.md`
@@ -86,7 +86,7 @@ Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 |-------|--------|------|--------|
 | P0 — Centrality | 5 | 5 | Complete |
 | P1 — Streaming & Copy | 8 | 8 | Complete |
-| P2 — Harness | 11 | 0 | Not started |
+| P2 — Harness | 11 | 6 | In progress |
 | P3 — Compaction | 7 | 0 | Not started |
 | Cross-cutting | 4 | 0 | Not started |
-| **Total** | **35** | **13** | — |
+| **Total** | **35** | **19** | — |
