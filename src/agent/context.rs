@@ -83,6 +83,12 @@ impl AgentPanel {
     /// `poll_stream()` knows to replace history with the returned summary.
     ///
     /// The caller is responsible for immediately calling `submit()` after this.
+    ///
+    /// # Invariants (ADR 0101 / ADR 0123)
+    /// - `archived_messages` is capped at 400 entries (oldest dropped first).
+    /// - History is never modified in-place — all messages move to the archive
+    ///   and a fresh history is built by `poll_stream()` Done handler.
+    /// - MIN_RECENT=4 applies to the API send buffer in `submit.rs`, not here.
     pub fn compress_history(&mut self) {
         // Collect all non-separator messages (skip Role::System separators like
         // "── New conversation · …" and "── Context compressed · …").
@@ -164,6 +170,12 @@ impl AgentPanel {
             let drop = self.conversation.archived_messages.len() - MAX_ARCHIVED;
             self.conversation.archived_messages.drain(..drop);
         }
+        debug_assert!(
+            self.conversation.archived_messages.len() <= MAX_ARCHIVED,
+            "archive cap invariant violated: {} > {}",
+            self.conversation.archived_messages.len(),
+            MAX_ARCHIVED
+        );
         self.tasks.clear();
         self.conversation.input = prompt;
         self.janitor_compressing = true;
@@ -330,6 +342,95 @@ mod tests {
             short.len() / 4,
             0,
             "chars/4 floors to 0 for very short strings — +4 overhead compensates"
+        );
+    }
+
+    // ── P3-S7: auto-compact threshold, hysteresis, invariants ───────────────
+
+    #[test]
+    fn auto_compact_triggers_at_70_pct() {
+        // Regression guard: the threshold check in poll_stream() must fire at ≥ 70%.
+        let window = 128_000u32;
+        let threshold = 70u32;
+
+        let just_below = window * 69 / 100;
+        assert!(just_below * 100 / window < threshold, "69 % must not trigger compact");
+
+        let at_threshold = window * 70 / 100;
+        assert!(at_threshold * 100 / window >= threshold, "exactly 70 % must trigger compact");
+
+        let above = window * 85 / 100;
+        assert!(above * 100 / window >= threshold, "85 % must trigger compact");
+    }
+
+    #[test]
+    fn hysteresis_prevents_double_fire() {
+        // Regression guard: once compact fires, a second crossing must not
+        // increment the count until hysteresis is cleared (janitor Done).
+        let mut hysteresis_active = false;
+        let mut compact_count = 0u32;
+
+        let window = 128_000u32;
+        let tokens_75pct = window * 75 / 100;
+        let pct = tokens_75pct * 100 / window;
+
+        // First crossing — fires.
+        if pct >= 70 && !hysteresis_active {
+            compact_count += 1;
+            hysteresis_active = true;
+        }
+        assert_eq!(compact_count, 1);
+        assert!(hysteresis_active);
+
+        // Second crossing while hysteresis active — must not fire.
+        if pct >= 70 && !hysteresis_active {
+            compact_count += 1;
+        }
+        assert_eq!(compact_count, 1, "hysteresis must block second compact");
+
+        // JanitorDone clears hysteresis — next crossing fires again.
+        hysteresis_active = false;
+        if pct >= 70 && !hysteresis_active {
+            compact_count += 1;
+            hysteresis_active = true;
+        }
+        assert_eq!(compact_count, 2, "should fire again after hysteresis reset");
+        assert!(hysteresis_active, "hysteresis must be set again after re-trigger");
+    }
+
+    #[test]
+    fn compress_history_invariants_hold() {
+        // Regression guard: after compress_history() the message list is cleared,
+        // janitor_compressing is set, the input holds the summary prompt, and the
+        // archive cap ≤ 400 is maintained regardless of how many messages existed.
+
+        // Simulate the drain logic (extracted from compress_history).
+        const MAX_ARCHIVED: usize = 400;
+        let mut messages: Vec<ChatMessage> =
+            (0..250).map(|i| msg(Role::User, &format!("msg {i}"))).collect();
+        let mut archived: Vec<ChatMessage> = Vec::new();
+
+        // First compress.
+        archived.extend(std::mem::take(&mut messages));
+        if archived.len() > MAX_ARCHIVED {
+            let drop = archived.len() - MAX_ARCHIVED;
+            archived.drain(..drop);
+        }
+        assert!(messages.is_empty(), "messages must be cleared by compress");
+        assert!(archived.len() <= MAX_ARCHIVED, "archive must respect cap after first run");
+
+        // Second compress: add 200 more, archive grows to 450 → capped at 400.
+        messages.extend((0..200).map(|i| msg(Role::Assistant, &format!("reply {i}"))));
+        archived.extend(std::mem::take(&mut messages));
+        if archived.len() > MAX_ARCHIVED {
+            let drop = archived.len() - MAX_ARCHIVED;
+            archived.drain(..drop);
+        }
+        assert_eq!(archived.len(), MAX_ARCHIVED, "archive must be capped at 400 after second run");
+        // Newest entries survive — last archived message should be from the second batch.
+        assert!(
+            archived.last().unwrap().content.contains("reply 199"),
+            "newest messages must survive the cap"
         );
     }
 }

@@ -57,13 +57,17 @@ impl AgentPanel {
                             }
                         }
                     },
-                    Ok(StreamEvent::ToolDone { name, result_summary, success }) => {
+                    Ok(StreamEvent::ToolDone { name, result_summary, success, token_cost }) => {
                         active = true;
                         self.status = AgentStatus::WaitingForResponse { round: self.current_round };
                         self.pending_tool_calls.push((name.clone(), success));
                         if !matches!(name.as_str(), "create_task" | "complete_task") {
                             if let Some(r) = self.streaming_reply.as_mut() {
-                                r.push_str(&format!(" → {result_summary}"));
+                                if token_cost > 0 {
+                                    r.push_str(&format!(" → {result_summary} (~{token_cost}t)"));
+                                } else {
+                                    r.push_str(&format!(" → {result_summary}"));
+                                }
                             }
                         }
                     },
@@ -283,6 +287,16 @@ impl AgentPanel {
                                     images: vec![],
                                 });
                             }
+                            // Estimate post-compact token footprint from the new summary messages.
+                            let tokens_after: u32 = self
+                                .conversation
+                                .messages
+                                .iter()
+                                .map(|m| (m.content.len() / 4 + 4) as u32)
+                                .sum::<u32>()
+                                / 1_000;
+                            // Hysteresis: safe to re-arm after a successful compact.
+                            self.janitor_hysteresis_active = false;
                             // Skip metrics append and the threshold check below — the session
                             // counters were just reset.
                             self.code_block_idx = 0;
@@ -295,7 +309,10 @@ impl AgentPanel {
                             self.asking_user_input = None;
                             self.awaiting_continuation = false;
                             self.current_round = 0;
-                            self.status = AgentStatus::JanitorDone;
+                            self.status = AgentStatus::JanitorDone {
+                                tokens_before: self.tokens_before_compact,
+                                tokens_after,
+                            };
                             break;
                         }
                         // ── Token estimation fallback (Ollama + providers without usage events) ──
@@ -384,6 +401,20 @@ impl AgentPanel {
                                     ),
                                     images: vec![],
                                 });
+                            }
+                        }
+                        // ── 70 % auto-compact threshold ──────────────────────
+                        // Fires once per burst (hysteresis prevents double-trigger).
+                        // The event loop picks up `pending_auto_compact` next tick
+                        // and calls `run_janitor_compress()`.
+                        if self.conversation.last_prompt_tokens > 0
+                            && !self.janitor_hysteresis_active
+                        {
+                            let window = self.context_window_size();
+                            let pct = self.conversation.last_prompt_tokens * 100 / window.max(1);
+                            if pct >= 70 {
+                                self.pending_auto_compact = true;
+                                self.janitor_hysteresis_active = true;
                             }
                         }
                         self.code_block_idx = 0;

@@ -380,8 +380,14 @@ pub(super) async fn dispatch_tools(
                 s.to_string()
             }
         };
+        let token_cost = (result.len() / 4) as u32;
         let _ = tx
-            .send(StreamEvent::ToolDone { name: call.name.clone(), result_summary, success })
+            .send(StreamEvent::ToolDone {
+                name: call.name.clone(),
+                result_summary,
+                success,
+                token_cost,
+            })
             .await;
 
         messages.push(serde_json::json!({

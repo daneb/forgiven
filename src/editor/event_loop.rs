@@ -120,6 +120,14 @@ impl Editor {
             if let Some(err) = self.agent_panel.last_error.take() {
                 self.set_status(format!("Agent error: {err}"));
             }
+            // Auto-compact: triggered by the 70 % threshold check in poll_stream().
+            // Only fires when the agent has gone idle (stream fully drained this tick).
+            if self.agent_panel.pending_auto_compact
+                && self.agent_panel.status == crate::agent::AgentStatus::Idle
+            {
+                self.agent_panel.pending_auto_compact = false;
+                self.run_janitor_compress();
+            }
             // Clear the hook re-entry guard once the agent goes idle.
             if self.hooks_firing && self.agent_panel.status == crate::agent::AgentStatus::Idle {
                 self.hooks_firing = false;

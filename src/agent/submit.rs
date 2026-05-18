@@ -145,6 +145,16 @@ impl AgentPanel {
         // Phase 2 (ADR 0100): capture the raw command name and feature arg before
         // template expansion so the SpecSlicer can inject a virtual context block
         // for speckit.implement and speckit.tasks without reparsing user_text.
+        // P3-S6: /compact — trigger auto-janitor without running the main agentic loop.
+        // Undo the input_history append, clear the input, and set pending_auto_compact
+        // so the event loop picks it up and calls run_janitor_compress() next tick.
+        if user_text.trim() == "/compact" {
+            self.conversation.input_history.pop();
+            self.conversation.input.clear();
+            self.pending_auto_compact = true;
+            return Ok(());
+        }
+
         // P2-S10: detect /plan prefix — rewrite prompt and flag for plan extraction on Done.
         let user_text = {
             let t = user_text.trim_start();

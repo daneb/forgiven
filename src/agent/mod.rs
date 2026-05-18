@@ -420,6 +420,15 @@ pub struct AgentPanel {
     /// Set to `true` when the current submit originated from a `/plan` command
     /// so the Done handler knows to extract and persist the plan block (P2-S10).
     pub plan_pending: bool,
+    /// Set by the 70 % auto-compact threshold check in `poll_stream()` Done handler.
+    /// Cleared by the event loop after it calls `run_janitor_compress()`.
+    pub pending_auto_compact: bool,
+    /// Prevents the auto-compact threshold from firing a second time during the
+    /// same burst.  Set when compact is triggered; cleared in the JanitorDone handler.
+    pub janitor_hysteresis_active: bool,
+    /// Token count captured just before `compress_history()` is called so the
+    /// JanitorDone status can display "N→M tokens".
+    pub tokens_before_compact: u32,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
@@ -452,7 +461,8 @@ pub enum AgentStatus {
     /// Auto-Janitor summarisation round is in flight.
     Compressing,
     /// Auto-Janitor completed; shown until the next submit clears it.
-    JanitorDone,
+    /// Carries the token counts before and after compression for the status label.
+    JanitorDone { tokens_before: u32, tokens_after: u32 },
     /// Investigation subagent round is running.
     Investigating,
 }
@@ -471,7 +481,9 @@ impl AgentStatus {
             },
             AgentStatus::Retrying { attempt, max } => Some(format!("retrying ({attempt}/{max})…")),
             AgentStatus::Compressing => Some("auto-janitor: compressing…".to_string()),
-            AgentStatus::JanitorDone => Some("auto-janitor: context compressed ✓".to_string()),
+            AgentStatus::JanitorDone { tokens_before, tokens_after } => {
+                Some(format!("✓ Compacted ({tokens_before}k→{tokens_after}k tokens)"))
+            },
             AgentStatus::Investigating => Some("investigating…".to_string()),
         }
     }
@@ -489,6 +501,8 @@ pub enum StreamEvent {
         result_summary: String,
         /// `true` when the tool result did not start with `"error"`.
         success: bool,
+        /// Estimated token cost of the full tool result (chars/4 heuristic).
+        token_cost: u32,
     },
     /// A file was successfully written or edited by a tool.
     /// The path is project-relative (as passed to the tool).

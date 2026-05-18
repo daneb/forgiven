@@ -61,13 +61,13 @@ Goal: project init, multi-language repo map via PageRank, session resume, planni
 
 Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 
-- [ ] **P3-S1** — Enable `janitor_threshold_tokens` at 70% of provider context window (was 0/disabled)
-- [ ] **P3-S2** — Add hysteresis: compact fires once above 70%, resets at 50% — no thrash
-- [ ] **P3-S3** — Two-step compact UX: show "⚡ Compacting context…" status, then "✓ Compacted (N→M tokens)"
-- [ ] **P3-S4** — ADR invariant guard: MIN_RECENT=4 enforced, archive cap=400, history never modified in-place
-- [ ] **P3-S5** — Per-tool cost attribution: display token delta per tool call in activity log
-- [ ] **P3-S6** — `/compact` manual command mirrors auto-compact (existing infrastructure, just wire it up)
-- [ ] **P3-S7** — Tests: janitor fires at correct threshold; hysteresis prevents double-fire; invariants hold post-compact
+- [x] **P3-S1** — Enable `janitor_threshold_tokens` at 70% of provider context window (was 0/disabled)
+- [x] **P3-S2** — Add hysteresis: compact fires once above 70%, resets at 50% — no thrash
+- [x] **P3-S3** — Two-step compact UX: show "⚡ Compacting context…" status, then "✓ Compacted (N→M tokens)"
+- [x] **P3-S4** — ADR invariant guard: MIN_RECENT=4 enforced, archive cap=400, history never modified in-place
+- [x] **P3-S5** — Per-tool cost attribution: display token delta per tool call in activity log
+- [x] **P3-S6** — `/compact` manual command mirrors auto-compact (existing infrastructure, just wire it up)
+- [x] **P3-S7** — Tests: janitor fires at correct threshold; hysteresis prevents double-fire; invariants hold post-compact
 
 ---
 
@@ -87,6 +87,6 @@ Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 | P0 — Centrality | 5 | 5 | Complete |
 | P1 — Streaming & Copy | 8 | 8 | Complete |
 | P2 — Harness | 11 | 11 | Complete |
-| P3 — Compaction | 7 | 0 | Not started |
+| P3 — Compaction | 7 | 7 | Complete |
 | Cross-cutting | 4 | 0 | Not started |
-| **Total** | **35** | **24** | — |
+| **Total** | **35** | **31** | — |

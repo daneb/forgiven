@@ -571,63 +571,7 @@ Skip anything already obvious from reading the code.";
             },
             // ── Auto-Janitor ──────────────────────────────────────────────────
             Action::AgentJanitorCompress => {
-                self.agent_panel.compress_history();
-                if self.agent_panel.conversation.input.is_empty() {
-                    // compress_history() bailed — nothing to summarise.
-                    self.set_status("Janitor: nothing to compress".to_string());
-                } else {
-                    self.agent_panel.visible = true;
-                    self.mode = Mode::Agent;
-                    self.set_status("Janitor: compressing history…".to_string());
-                    // Show a visible marker in the chat so the user knows a
-                    // second AI call is starting (the janitor, not a duplicate).
-                    self.agent_panel.conversation.messages.push(ChatMessage {
-                        role: Role::System,
-                        content: "🗜\u{fe0f} /compress — summarising chat history to free up the \
-                                  context window. A structured summary (files changed, key \
-                                  decisions, open questions, next step) will replace the \
-                                  archived messages."
-                            .to_string(),
-                        images: vec![],
-                    });
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let max_rounds = 1; // Summarisation needs only one round.
-                    let warning_threshold = 0;
-                    // Use the cheap janitor model when configured, else fall back.
-                    let janitor_model = self.config.agent.janitor_model.clone();
-                    let preferred_model = if janitor_model.is_empty() {
-                        self.config.active_default_model().to_string()
-                    } else {
-                        janitor_model
-                    };
-                    let auto_compress = false; // Don't compress the summariser's own output.
-                    let mask_threshold = 0; // Don't mask during the summarisation call itself.
-                    let fut = self.agent_panel.submit(
-                        None,
-                        project_root,
-                        max_rounds,
-                        warning_threshold,
-                        &preferred_model,
-                        auto_compress,
-                        mask_threshold,
-                        0, // Don't truncate tool results during janitor compression.
-                    );
-                    let submit_err = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            match fut.await {
-                                Ok(()) => None,
-                                Err(e) => {
-                                    tracing::warn!("Janitor compress error: {}", e);
-                                    Some(e.to_string())
-                                },
-                            }
-                        })
-                    });
-                    if let Some(e) = submit_err {
-                        self.set_status(format!("Janitor error: {e}"));
-                    }
-                }
+                self.run_janitor_compress();
             },
             // ── Investigation subagent (Phase 3.3) ──────────────────────────
             Action::AgentInvestigate => {
@@ -1188,5 +1132,64 @@ Skip anything already obvious from reading the code.";
             },
         }
         Ok(())
+    }
+
+    /// Capture `last_prompt_tokens` before compression so the JanitorDone status
+    /// can display "N→M tokens", then call `compress_history()` and immediately
+    /// submit the janitor summarisation round.
+    ///
+    /// Called from `Action::AgentJanitorCompress` and the event-loop auto-compact
+    /// path so both share identical behaviour.
+    pub(super) fn run_janitor_compress(&mut self) {
+        self.agent_panel.tokens_before_compact =
+            self.agent_panel.conversation.last_prompt_tokens / 1_000;
+        self.agent_panel.compress_history();
+        if self.agent_panel.conversation.input.is_empty() {
+            self.set_status("Janitor: nothing to compress".to_string());
+        } else {
+            self.agent_panel.visible = true;
+            self.mode = Mode::Agent;
+            self.set_status("⚡ Compacting context…".to_string());
+            self.agent_panel.conversation.messages.push(ChatMessage {
+                role: Role::System,
+                content: "⚡ Compacting context — summarising chat history to free up the \
+                          context window. A structured summary (files changed, key decisions, \
+                          open questions, next step) will replace the archived messages."
+                    .to_string(),
+                images: vec![],
+            });
+            let project_root =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let janitor_model = self.config.agent.janitor_model.clone();
+            let preferred_model = if janitor_model.is_empty() {
+                self.config.active_default_model().to_string()
+            } else {
+                janitor_model
+            };
+            let fut = self.agent_panel.submit(
+                None,
+                project_root,
+                1, // one round only
+                0, // no warning threshold for the janitor itself
+                &preferred_model,
+                false, // don't compress the summariser's own output
+                0,     // no observation masking during compression
+                0,     // no tool-result truncation during compression
+            );
+            let submit_err = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match fut.await {
+                        Ok(()) => None,
+                        Err(e) => {
+                            tracing::warn!("Janitor compress error: {}", e);
+                            Some(e.to_string())
+                        },
+                    }
+                })
+            });
+            if let Some(e) = submit_err {
+                self.set_status(format!("Janitor error: {e}"));
+            }
+        }
     }
 }
