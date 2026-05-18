@@ -9,6 +9,7 @@ use super::agentic_loop::agentic_loop;
 use super::models::fetch_models_for_provider;
 use super::project_tree::{build_project_tree, build_ranked_repo_map};
 use super::provider::{ChatProvider as _, ProviderKind};
+use super::session_log::{load_most_recent_session, project_init};
 use super::{
     append_session_start_record, AgentPanel, AgentStatus, ChatMessage, ContextBreakdown, Role,
     StreamEvent, SubmitCtx,
@@ -144,6 +145,26 @@ impl AgentPanel {
         // Phase 2 (ADR 0100): capture the raw command name and feature arg before
         // template expansion so the SpecSlicer can inject a virtual context block
         // for speckit.implement and speckit.tasks without reparsing user_text.
+        // P2-S10: detect /plan prefix — rewrite prompt and flag for plan extraction on Done.
+        let user_text = {
+            let t = user_text.trim_start();
+            if let Some(body) = t.strip_prefix("/plan") {
+                self.plan_pending = true;
+                let body = body.trim_start();
+                let prefix = "Output a structured plan using a `## Plan` markdown section \
+                              with bullet-point steps. After the plan section, proceed with \
+                              the work.\n\n";
+                if body.is_empty() {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix}{body}")
+                }
+            } else {
+                self.plan_pending = false;
+                user_text
+            }
+        };
+
         let spec_cmd_ctx: Option<(String, String)> =
             user_text.trim_start().strip_prefix('/').and_then(|s| {
                 let cmd = s.split_whitespace().next()?;
@@ -272,10 +293,33 @@ impl AgentPanel {
             }
         }
 
-        // Tip: show once per session when .forgiven/ is absent (enabled or not).
-        if !self.codified_context_tip_shown && self.conversation.session_rounds == 0 {
-            let forgiven_present = project_root.join(".forgiven").is_dir();
-            if !forgiven_present {
+        // P2-S7: Project init — create .forgiven/ + starter constitution on first run.
+        // P2-S9: Offer to restore the most-recent saved session.
+        if self.conversation.session_rounds == 0 {
+            let was_created = project_init(&project_root);
+            if was_created {
+                // Reload codified context so the new constitution is injected this turn.
+                if self.codified_context_enabled {
+                    use crate::config::CodifiedContextConfig;
+                    let cfg = CodifiedContextConfig {
+                        enabled: true,
+                        directory: ".forgiven".to_string(),
+                        constitution_max_tokens: self.codified_context_constitution_max_tokens,
+                        max_specialists_per_turn: self.codified_context_max_specialists,
+                        knowledge_fetch_max_bytes: self.codified_context_knowledge_max_bytes,
+                    };
+                    self.codified_context =
+                        crate::agent::codified_context::CodifiedContext::load(&project_root, &cfg);
+                }
+                self.codified_context_tip_shown = true;
+                self.conversation.messages.push(ChatMessage {
+                    role: Role::System,
+                    content: "[init] Created .forgiven/constitution.md — edit it to customise \
+                              agent behaviour for this project."
+                        .to_string(),
+                    images: vec![],
+                });
+            } else if !self.codified_context_tip_shown && !project_root.join(".forgiven").is_dir() {
                 self.codified_context_tip_shown = true;
                 self.conversation.messages.push(ChatMessage {
                     role: Role::System,
@@ -284,6 +328,42 @@ impl AgentPanel {
                         .to_string(),
                     images: vec![],
                 });
+            }
+            // P2-S9: Auto-restore most-recent session on first submit.
+            // Only runs once (pending_resume is set to None after restore to prevent re-load).
+            if self.pending_resume.is_none() {
+                if let Some(saved) = load_most_recent_session(&project_root) {
+                    let rounds = saved.session_rounds;
+                    // Prepend saved messages before the current (new) turn.
+                    let mut restored: Vec<ChatMessage> = saved
+                        .messages
+                        .into_iter()
+                        .map(|m| ChatMessage {
+                            role: match m.role.as_str() {
+                                "assistant" => Role::Assistant,
+                                _ => Role::User,
+                            },
+                            content: m.content,
+                            images: vec![],
+                        })
+                        .collect();
+                    restored.push(ChatMessage {
+                        role: Role::System,
+                        content: format!(
+                            "[session] Restored {rounds} round(s) from previous session. \
+                             Press SPC a n to discard and start fresh."
+                        ),
+                        images: vec![],
+                    });
+                    restored.append(&mut self.conversation.messages);
+                    self.conversation.messages = restored;
+                    // Mark as consumed so we don't restore again next submit.
+                    self.pending_resume = Some(crate::agent::session_log::SavedSession {
+                        session_start_secs: 0,
+                        session_rounds: 0,
+                        messages: vec![],
+                    });
+                }
             }
         }
 

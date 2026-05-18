@@ -414,6 +414,12 @@ pub struct AgentPanel {
     /// Navigation cursor state (P1-S4, ADR 0149).
     /// Active when the user presses Tab while focused on the agent panel.
     pub nav_state: AgentNavState,
+    /// Saved session available to restore (P2-S9). Set on first submit when a
+    /// `.forgiven/sessions/*.json` file exists. Cleared after restore or discard.
+    pub pending_resume: Option<crate::agent::session_log::SavedSession>,
+    /// Set to `true` when the current submit originated from a `/plan` command
+    /// so the Done handler knows to extract and persist the plan block (P2-S10).
+    pub plan_pending: bool,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
