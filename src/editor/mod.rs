@@ -844,6 +844,15 @@ impl Editor {
 
     /// Clean up terminal state before exit
     fn cleanup(&mut self) -> Result<()> {
+        // P2-S8: Persist conversation history to .forgiven/sessions/ on exit.
+        if let Ok(root) = std::env::current_dir() {
+            crate::agent::session_log::save_session(
+                &root,
+                self.agent_panel.conversation.session_start_secs,
+                &self.agent_panel.conversation.messages,
+                self.agent_panel.conversation.session_rounds,
+            );
+        }
         // Notify the sidecar that the editor is exiting before tearing down the socket.
         #[cfg(unix)]
         if let Some(ref s) = self.sidecar {

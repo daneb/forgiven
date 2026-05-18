@@ -81,6 +81,8 @@ impl AgentPanel {
             copilot_quota: None,
             copilot_api_base: "https://api.githubcopilot.com".to_string(),
             nav_state: super::AgentNavState::new(),
+            pending_resume: None,
+            plan_pending: false,
         }
     }
 

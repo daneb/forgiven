@@ -212,6 +212,17 @@ impl AgentPanel {
                         }
                         if let Some(text) = self.streaming_reply.take() {
                             if !text.is_empty() {
+                                // P2-S10: if this was a /plan submit, extract and persist.
+                                if self.plan_pending {
+                                    self.plan_pending = false;
+                                    if let Some(plan) =
+                                        crate::agent::session_log::extract_plan_block(&text)
+                                    {
+                                        if let Ok(root) = std::env::current_dir() {
+                                            crate::agent::session_log::save_plan(&root, &plan);
+                                        }
+                                    }
+                                }
                                 self.conversation.messages.push(ChatMessage {
                                     role: Role::Assistant,
                                     content: text,

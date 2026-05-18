@@ -228,6 +228,133 @@ impl AgentPanel {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// P2-S7: Project init — create .forgiven/ + starter constitution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default constitution written on first run when `.forgiven/` is absent.
+pub const CONSTITUTION_TEMPLATE: &str = "\
+# Project Constitution
+
+## Role
+You are a helpful coding assistant for this project.
+
+## Code style
+- Follow existing conventions and patterns in the codebase.
+- Prefer small, focused changes over large rewrites.
+- Run tests after edits when a test suite is present.
+
+## Constraints
+- Never modify files outside the project root.
+- Ask before irreversible or destructive operations.
+- Prefer `edit_file` over `write_file` for targeted changes.
+";
+
+/// Create `.forgiven/` and a starter `constitution.md` if neither exists.
+/// Returns `true` when the directory (and file) were freshly created.
+pub fn project_init(root: &Path) -> bool {
+    let dir = root.join(".forgiven");
+    if dir.is_dir() {
+        return false;
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let _ = std::fs::write(dir.join("constitution.md"), CONSTITUTION_TEMPLATE);
+    true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P2-S8/S9: Project-local session persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SerializedMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SavedSession {
+    pub session_start_secs: u64,
+    pub session_rounds: u32,
+    pub messages: Vec<SerializedMessage>,
+}
+
+/// Serialize the active conversation to `.forgiven/sessions/<session_start_secs>.json`.
+/// Skips sessions that haven't completed at least one round.
+pub fn save_session(
+    root: &Path,
+    session_start_secs: u64,
+    messages: &[super::ChatMessage],
+    rounds: u32,
+) {
+    if session_start_secs == 0 || rounds == 0 {
+        return;
+    }
+    let dir = root.join(".forgiven").join("sessions");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let serialized: Vec<SerializedMessage> = messages
+        .iter()
+        .filter(|m| matches!(m.role, super::Role::User | super::Role::Assistant))
+        .map(|m| SerializedMessage {
+            role: m.role.as_str().to_string(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let session = SavedSession { session_start_secs, session_rounds: rounds, messages: serialized };
+    if let Ok(json) = serde_json::to_string_pretty(&session) {
+        let _ = std::fs::write(dir.join(format!("{session_start_secs}.json")), json);
+    }
+}
+
+/// Load the most-recently saved session from `.forgiven/sessions/`.
+/// Returns `None` if no session files exist or the directory is absent.
+pub fn load_most_recent_session(root: &Path) -> Option<SavedSession> {
+    let dir = root.join(".forgiven").join("sessions");
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+    // Filenames are `<unix_ts>.json`; descending sort gives newest first.
+    entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    let path = entries.first()?.path();
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P2-S10: Plan block extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract the content of the first `## Plan` section from `text`.
+/// Stops at the next `##`-level heading or end of string.
+/// Returns `None` when no plan section is found.
+pub fn extract_plan_block(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Accept "## plan" with optional trailing punctuation / label.
+    let start = lower.find("## plan")?;
+    let section = &text[start..];
+    // Find where the next ##-level heading begins (after the first newline).
+    let next_heading = section
+        .char_indices()
+        .skip(1) // skip the '##' we just found
+        .find(|&(i, _)| section[i..].starts_with("\n##") || section[i..].starts_with("\r\n##"))
+        .map(|(i, _)| i + 1); // +1 to include the newline as boundary
+    let end = next_heading.unwrap_or(section.len());
+    Some(section[..end].trim().to_string())
+}
+
+/// Write a plan block to `.forgiven/plan.md`, creating the directory if needed.
+pub fn save_plan(root: &Path, plan_text: &str) {
+    let dir = root.join(".forgiven");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("plan.md"), plan_text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{history_file_path, metrics_data_path};
@@ -277,5 +404,149 @@ mod tests {
             None => std::env::remove_var("XDG_DATA_HOME"),
         }
         assert_eq!(path, PathBuf::from("/tmp/test_xdg_forgiven/forgiven/history/12345.jsonl"));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P2-S11: Harness tests — init, session resume, plan block
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod harness_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "forgiven_harness_{tag}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = fs::create_dir_all(&p);
+        p
+    }
+
+    // ── P2-S7: project_init ──────────────────────────────────────────────────
+
+    #[test]
+    fn init_creates_forgiven_dir_and_constitution() {
+        let root = tmp_dir("init");
+        assert!(project_init(&root), "should return true on first init");
+        assert!(root.join(".forgiven").is_dir(), ".forgiven/ must exist");
+        assert!(root.join(".forgiven/constitution.md").exists(), "constitution.md must be created");
+        let content = fs::read_to_string(root.join(".forgiven/constitution.md")).unwrap();
+        assert!(content.contains("# Project Constitution"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn init_is_idempotent() {
+        let root = tmp_dir("init_idem");
+        assert!(project_init(&root));
+        // Second call must return false (dir already exists).
+        assert!(!project_init(&root), "second init must return false");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── P2-S8/S9: save_session / load_most_recent_session ───────────────────
+
+    #[test]
+    fn save_and_load_session_roundtrip() {
+        let root = tmp_dir("session");
+        let msgs = vec![
+            super::super::ChatMessage {
+                role: super::super::Role::User,
+                content: "Hello agent".to_string(),
+                images: vec![],
+            },
+            super::super::ChatMessage {
+                role: super::super::Role::Assistant,
+                content: "Hi there!".to_string(),
+                images: vec![],
+            },
+        ];
+        save_session(&root, 9999, &msgs, 1);
+
+        let loaded = load_most_recent_session(&root).expect("session must be loadable");
+        assert_eq!(loaded.session_start_secs, 9999);
+        assert_eq!(loaded.session_rounds, 1);
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].role, "user");
+        assert_eq!(loaded.messages[0].content, "Hello agent");
+        assert_eq!(loaded.messages[1].role, "assistant");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_session_skips_empty_or_zero_start() {
+        let root = tmp_dir("session_skip");
+        let msgs: Vec<super::super::ChatMessage> = vec![];
+        // session_start_secs == 0 → no file written
+        save_session(&root, 0, &msgs, 1);
+        // rounds == 0 → no file written
+        save_session(&root, 1234, &msgs, 0);
+        assert!(load_most_recent_session(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_most_recent_returns_newest() {
+        let root = tmp_dir("session_newest");
+        let msgs = vec![super::super::ChatMessage {
+            role: super::super::Role::User,
+            content: "old".to_string(),
+            images: vec![],
+        }];
+        save_session(&root, 1000, &msgs, 1);
+        let msgs2 = vec![super::super::ChatMessage {
+            role: super::super::Role::User,
+            content: "new".to_string(),
+            images: vec![],
+        }];
+        save_session(&root, 2000, &msgs2, 2);
+
+        let loaded = load_most_recent_session(&root).unwrap();
+        assert_eq!(loaded.session_start_secs, 2000, "must return the newest session");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── P2-S10: extract_plan_block / save_plan ───────────────────────────────
+
+    #[test]
+    fn extract_plan_block_basic() {
+        let text =
+            "Some preamble.\n\n## Plan\n- Step 1\n- Step 2\n\n## Notes\nfollow-up text here.";
+        let plan = extract_plan_block(text).expect("should find plan");
+        assert!(plan.contains("## Plan"));
+        assert!(plan.contains("Step 1"));
+        assert!(plan.contains("Step 2"));
+        // Content under the subsequent ## heading must not bleed into the plan block.
+        assert!(!plan.contains("follow-up"), "plan={plan:?}");
+    }
+
+    #[test]
+    fn extract_plan_block_stops_at_next_heading() {
+        let text = "## Plan\n- Do X\n\n## Implementation\ncode here";
+        let plan = extract_plan_block(text).unwrap();
+        assert!(plan.contains("Do X"));
+        assert!(!plan.contains("Implementation"));
+    }
+
+    #[test]
+    fn extract_plan_block_returns_none_when_absent() {
+        assert!(extract_plan_block("No plan section here.").is_none());
+    }
+
+    #[test]
+    fn save_plan_creates_file() {
+        let root = tmp_dir("plan");
+        save_plan(&root, "## Plan\n- Step 1");
+        let path = root.join(".forgiven/plan.md");
+        assert!(path.exists(), "plan.md must be created");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Step 1"));
+        let _ = fs::remove_dir_all(&root);
     }
 }
