@@ -80,6 +80,7 @@ impl AgentPanel {
             codified_context_knowledge_max_bytes: 8192,
             copilot_quota: None,
             copilot_api_base: "https://api.githubcopilot.com".to_string(),
+            nav_state: super::AgentNavState::new(),
         }
     }
 
@@ -795,5 +796,108 @@ impl AgentPanel {
         self.token = Some(api_token);
         self.copilot_quota = crate::agent::auth::fetch_copilot_quota(&oauth).await;
         Ok(tok)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — P1-S7 (code-block copy regression) + P1-S8 (nav state)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentNavState;
+
+    // ── P1-S7: code-block copy preserved ─────────────────────────────────────
+
+    /// extract_code_blocks must continue to work correctly after nav-mode changes.
+    #[test]
+    fn code_block_copy_single_block() {
+        let text = "Here is code:\n```rust\nfn main() {}\n```\nDone.";
+        let blocks = AgentPanel::extract_code_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], "fn main() {}");
+    }
+
+    #[test]
+    fn code_block_copy_multiple_blocks() {
+        let text = "First:\n```\nfoo\n```\nSecond:\n```python\nbar\n```";
+        let blocks = AgentPanel::extract_code_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], "foo");
+        assert_eq!(blocks[1], "bar");
+    }
+
+    #[test]
+    fn code_block_copy_empty_when_no_fences() {
+        let blocks = AgentPanel::extract_code_blocks("No fences here.");
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn code_block_copy_strips_trailing_blank_lines() {
+        let text = "```\ncode\n\n\n```";
+        let blocks = AgentPanel::extract_code_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], "code");
+    }
+
+    // ── P1-S8: nav state transitions ─────────────────────────────────────────
+
+    #[test]
+    fn nav_state_starts_inactive() {
+        let nav = AgentNavState::new();
+        assert!(!nav.active);
+        assert_eq!(nav.cursor_line, 0);
+    }
+
+    #[test]
+    fn nav_state_toggle_active() {
+        let mut nav = AgentNavState::new();
+        nav.active = true;
+        assert!(nav.active);
+        nav.active = false;
+        assert!(!nav.active);
+    }
+
+    #[test]
+    fn nav_cursor_moves_down() {
+        let mut nav = AgentNavState::new();
+        nav.cursor_line = 3;
+        let total = 10usize;
+        nav.cursor_line = (nav.cursor_line + 1).min(total.saturating_sub(1));
+        assert_eq!(nav.cursor_line, 4);
+    }
+
+    #[test]
+    fn nav_cursor_moves_up() {
+        let mut nav = AgentNavState::new();
+        nav.cursor_line = 5;
+        nav.cursor_line = nav.cursor_line.saturating_sub(1);
+        assert_eq!(nav.cursor_line, 4);
+    }
+
+    #[test]
+    fn nav_cursor_clamps_at_zero() {
+        let mut nav = AgentNavState::new();
+        nav.cursor_line = 0;
+        nav.cursor_line = nav.cursor_line.saturating_sub(1);
+        assert_eq!(nav.cursor_line, 0, "cursor must not go below zero");
+    }
+
+    #[test]
+    fn nav_cursor_clamps_at_top() {
+        let mut nav = AgentNavState::new();
+        let total = 10usize;
+        nav.cursor_line = total - 1; // already at maximum
+        nav.cursor_line = (nav.cursor_line + 1).min(total.saturating_sub(1));
+        assert_eq!(nav.cursor_line, total - 1, "cursor must not exceed total_lines - 1");
+    }
+
+    #[test]
+    fn panel_has_nav_state_field() {
+        let panel = AgentPanel::new();
+        assert!(!panel.nav_state.active);
+        assert_eq!(panel.nav_state.cursor_line, 0);
     }
 }

@@ -42,6 +42,16 @@ struct PanelRenderCache {
     streaming_width: usize,
     streaming_lines: Vec<Line<'static>>,
     streaming_row_count: usize,
+    /// Incremental parse state for the streaming reply (ADR 0153).
+    /// Byte offset in streaming_reply where stable (fully-parsed) paragraphs end.
+    /// Everything before this offset is in streaming_stable_lines; only the tail
+    /// [streaming_stable_end..] needs to be re-parsed each frame.
+    streaming_stable_end: usize,
+    /// Pre-rendered content lines for the stable portion of the streaming reply.
+    streaming_stable_lines: Vec<Line<'static>>,
+    /// Total display row count from the most recent completed render.
+    /// Used by the nav cursor key handler to clamp cursor_line.
+    pub total_display_rows: usize,
     /// Cached MCP status bottom-bar line.
     /// Valid when (connected_count, failed_count) match.
     mcp_status_key: (usize, usize),
@@ -59,10 +69,44 @@ impl Default for PanelRenderCache {
             streaming_width: 0,
             streaming_lines: Vec::new(),
             streaming_row_count: 0,
+            streaming_stable_end: 0,
+            streaming_stable_lines: Vec::new(),
+            total_display_rows: 0,
             mcp_status_key: (usize::MAX, usize::MAX),
             mcp_bottom: None,
         }
     }
+}
+
+/// Return the total display row count from the most recent agent panel render.
+/// Used by the nav cursor key handler to clamp `cursor_line` without re-running
+/// the render.  Both the render and the key handler run on the main thread, so
+/// the thread-local is always coherent.
+pub fn agent_panel_total_lines() -> usize {
+    PANEL_CACHE.with(|cell| cell.borrow().total_display_rows)
+}
+
+/// Extract the plain text of a single rendered line from the agent panel cache.
+/// Used by the nav cursor `y` yank command.  Returns an empty string when the
+/// index is out of range (e.g. the blank padding lines at the bottom).
+pub fn agent_panel_line_text(line_idx: usize) -> String {
+    PANEL_CACHE.with(|cell| {
+        let cache = cell.borrow();
+        let total_msg = cache.msg_lines.len();
+        let total_stream = cache.streaming_lines.len();
+        let spans = if line_idx < total_msg {
+            cache.msg_lines[line_idx].spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+        } else if line_idx < total_msg + total_stream {
+            cache.streaming_lines[line_idx - total_msg]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        } else {
+            String::new()
+        };
+        spans
+    })
 }
 
 /// Returns the exact number of terminal rows that `lines` would occupy when
@@ -575,5 +619,62 @@ impl UI {
         if let Some(dashboard) = ctx.insights_dashboard {
             crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — P1-S8: yank line text from PANEL_CACHE
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod ui_nav_tests {
+    use super::*;
+    use ratatui::text::{Line, Span};
+
+    /// Seed PANEL_CACHE with known lines and verify agent_panel_line_text returns
+    /// the correct text for each index.  This exercises the yank path without
+    /// needing a full render cycle.
+    #[test]
+    fn yank_line_produces_correct_text() {
+        PANEL_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            cache.msg_lines = vec![
+                Line::from(vec![Span::raw("╔ 🤖 Copilot ")]),
+                Line::from(vec![Span::raw("Hello, world!")]),
+                Line::from(vec![Span::raw("")]),
+            ];
+            cache.streaming_lines = vec![Line::from(vec![Span::raw("Streaming…")])];
+        });
+
+        assert_eq!(agent_panel_line_text(0), "╔ 🤖 Copilot ");
+        assert_eq!(agent_panel_line_text(1), "Hello, world!");
+        assert_eq!(agent_panel_line_text(2), "");
+        // First streaming line lives right after msg_lines.
+        assert_eq!(agent_panel_line_text(3), "Streaming…");
+        // Out of range → empty string (no panic).
+        assert_eq!(agent_panel_line_text(100), "");
+    }
+
+    /// Verify that agent_panel_total_lines reads the stored total_display_rows.
+    #[test]
+    fn total_lines_reflects_cache() {
+        PANEL_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            cache.total_display_rows = 42;
+        });
+        assert_eq!(agent_panel_total_lines(), 42);
+    }
+
+    /// The incremental parse stable_end field starts at 0 and can be advanced.
+    #[test]
+    fn streaming_stable_end_advances_incrementally() {
+        PANEL_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            assert_eq!(cache.streaming_stable_end, 0);
+            cache.streaming_stable_end = 42;
+            assert_eq!(cache.streaming_stable_end, 42);
+            // Reset for next test.
+            cache.streaming_stable_end = 0;
+        });
     }
 }

@@ -83,7 +83,7 @@ impl UI {
             panel.conversation.archived_messages.len() + panel.conversation.messages.len();
         let cur_streaming_len = panel.streaming_reply.as_ref().map(|s| s.len()).unwrap_or(0);
 
-        let (lines, total_display_rows) = PANEL_CACHE.with(|cell| {
+        let (mut lines, total_display_rows) = PANEL_CACHE.with(|cell| {
             let mut cache = cell.borrow_mut();
 
             // — Completed messages (archived + live) —
@@ -173,7 +173,11 @@ impl UI {
                 cache.msg_row_count = wrapped_line_count(&cache.msg_lines, inner_width);
             }
 
-            // — Streaming reply —
+            // — Streaming reply (incremental parse, ADR 0153) —
+            // On a width change we must re-parse everything (word-wrap depends on
+            // width).  On a length-only change we only re-parse the tail: paragraphs
+            // before the last "\n\n" are pre-rendered into streaming_stable_lines and
+            // are never re-parsed until the width changes.
             if cache.streaming_len != cur_streaming_len || cache.streaming_width != content_width {
                 if let Some(ref partial) = panel.streaming_reply {
                     // Provider-aware streaming header:
@@ -197,7 +201,32 @@ impl UI {
                         };
                         (label, color)
                     };
-                    let mut sl: Vec<Line<'static>> = vec![Line::from(vec![
+
+                    // Reset stable lines when width changes (word-wrap invalidates them).
+                    if cache.streaming_width != content_width {
+                        cache.streaming_stable_end = 0;
+                        cache.streaming_stable_lines.clear();
+                    }
+
+                    // Extend stable lines if new complete paragraphs appeared.
+                    // A "stable" paragraph ends at the last "\n\n" in the buffer.
+                    let new_stable_end = partial
+                        .rfind("\n\n")
+                        .map(|pos| pos + 2) // include the "\n\n" terminator
+                        .unwrap_or(0);
+                    if new_stable_end > cache.streaming_stable_end {
+                        let new_portion = &partial[cache.streaming_stable_end..new_stable_end];
+                        let new_stable =
+                            render_message_content(new_portion, content_width, highlighter);
+                        cache.streaming_stable_lines.extend(new_stable);
+                        cache.streaming_stable_end = new_stable_end;
+                    }
+
+                    // Always re-parse the tail (current incomplete paragraph).
+                    let tail = &partial[cache.streaming_stable_end..];
+                    let tail_lines = render_message_content(tail, content_width, highlighter);
+
+                    let header = Line::from(vec![
                         Span::styled(
                             stream_label,
                             Style::default().fg(stream_color).add_modifier(Modifier::BOLD),
@@ -206,11 +235,18 @@ impl UI {
                             "▋",
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
                         ),
-                    ])];
-                    sl.extend(render_message_content(partial, content_width, highlighter));
+                    ]);
+                    let mut sl: Vec<Line<'static>> = Vec::with_capacity(
+                        1 + cache.streaming_stable_lines.len() + tail_lines.len(),
+                    );
+                    sl.push(header);
+                    sl.extend(cache.streaming_stable_lines.iter().cloned());
+                    sl.extend(tail_lines);
                     cache.streaming_lines = sl;
                 } else {
                     cache.streaming_lines.clear();
+                    cache.streaming_stable_end = 0;
+                    cache.streaming_stable_lines.clear();
                 }
                 cache.streaming_len = cur_streaming_len;
                 cache.streaming_width = content_width;
@@ -231,6 +267,7 @@ impl UI {
             // are additive and do not need the combined Vec — this avoids an
             // extra full clone on every streaming frame.
             let total_display_rows = (cache.msg_row_count + cache.streaming_row_count + 2).max(1);
+            cache.total_display_rows = total_display_rows;
 
             (lines, total_display_rows)
         });
@@ -240,11 +277,28 @@ impl UI {
         // row_offset for Paragraph::scroll: 0 = top of content; max_scroll = show bottom.
         let row_offset = max_scroll.saturating_sub(scroll) as u16;
 
+        // Nav cursor highlight (P1-S5, ADR 0149).
+        // Patch the nav cursor line with a dim blue background so it is visually distinct.
+        // We use the existing Color::Rgb(40, 60, 90) already used in the at-picker for
+        // consistency — no new colours introduced.
+        if panel.nav_state.active {
+            let cursor = panel.nav_state.cursor_line;
+            if cursor < lines.len() {
+                let hl = Style::default().bg(Color::Rgb(40, 60, 90));
+                let patched: Vec<Span<'static>> =
+                    lines[cursor].spans.iter().map(|s| s.clone().patch_style(hl)).collect();
+                lines[cursor] = Line::from(patched);
+            }
+        }
+
         // Build a title that shows the active model, live status, and scroll position.
         let model_label = panel.selected_model_display();
         let status_suffix =
             panel.status.label(panel.max_rounds).map(|s| format!("  ● {s}")).unwrap_or_default();
-        let scroll_suffix: std::borrow::Cow<'static, str> = if scroll > 0 {
+        let scroll_suffix: std::borrow::Cow<'static, str> = if panel.nav_state.active {
+            // Nav mode: replace scroll hint with copy hint so the affordance is visible.
+            "  [NAV: j/k=move  y=copy  Tab=exit] ".to_string().into()
+        } else if scroll > 0 {
             let pct = 100 - (scroll * 100).checked_div(max_scroll).unwrap_or(0).min(100);
             format!("  ↑ scrolled ({pct}%)  ↑/↓ to navigate ").into()
         } else if total_display_rows > visible_height {

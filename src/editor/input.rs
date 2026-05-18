@@ -503,15 +503,27 @@ impl Editor {
         }
 
         match key.code {
-            // Esc — blur panel, return focus to editor.
+            // Esc — exit nav mode if active; otherwise blur the panel.
             KeyCode::Esc => {
-                self.agent_panel.blur();
-                self.mode = Mode::Normal;
+                if self.agent_panel.nav_state.active {
+                    self.agent_panel.nav_state.active = false;
+                } else {
+                    self.agent_panel.blur();
+                    self.mode = Mode::Normal;
+                }
             },
-            // Tab — toggle focus back to editor without closing.
+            // Tab — toggle navigation mode (P1-S5, ADR 0149).
+            // When nav mode is active, j/k move the history cursor and y yanks
+            // the current line to clipboard.  Tab again or Esc deactivates it.
             KeyCode::Tab => {
-                self.agent_panel.blur();
-                self.mode = Mode::Normal;
+                if self.agent_panel.nav_state.active {
+                    self.agent_panel.nav_state.active = false;
+                } else {
+                    self.agent_panel.nav_state.active = true;
+                    // Start at the bottom of the rendered history.
+                    let total = crate::ui::agent_panel_total_lines();
+                    self.agent_panel.nav_state.cursor_line = total.saturating_sub(1);
+                }
             },
             // Alt+Enter — insert a newline into the multi-line input.
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -758,6 +770,31 @@ impl Editor {
                         _ => {
                             // Ignore other keys when awaiting continuation
                         },
+                    }
+                    return Ok(());
+                }
+
+                // Nav mode: j/k move the history cursor; y yanks the current line (P1-S5/P1-S6).
+                if self.agent_panel.nav_state.active {
+                    match ch {
+                        'j' => {
+                            let total = crate::ui::agent_panel_total_lines();
+                            let next = (self.agent_panel.nav_state.cursor_line + 1)
+                                .min(total.saturating_sub(1));
+                            self.agent_panel.nav_state.cursor_line = next;
+                        },
+                        'k' => {
+                            self.agent_panel.nav_state.cursor_line =
+                                self.agent_panel.nav_state.cursor_line.saturating_sub(1);
+                        },
+                        'y' => {
+                            let idx = self.agent_panel.nav_state.cursor_line;
+                            let text = crate::ui::agent_panel_line_text(idx);
+                            let trimmed = text.trim().to_string();
+                            self.sync_system_clipboard(&trimmed);
+                            self.set_status(format!("Line {} copied to clipboard", idx + 1));
+                        },
+                        _ => {},
                     }
                     return Ok(());
                 }
