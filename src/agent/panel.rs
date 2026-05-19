@@ -83,6 +83,9 @@ impl AgentPanel {
             nav_state: super::AgentNavState::new(),
             pending_resume: None,
             plan_pending: false,
+            pending_auto_compact: false,
+            janitor_hysteresis_active: false,
+            tokens_before_compact: 0,
         }
     }
 
