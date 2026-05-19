@@ -86,6 +86,7 @@ impl AgentPanel {
             pending_auto_compact: false,
             janitor_hysteresis_active: false,
             tokens_before_compact: 0,
+            warmup_rx: None,
         }
     }
 
@@ -781,6 +782,96 @@ impl AgentPanel {
             .rev()
             .find(|m| m.role == Role::Assistant)
             .map(|m| m.content.clone())
+    }
+
+    /// Spawn a background task that pre-fetches the Copilot API token and model
+    /// list so the first real submit finds everything cached and runs immediately.
+    /// No-op for providers that don't use OAuth (token exchange is instantaneous
+    /// for static API keys; Ollama needs no auth at all).
+    pub fn start_warmup(&mut self) {
+        if !self.provider.is_oauth() {
+            return;
+        }
+        use super::auth::{exchange_token, fetch_copilot_quota, load_oauth_token};
+        use super::models::fetch_models_for_provider;
+        use super::WarmupResult;
+        let provider = self.provider.clone();
+        let config = self.provider_config.clone();
+        let copilot_api_base = self.copilot_api_base.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<WarmupResult>();
+        self.warmup_rx = Some(rx);
+        tokio::spawn(async move {
+            let oauth = match load_oauth_token() {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("Warmup: failed to load OAuth token: {e}");
+                    let _ = tx.send(WarmupResult {
+                        token: None,
+                        models: Vec::new(),
+                        copilot_api_base: None,
+                    });
+                    return;
+                },
+            };
+            let api_token = match exchange_token(&oauth).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("Warmup: token exchange failed: {e}");
+                    let _ = tx.send(WarmupResult {
+                        token: None,
+                        models: Vec::new(),
+                        copilot_api_base: None,
+                    });
+                    return;
+                },
+            };
+            let base_url = api_token.business_api_url.clone().unwrap_or(copilot_api_base.clone());
+            let _quota = fetch_copilot_quota(&oauth).await;
+            let tok_str = api_token.token.clone();
+            let models = fetch_models_for_provider(&provider, &config, &tok_str, &base_url)
+                .await
+                .unwrap_or_default();
+            tracing::info!("Warmup: cached token + {} models", models.len());
+            let _ = tx.send(WarmupResult {
+                token: Some(api_token),
+                models,
+                copilot_api_base: Some(base_url),
+            });
+        });
+    }
+
+    /// Poll the warmup receiver.  Returns `true` if the warmup result arrived
+    /// this tick (caller should set `needs_render`).
+    pub fn poll_warmup(&mut self, preferred_model: &str) -> bool {
+        let result = if let Some(rx) = self.warmup_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.warmup_rx = None;
+                    Some(r)
+                },
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(_) => {
+                    self.warmup_rx = None;
+                    None
+                },
+            }
+        } else {
+            None
+        };
+        if let Some(r) = result {
+            if let Some(base) = r.copilot_api_base {
+                self.copilot_api_base = base;
+            }
+            if let Some(tok) = r.token {
+                self.token = Some(tok);
+            }
+            if !r.models.is_empty() {
+                self.set_models(r.models, preferred_model);
+            }
+            tracing::info!("Warmup applied: token + models cached");
+            return true;
+        }
+        false
     }
 
     pub(super) async fn ensure_token(&mut self) -> Result<String> {

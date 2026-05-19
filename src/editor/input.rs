@@ -557,44 +557,23 @@ impl Editor {
                 // Project root for tool sandboxing.
                 let project_root =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                // Submit is async; spawn a task and let the stream_rx handle tokens.
-                let panel = &mut self.agent_panel;
-                let max_rounds = self.config.max_agent_rounds;
-                let warning_threshold = self.config.agent_warning_threshold;
-                let preferred_model = self.config.active_default_model().to_string();
-                let auto_compress = self.config.agent.auto_compress_tool_results;
-                let mask_threshold = self.config.agent.observation_mask_threshold_chars;
-                let expand_threshold = self.config.agent.expand_threshold_chars;
-                // We need a blocking submit here.  Use a one-shot channel via block_in_place
-                // or simply call submit synchronously via tokio::task::block_in_place.
-                // Since we are inside an async context, we use a local async block.
-                let fut = panel.submit(
+                // Queue the submit for the async event loop so handle_key() returns
+                // immediately.  The event loop renders once (showing WaitingForResponse
+                // status) before calling submit().await — eliminating the frozen-screen
+                // symptom where the UI was unresponsive for 10+ seconds while the token
+                // exchange / model-fetch HTTP calls ran inside block_in_place.
+                self.agent_panel.status =
+                    crate::agent::AgentStatus::WaitingForResponse { round: 1 };
+                self.pending_submit = Some(crate::editor::PendingSubmitArgs {
                     context,
                     project_root,
-                    max_rounds,
-                    warning_threshold,
-                    &preferred_model,
-                    auto_compress,
-                    mask_threshold,
-                    expand_threshold,
-                );
-                // We can't .await inside handle_key (sync fn), so we use try_join on
-                // the runtime directly.  The cleanest way: push to a queue and process
-                // in the async run() loop.  For now use tokio::task::block_in_place.
-                let submit_err = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        match fut.await {
-                            Ok(()) => None,
-                            Err(e) => {
-                                tracing::warn!("Agent submit error: {}", e);
-                                Some(e.to_string())
-                            },
-                        }
-                    })
+                    max_rounds: self.config.max_agent_rounds,
+                    warning_threshold: self.config.agent_warning_threshold,
+                    preferred_model: self.config.active_default_model().to_string(),
+                    auto_compress: self.config.agent.auto_compress_tool_results,
+                    mask_threshold: self.config.agent.observation_mask_threshold_chars,
+                    expand_threshold: self.config.agent.expand_threshold_chars,
                 });
-                if let Some(e) = submit_err {
-                    self.set_status(format!("Agent error: {e}"));
-                }
                 self.agent_panel.update_slash_menu();
             },
             // Ctrl+Backspace — clear all pending input (text, pastes, images, files).

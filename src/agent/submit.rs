@@ -239,6 +239,12 @@ impl AgentPanel {
                 user_text
             };
 
+        // Show connecting status early so the UI reflects activity if the token
+        // exchange or model fetch takes a few seconds (e.g. first run or expiry).
+        if !self.janitor_compressing {
+            self.status = AgentStatus::WaitingForResponse { round: 1 };
+        }
+
         // ── Resolve token + model before computing the context budget ────────
         // Fetching models first ensures context_window_size() returns the real
         // limit rather than the 128k fallback, so history truncation is correct

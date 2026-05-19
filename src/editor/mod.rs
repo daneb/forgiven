@@ -320,6 +320,27 @@ pub struct Editor {
     /// True from the moment the companion connects to the Nexus socket.
     /// Reset to false when the companion process is killed.
     pub sidecar_client_connected: bool,
+
+    // ── Pending agent submit ──────────────────────────────────────────────────
+    /// Arguments queued by `handle_key()` (Enter in Agent mode) so the async
+    /// event loop can call `agent_panel.submit().await` after one render tick
+    /// has run — giving the user immediate visual feedback before the token
+    /// exchange / model-fetch HTTP calls block the loop.
+    pub pending_submit: Option<PendingSubmitArgs>,
+}
+
+/// Arguments captured from config and buffer state when the user presses Enter
+/// in the agent panel.  Stored in `Editor::pending_submit` and consumed by
+/// the async event loop on the next tick.
+pub struct PendingSubmitArgs {
+    pub context: Option<String>,
+    pub project_root: PathBuf,
+    pub max_rounds: usize,
+    pub warning_threshold: usize,
+    pub preferred_model: String,
+    pub auto_compress: bool,
+    pub mask_threshold: usize,
+    pub expand_threshold: usize,
 }
 
 impl Editor {
@@ -487,6 +508,7 @@ impl Editor {
             image_protocol: None,
             companion_process: None,
             sidecar_client_connected: false,
+            pending_submit: None,
         };
 
         // Spin up the filesystem watcher (best-effort; degrades gracefully).
@@ -753,6 +775,12 @@ impl Editor {
                 self.spawn_companion();
             }
         }
+
+        // ── Agent warmup: pre-fetch Copilot token + model list ────────────────
+        // Runs in the background so the editor opens immediately.  By the time
+        // the user types their first prompt, ensure_token() + ensure_models()
+        // will find everything cached and return instantly.
+        self.agent_panel.start_warmup();
     }
 
     /// Get the currently active buffer
