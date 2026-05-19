@@ -49,6 +49,7 @@ pub struct ContextBreakdown {
 }
 
 impl ContextBreakdown {
+    /// Sum of all segment token estimates (excludes the `ctx_window` ceiling).
     pub fn total(&self) -> u32 {
         self.sys_rules_t + self.ctx_file_t + self.history_t + self.user_msg_t
     }

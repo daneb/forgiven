@@ -52,6 +52,7 @@ use crate::spec_framework::SpecFramework;
 // Data types
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A single message in the agent conversation history.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: Role,
@@ -73,6 +74,7 @@ pub struct ClipboardImage {
     pub data_uri: String,
 }
 
+/// Sender role for a [`ChatMessage`]: user instruction, model reply, or display-only system divider.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Role {
     User,
@@ -82,6 +84,7 @@ pub enum Role {
 }
 
 impl Role {
+    /// Return the lowercase string representation used in API payloads.
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::User => "user",
@@ -168,6 +171,7 @@ pub struct AgentNavState {
 }
 
 impl AgentNavState {
+    /// Create a new nav state with nav mode inactive and the cursor at line 0.
     pub fn new() -> Self {
         Self { active: false, cursor_line: 0 }
     }
@@ -232,6 +236,8 @@ pub struct AtPickerState {
     pub selected: usize,
 }
 
+/// All UI and runtime state for the agent panel: conversation history, streaming status,
+/// context budget accounting, tool-call tracking, and session persistence handles.
 pub struct AgentPanel {
     pub visible: bool,
     pub focused: bool,
@@ -489,6 +495,10 @@ impl AgentStatus {
     }
 }
 
+/// Events produced by the agentic loop and consumed by `poll_stream()` on every tick.
+///
+/// Variants cover the full lifecycle of a streaming round: token output, tool execution,
+/// file changes, user questions, usage accounting, and completion.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Token(String),

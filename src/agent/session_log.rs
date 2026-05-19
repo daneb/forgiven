@@ -268,12 +268,15 @@ pub fn project_init(root: &Path) -> bool {
 // P2-S8/S9: Project-local session persistence
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A chat message serialized to JSON for session persistence (role + content only).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct SerializedMessage {
     pub role: String,
     pub content: String,
 }
 
+/// A persisted conversation checkpoint written to `.forgiven/sessions/<id>.json`.
+/// Loaded on the next startup to offer session resume.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct SavedSession {
     pub session_start_secs: u64,
