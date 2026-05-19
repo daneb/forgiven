@@ -42,7 +42,7 @@ impl std::fmt::Display for TokenExpiredError {
 impl std::error::Error for TokenExpiredError {}
 
 #[derive(Debug, Clone)]
-pub(super) struct CopilotApiToken {
+pub(crate) struct CopilotApiToken {
     pub token: String,
     pub expires_at: u64,
     /// Business API base URL from the token exchange response (e.g.
@@ -51,7 +51,7 @@ pub(super) struct CopilotApiToken {
 }
 
 impl CopilotApiToken {
-    pub(super) fn is_expired(&self) -> bool {
+    pub(crate) fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

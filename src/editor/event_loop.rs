@@ -115,6 +115,12 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
+            // ── Agent warmup: apply pre-fetched token + model list ────────────
+            let preferred = self.config.active_default_model().to_string();
+            if self.agent_panel.poll_warmup(&preferred) {
+                needs_render = true;
+            }
+
             // ── Agent panel stream polling ─────────────────────────────────────
             let agent_active = self.agent_panel.poll_stream();
             if let Some(err) = self.agent_panel.last_error.take() {
@@ -579,6 +585,32 @@ impl Editor {
                 }
                 self.render()?;
                 needs_render = false;
+            }
+
+            // ── Pending submit (queued by handle_key to allow one render first) ──
+            // Runs AFTER render() so the user sees WaitingForResponse status before
+            // the token-exchange / model-fetch HTTP calls run.  submit() is fast when
+            // the warmup task has already cached the token and model list.
+            if let Some(args) = self.pending_submit.take() {
+                if let Err(e) = self
+                    .agent_panel
+                    .submit(
+                        args.context,
+                        args.project_root,
+                        args.max_rounds,
+                        args.warning_threshold,
+                        &args.preferred_model,
+                        args.auto_compress,
+                        args.mask_threshold,
+                        args.expand_threshold,
+                    )
+                    .await
+                {
+                    tracing::warn!("Agent submit error: {e}");
+                    self.set_status(format!("Agent error: {e}"));
+                    self.agent_panel.status = crate::agent::AgentStatus::Idle;
+                }
+                needs_render = true;
             }
 
             // ── Input (blocks up to 50 ms) ─────────────────────────────────────

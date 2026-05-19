@@ -435,6 +435,18 @@ pub struct AgentPanel {
     /// Token count captured just before `compress_history()` is called so the
     /// JanitorDone status can display "N→M tokens".
     pub tokens_before_compact: u32,
+    /// Background warmup receiver: pre-fetches the Copilot token + model list at
+    /// startup so the first submit finds everything cached.
+    pub warmup_rx: Option<oneshot::Receiver<WarmupResult>>,
+}
+
+/// Result of the background startup warmup task.
+/// Carries the pre-fetched API token and model list so `poll_warmup()` can
+/// install them without any network round-trips on first submit.
+pub(crate) struct WarmupResult {
+    pub(crate) token: Option<CopilotApiToken>,
+    pub(crate) models: Vec<ModelVersion>,
+    pub(crate) copilot_api_base: Option<String>,
 }
 
 /// A model returned by the Copilot `/models` endpoint.
