@@ -117,8 +117,106 @@ Horizontal split (terminal width W):
 
 ---
 
-## Future phases (not in scope here)
+---
 
-- **Phase 1** — Conversation thread UX (message editing, branching)
-- **Phase 2** — Diff viewer integration
-- **Phase 3** — Embedded terminal pane
+## Phase 1 — Streaming & Copy UX
+
+### Slices
+
+| ID     | Name                              | Status |
+|--------|-----------------------------------|--------|
+| P1-S1  | Raise MAX_TOKENS_PER_FRAME → 256  | ☑      |
+| P1-S2  | Per-paragraph markdown cache      | ☑      |
+| P1-S3  | Throughput benchmark              | ☑      |
+| P1-S4  | AgentNavState struct              | ☑      |
+| P1-S5  | Tab / j / k nav mode              | ☑      |
+| P1-S6  | `y` yanks current line            | ☑      |
+| P1-S7  | `Y` copies fenced code block      | ☑      |
+| P1-S8  | Nav state + yank tests            | ☑      |
+
+### Decisions that diverged from the original plan
+
+**Nav mode activation**: Tab toggles `AgentNavState.active`; Esc or Tab again
+exits.  The original plan described a vim-style visual selection; the final
+implementation uses a lighter cursor-line highlight to avoid conflicts with the
+existing Normal/Visual key dispatch.
+
+**Render rate cap**: `AGENT_RENDER_INTERVAL` of 50 ms (≤ 20 Hz) is applied only
+when streaming is the sole reason to repaint.  When another source (keyboard,
+watcher) already set `needs_render`, the frame fires immediately.
+
+---
+
+## Phase 2 — Harness Capabilities
+
+### Slices
+
+| ID      | Name                                       | Status |
+|---------|--------------------------------------------|--------|
+| P2-S1   | Extend build_structural_map() to non-.rs   | ☑      |
+| P2-S2   | Symbol reference graph                     | ☑      |
+| P2-S3   | PageRank over reference graph              | ☑      |
+| P2-S4   | Ranked repo-map injection                  | ☑      |
+| P2-S5   | Repo map token cap (default 4 096)         | ☑      |
+| P2-S6   | PageRank tests                             | ☑      |
+| P2-S7   | Project init / constitution.md             | ☑      |
+| P2-S8   | Session serialisation to .forgiven/        | ☑      |
+| P2-S9   | Load most-recent session on startup        | ☑      |
+| P2-S10  | /plan command + plan.md persistence        | ☑      |
+| P2-S11  | Session harness tests                      | ☑      |
+
+### Decisions that diverged from the original plan
+
+**Repo-map algorithm**: The plan specified simple reference counting.
+Implementation uses a proper PageRank (damping = 0.85, convergence 1e-6) over
+the symbol reference graph so transitively important files rank higher.  No
+new crate dependency — iterative matrix multiplication in stdlib.
+
+**Session resume UI**: Restore happens automatically on the first submit if a
+`.forgiven/sessions/<id>.json` exists from a previous session.  A system
+message shows "Session restored" and the user can dismiss with Ctrl+Backspace.
+The opt-out key binding (Ctrl+D at the prompt) was not implemented; the
+message serves as the notification.
+
+**Constitution prompt**: Emitted as the first user message on `project_init()`
+and stored to `.forgiven/constitution.md`.  The prompt is fixed (not
+configurable per project in this phase).
+
+---
+
+## Phase 3 — Auto-Compaction & Token Management
+
+### Slices
+
+| ID     | Name                                       | Status |
+|--------|--------------------------------------------|--------|
+| P3-S1  | Auto-compact at 70 % of context window     | ☑      |
+| P3-S2  | Hysteresis — no double-fire                | ☑      |
+| P3-S3  | ⚡ / ✓ compact UX with N→M token counts   | ☑      |
+| P3-S4  | ADR invariant debug_assert                 | ☑      |
+| P3-S5  | Per-tool token cost in activity log        | ☑      |
+| P3-S6  | /compact manual command                    | ☑      |
+| P3-S7  | Threshold / hysteresis / invariant tests   | ☑      |
+
+### Decisions that diverged from the original plan
+
+**No `janitor_threshold_tokens` config key**: The plan proposed a new config
+field.  Implementation computes the threshold dynamically as
+`context_window * 70 / 100` each round using the live `context_window_size()`
+value.  This automatically adapts to model switches mid-session and avoids
+stale config values when the user switches providers.
+
+**`run_janitor_compress()` shared method**: The compress-then-submit logic was
+extracted from the `Action::AgentJanitorCompress` match arm into a shared
+`Editor::run_janitor_compress()` called by both the action arm (`SPC a j`) and
+the event-loop auto-compact path.  This was not in the original plan but
+eliminates duplication.
+
+**`/compact` routes through `pending_auto_compact`**: Rather than a separate
+code path, `/compact` detected in `submit()` sets `pending_auto_compact = true`
+and returns early.  The event loop picks it up next tick and calls
+`run_janitor_compress()`, giving identical behaviour to the auto-trigger.
+
+**`StreamEvent::ToolDone` token cost**: Added `token_cost: u32` (chars/4
+heuristic) to the existing event rather than a separate `TokenDelta` event.
+This keeps the event enum flat and avoids ordering dependencies between events.

@@ -230,23 +230,28 @@ impl AgentPanel {
         self.selected_model = default_idx;
     }
 
+    /// Toggle panel visibility and sync `focused` to match.
     pub fn toggle_visible(&mut self) {
         self.visible = !self.visible;
         self.focused = self.visible;
     }
 
+    /// Give the panel keyboard focus.
     pub fn focus(&mut self) {
         self.focused = true;
     }
 
+    /// Remove keyboard focus from the panel.
     pub fn blur(&mut self) {
         self.focused = false;
     }
 
+    /// Forward a typed character to the conversation input field.
     pub fn input_char(&mut self, ch: char) {
         self.conversation.input_char(ch);
     }
 
+    /// Delete the character before the cursor, or pop the last attachment block if input is empty.
     pub fn input_backspace(&mut self) {
         if self.conversation.input_cursor == 0 {
             // No typed text to delete — pop the last paste/image/file block instead.
@@ -268,22 +273,27 @@ impl AgentPanel {
         self.conversation.input_cursor = prev;
     }
 
+    /// Insert a newline at the cursor position in the input field.
     pub fn input_newline(&mut self) {
         self.conversation.input_newline();
     }
 
+    /// Move the input cursor one character to the left.
     pub fn cursor_left(&mut self) {
         self.conversation.cursor_left();
     }
 
+    /// Move the input cursor one character to the right.
     pub fn cursor_right(&mut self) {
         self.conversation.cursor_right();
     }
 
+    /// Navigate backward through the input history (older entries).
     pub fn history_up(&mut self) {
         self.conversation.history_up();
     }
 
+    /// Navigate forward through the input history (newer entries).
     pub fn history_down(&mut self) {
         self.conversation.history_down();
     }
@@ -688,14 +698,17 @@ impl AgentPanel {
         }
     }
 
+    /// Scroll the panel up by 3 lines (increases scroll offset — content moves up).
     pub fn scroll_up(&mut self) {
         self.scroll += 3;
     }
 
+    /// Scroll the panel down by 3 lines (decreases scroll offset — content moves down).
     pub fn scroll_down(&mut self) {
         self.scroll = self.scroll.saturating_sub(3);
     }
 
+    /// Jump to the bottom of the panel (reset scroll offset to 0).
     #[allow(dead_code)]
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = 0;
@@ -703,6 +716,7 @@ impl AgentPanel {
 
     // ── Code extraction ───────────────────────────────────────────────────────
 
+    /// Extract all fenced code blocks from a markdown string (any language tag or none).
     pub fn extract_code_blocks(text: &str) -> Vec<String> {
         let mut blocks = Vec::new();
         let mut in_block = false;

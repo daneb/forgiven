@@ -73,10 +73,10 @@ Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 
 ## Cross-cutting
 
-- [ ] **CC-1** — All new public types/functions have rustdoc comments
-- [ ] **CC-2** — `cargo clippy -D warnings` passes after each phase
-- [ ] **CC-3** — `cargo test` full suite green after each phase
-- [ ] **CC-4** — Update `docs/agent-panel-redesign.md` with any decisions that diverge from the plan
+- [x] **CC-1** — All new public types/functions have rustdoc comments
+- [x] **CC-2** — `cargo clippy -D warnings` passes after each phase
+- [x] **CC-3** — `cargo test` full suite green after each phase
+- [x] **CC-4** — Update `docs/agent-panel-redesign.md` with any decisions that diverge from the plan
 
 ---
 
@@ -88,5 +88,5 @@ Goal: automatic context hygiene; never hit the hard limit; transparent to user.
 | P1 — Streaming & Copy | 8 | 8 | Complete |
 | P2 — Harness | 11 | 11 | Complete |
 | P3 — Compaction | 7 | 7 | Complete |
-| Cross-cutting | 4 | 0 | Not started |
-| **Total** | **35** | **31** | — |
+| Cross-cutting | 4 | 4 | Complete |
+| **Total** | **35** | **35** | **All done** |
