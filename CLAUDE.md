@@ -25,9 +25,7 @@ make deny             # cargo-deny licence/advisory check
 cargo test test_name_substring
 cargo test config::tests::active_model_copilot -- --nocapture
 
-# Companion window (Tauri sidecar — requires Node/npm)
-make companion        # cd companion && npm install && npm run tauri build
-make install          # build both binaries and install to ~/.local/bin
+make install          # build and install forgiven to ~/.local/bin
 
 # Install required dev tools (once)
 make install-tools    # cargo-audit, cargo-deny

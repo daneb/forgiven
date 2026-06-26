@@ -10,7 +10,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── macOS DMG (forgiven universal binary + companion .app) ─────────────────
+  # ── macOS DMG (forgiven universal binary) ────────────────────────────────────
   build-macos:
     name: Build (macOS DMG)
     runs-on: macos-latest
@@ -38,21 +38,10 @@ jobs:
             target/aarch64-apple-darwin/release/forgiven
           chmod +x forgiven
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install companion dependencies
-        run: cd companion && npm install
-
-      - name: Build companion (release binary)
-        run: cd companion/src-tauri && cargo build --release
-
       - name: Create DMG
         run: |
           mkdir -p dmg-staging
           cp forgiven dmg-staging/
-          cp companion/src-tauri/target/release/forgiven-companion dmg-staging/
           ln -s /Applications dmg-staging/Applications
           hdiutil create \
             -volname "Forgiven" \
