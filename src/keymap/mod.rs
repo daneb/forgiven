@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 /// Editor modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Mode {
     Normal,
     Insert,
@@ -60,6 +61,7 @@ impl TextObjectKind {
 
 /// An editor action to be executed
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Action {
     Noop,
     Insert,

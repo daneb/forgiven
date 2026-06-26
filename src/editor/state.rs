@@ -182,6 +182,7 @@ pub struct HoverPopupState {
 // ── Multi-file review / change set view (ADR 0113) ───────────────────────────
 
 /// A single line in a per-file unified diff.
+#[allow(dead_code)]
 pub enum DiffLine {
     /// Unchanged context line (shown dimmed).
     Context(String),
@@ -253,6 +254,7 @@ pub struct ReviewChangesState {
     pub hunk_line_offsets: Vec<Vec<usize>>,
 }
 
+#[allow(dead_code)]
 impl ReviewChangesState {
     /// Build from agent session state vs the current on-disk state.
     /// `created_paths` lists files newly created by the agent (original = "").
@@ -308,6 +310,7 @@ impl ReviewChangesState {
 
 /// Compute flat-line offsets for files and hunks within each file.
 /// Returns `(file_offsets, hunk_line_offsets)`.
+#[allow(dead_code)]
 pub(crate) fn review_compute_offsets(diffs: &[FileDiff]) -> (Vec<usize>, Vec<Vec<usize>>) {
     let mut file_offsets = Vec::with_capacity(diffs.len());
     let mut hunk_line_offsets: Vec<Vec<usize>> = Vec::with_capacity(diffs.len());
@@ -330,6 +333,7 @@ pub(crate) fn review_compute_offsets(diffs: &[FileDiff]) -> (Vec<usize>, Vec<Vec
 
 /// Produce unified-diff lines (with 3-line context groups) via the `similar` crate.
 /// Returns `(lines, hunk_count)`.
+#[allow(dead_code)]
 pub(crate) fn review_diff_lines(original: &str, current: &str) -> (Vec<DiffLine>, usize) {
     use similar::{ChangeTag, TextDiff};
     if original == current {

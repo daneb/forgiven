@@ -36,34 +36,6 @@ async fn one_shot_with_provider(
         ProviderKind::Ollama => {
             (String::new(), format!("{}/v1/chat/completions", config.ollama_base_url), false)
         },
-        ProviderKind::Anthropic => (
-            config.api_key.clone(),
-            "https://api.anthropic.com/v1/chat/completions".to_string(),
-            false,
-        ),
-        ProviderKind::OpenAi => {
-            (config.api_key.clone(), format!("{}/chat/completions", config.openai_base_url), false)
-        },
-        ProviderKind::Gemini => (
-            config.api_key.clone(),
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string(),
-            false,
-        ),
-        ProviderKind::OpenRouter => (
-            config.api_key.clone(),
-            "https://openrouter.ai/api/v1/chat/completions".to_string(),
-            false,
-        ),
-        ProviderKind::DeepSeek => (
-            config.api_key.clone(),
-            format!("{}/chat/completions", config.deepseek_base_url),
-            false,
-        ),
-        ProviderKind::LmStudio => (
-            config.lmstudio_api_key.clone(),
-            format!("{}/chat/completions", config.lmstudio_base_url),
-            false,
-        ),
     };
 
     // For Ollama reasoning models (e.g. gemma4:e4b), disable the thinking/reasoning
@@ -115,15 +87,6 @@ async fn one_shot_with_provider(
             .header("editor-plugin-version", "forgiven-copilot/0.1.0")
             .header("openai-intent", "conversation-panel");
     }
-    if matches!(provider, ProviderKind::OpenRouter) {
-        if !config.openrouter_site_url.is_empty() {
-            req = req.header("HTTP-Referer", &config.openrouter_site_url);
-        }
-        if !config.openrouter_app_name.is_empty() {
-            req = req.header("X-Title", &config.openrouter_app_name);
-        }
-    }
-
     tracing::info!(provider = %provider.display_name(), model = model_id, "one_shot request sending");
 
     let resp =
@@ -226,6 +189,7 @@ pub(super) fn strip_json_commit_msg(raw: &str) -> String {
 /// This function scans each line character-by-character and applies the
 /// transformation only to `[…]` groups that (a) contain `(` or `)` and
 /// (b) are not already quoted.
+#[allow(dead_code)]
 pub(super) fn fix_mermaid_parens(source: &str) -> String {
     let mut result = String::with_capacity(source.len() + 64);
     for line in source.lines() {
@@ -416,12 +380,9 @@ impl Editor {
             return;
         }
 
-        let model_id = self
-            .agent_panel
-            .selected_model_id_with_fallback(self.config.active_default_model())
-            .to_string();
-        let provider_kind = self.agent_panel.provider.clone();
-        let provider_config = self.agent_panel.provider_config.clone();
+        let model_id = self.selected_model.clone();
+        let provider_kind = self.provider.clone();
+        let provider_config = self.provider_config.clone();
 
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -577,12 +538,9 @@ impl Editor {
             return;
         }
 
-        let model_id = self
-            .agent_panel
-            .selected_model_id_with_fallback(self.config.active_default_model())
-            .to_string();
-        let provider_kind = self.agent_panel.provider.clone();
-        let provider_config = self.agent_panel.provider_config.clone();
+        let model_id = self.selected_model.clone();
+        let provider_kind = self.provider.clone();
+        let provider_config = self.provider_config.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let system = "You are a technical writer creating release notes for a software project. \
@@ -837,251 +795,10 @@ impl Editor {
         }
     }
 
-    /// Extract the current (or next) mermaid diagram from the last agent reply,
-    /// auto-fix parentheses in node labels, write a self-contained HTML file to
-    /// the system temp directory, and open it in the default browser.
+    /// Open a mermaid diagram in the browser (agent panel removed — no-op in slim build).
+    #[allow(dead_code)]
     pub(super) fn open_mermaid_in_browser(&mut self) {
-        let reply = match self.agent_panel.last_assistant_reply() {
-            Some(r) => r,
-            None => {
-                self.set_status("No agent reply to render".to_string());
-                return;
-            },
-        };
-
-        let blocks = crate::agent::AgentPanel::extract_mermaid_blocks(&reply);
-        if blocks.is_empty() {
-            self.set_status("No mermaid blocks in last reply".to_string());
-            return;
-        }
-
-        let idx = self.agent_panel.mermaid_block_idx % blocks.len();
-        let source = fix_mermaid_parens(&blocks[idx]);
-        self.agent_panel.mermaid_block_idx =
-            (self.agent_panel.mermaid_block_idx + 1) % blocks.len();
-
-        let html = format!(
-            r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Mermaid diagram {num}/{total}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body {{
-    margin: 0;
-    padding: 2rem;
-    background: #1e1e2e;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-    min-height: 100vh;
-  }}
-  .mermaid {{ max-width: 100%; }}
-</style>
-</head>
-<body>
-<pre class="mermaid">
-{source}
-</pre>
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});
-</script>
-</body>
-</html>"#,
-            num = idx + 1,
-            total = blocks.len(),
-            source = source,
-        );
-
-        let path = std::env::temp_dir().join(format!("forgiven_mermaid_{}.html", idx + 1));
-        if let Err(e) = std::fs::write(&path, &html) {
-            self.set_status(format!("Failed to write mermaid file: {e}"));
-            return;
-        }
-
-        #[cfg(target_os = "macos")]
-        let opener = "open";
-        #[cfg(target_os = "linux")]
-        let opener = "xdg-open";
-
-        match std::process::Command::new(opener).arg(&path).spawn() {
-            Ok(_) => self.set_status(format!(
-                "Mermaid diagram {}/{} opened in browser  (Ctrl+M for next)",
-                idx + 1,
-                blocks.len()
-            )),
-            Err(e) => self.set_status(format!("Failed to open browser: {e}")),
-        }
-    }
-
-    // ==========================================================================
-    // Insights narrative (Phase 4, ADR 0129)
-    // ==========================================================================
-
-    /// Build an analysis prompt from `AggregatedInsights` for the LLM narrative.
-    fn build_narrative_prompt(
-        insights: &crate::insights::aggregator::AggregatedInsights,
-        history_snippets: &str,
-    ) -> String {
-        let log = &insights.log;
-        let ses = &insights.sessions;
-        let total_requests = log.llm_request_count + log.one_shot_count;
-        let date_range = match (&log.first_date, &log.last_date) {
-            (Some(f), Some(l)) if f == l => f.clone(),
-            (Some(f), Some(l)) => format!("{f} to {l}"),
-            _ => "unknown date range".to_string(),
-        };
-
-        let mut prompt = format!(
-            "You are analysing a developer's AI-assisted coding session history for the \
-             Forgiven editor. Produce a concise qualitative narrative (under 400 words) \
-             with exactly three sections:\n\
-             ## What's working well\n\
-             ## What's hindering progress\n\
-             ## Quick wins\n\n\
-             Base your analysis on these collaboration statistics:\n\n\
-             - Date range: {date_range}\n\
-             - Active days: {active_days}\n\
-             - Editor sessions: {sessions}\n\
-             - Total LLM requests: {total_requests}\n\
-             - Agentic rounds: {agentic}\n\
-             - Chat-only rounds: {chat_only}\n\
-             - One-shot calls: {one_shot}\n\
-             - Buffer saves: {saves}\n\
-             - Log warnings: {warns}, errors: {errors}\n",
-            active_days = log.active_days,
-            sessions = log.session_count,
-            agentic = log.llm_request_count.saturating_sub(log.chat_only_count),
-            chat_only = log.chat_only_count,
-            one_shot = log.one_shot_count,
-            saves = log.buffer_save_count,
-            warns = log.warn_count,
-            errors = log.error_count,
-        );
-
-        if !ses.sessions.is_empty() {
-            prompt.push_str(&format!(
-                "- Recorded sessions (JSONL): {count}\n\
-                 - Avg rounds/session: {avg_rounds:.1}\n\
-                 - Avg files changed/session: {avg_files:.1}\n\
-                 - Total prompt tokens: {pt}\n\
-                 - Total completion tokens: {ct}\n\
-                 - Tool errors recorded: {tool_errs}\n",
-                count = ses.sessions.len(),
-                avg_rounds = ses.avg_rounds(),
-                avg_files = ses.avg_files(),
-                pt = ses.total_prompt_tokens,
-                ct = ses.total_completion_tokens,
-                tool_errs = ses.tool_errors.len(),
-            ));
-        }
-
-        if !insights.log.models.is_empty() {
-            let mut models: Vec<_> = insights.log.models.iter().collect();
-            models.sort_by(|a, b| b.1.cmp(a.1));
-            let model_list: Vec<String> =
-                models.iter().take(5).map(|(m, c)| format!("{m} ({c})")).collect();
-            prompt.push_str(&format!("- Top models used: {}\n", model_list.join(", ")));
-        }
-
-        if !history_snippets.is_empty() {
-            prompt.push_str(&format!(
-                "\nRecent session sample (last messages, truncated):\n```\n{history_snippets}\n```\n"
-            ));
-        }
-
-        prompt.push_str(
-            "\nOutput only the three markdown sections. Be specific and actionable, not generic.",
-        );
-        prompt
-    }
-
-    /// Kick off an async LLM call to generate the insights narrative.
-    ///
-    /// Reads up to `max_history_files` recent history JSONL files to extract a
-    /// representative sample of user messages, then sends the combined prompt
-    /// through `one_shot_with_provider`. The result is delivered via
-    /// `self.insights_narrative_rx` and polled in the event loop.
-    pub(super) fn generate_insights_narrative(&mut self, max_history_files: usize) {
-        let data_dir = match crate::config::Config::log_path()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        {
-            Some(d) => d,
-            None => {
-                self.set_status("Cannot resolve data directory for insights".to_string());
-                return;
-            },
-        };
-
-        let insights = crate::insights::build_insights(&data_dir);
-
-        // Collect a sample of recent user messages from history JSONL files.
-        let history_dir = data_dir.join("history");
-        let history_snippets = Self::sample_history(&history_dir, max_history_files);
-
-        let user_prompt = Self::build_narrative_prompt(&insights, &history_snippets);
-        let system = "You are a concise technical analyst. \
-            Output only valid markdown with exactly the three requested sections.";
-
-        let model_id = self
-            .agent_panel
-            .selected_model_id_with_fallback(self.config.active_default_model())
-            .to_string();
-        let provider_kind = self.agent_panel.provider.clone();
-        let provider_config = self.agent_panel.provider_config.clone();
-
-        let (tx, rx) = oneshot::channel();
-        tokio::spawn(async move {
-            let result = one_shot_with_provider(
-                &provider_kind,
-                &provider_config,
-                &model_id,
-                system,
-                &user_prompt,
-                1024,
-            )
-            .await;
-            let _ = tx.send(result);
-        });
-
-        self.insights_narrative_rx = Some(rx);
-        self.set_status("Generating insights narrative…".to_string());
-    }
-
-    /// Read up to `max_files` recent history JSONL files and extract a short
-    /// sample of user message text (first 120 chars per message, max 30 messages).
-    fn sample_history(history_dir: &std::path::Path, max_files: usize) -> String {
-        let Ok(mut entries) = std::fs::read_dir(history_dir) else { return String::new() };
-        let mut files: Vec<std::path::PathBuf> =
-            entries.by_ref().filter_map(|e| e.ok().map(|e| e.path())).collect();
-        // Sort descending (newest first) — file names are Unix timestamps.
-        files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-        files.truncate(max_files);
-
-        let mut snippets: Vec<String> = Vec::new();
-        'outer: for path in &files {
-            let Ok(content) = std::fs::read_to_string(path) else { continue };
-            for line in content.lines() {
-                if snippets.len() >= 30 {
-                    break 'outer;
-                }
-                // Extract role and content cheaply without full deserialisation.
-                if line.contains("\"role\":\"user\"") || line.contains("\"role\": \"user\"") {
-                    if let Some(start) =
-                        line.find("\"content\":\"").or_else(|| line.find("\"content\": \""))
-                    {
-                        let rest = &line[start..];
-                        if let Some(inner) = rest.find('"').and_then(|i| rest.get(i + 1..)) {
-                            let snippet: String = inner.chars().take(120).collect();
-                            snippets.push(snippet);
-                        }
-                    }
-                }
-            }
-        }
-        snippets.join("\n")
+        self.set_status("Mermaid browser view removed in slim build".to_string());
     }
 }
 

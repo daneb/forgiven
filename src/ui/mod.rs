@@ -8,121 +8,30 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-use crate::agent::{
-    split_thinking, AgentPanel, AgentTask, AskUserInputState, AskUserState, AtPickerState,
-    ChatMessage, ContentSegment, ProviderKind, Role, SlashMenuState,
-};
 use crate::buffer::{Cursor, Selection};
 use crate::editor::{HoverPopupState, InlineAssistPhase, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
 
-mod agent_panel;
 mod buffer_view;
+mod explorer_view;
 mod markdown;
 mod pickers;
 mod popups;
 mod search_lsp;
 mod status;
 
-/// Per-frame render cache for the agent panel.
-/// Avoids re-parsing markdown and re-running split_thinking() for messages
-/// that have not changed since the last frame.
-struct PanelRenderCache {
-    /// Completed-message lines + their exact ratatui row count.
-    /// Valid when (msg_count, content_width) match.
-    msg_count: usize,
-    content_width: usize,
-    msg_lines: Vec<Line<'static>>,
-    msg_row_count: usize,
-    /// Streaming-reply lines + their exact ratatui row count.
-    /// Valid when (streaming_len, streaming_width) match.
-    streaming_len: usize,
-    streaming_width: usize,
-    streaming_lines: Vec<Line<'static>>,
-    streaming_row_count: usize,
-    /// Incremental parse state for the streaming reply (ADR 0153).
-    /// Byte offset in streaming_reply where stable (fully-parsed) paragraphs end.
-    /// Everything before this offset is in streaming_stable_lines; only the tail
-    /// [streaming_stable_end..] needs to be re-parsed each frame.
-    streaming_stable_end: usize,
-    /// Pre-rendered content lines for the stable portion of the streaming reply.
-    streaming_stable_lines: Vec<Line<'static>>,
-    /// Total display row count from the most recent completed render.
-    /// Used by the nav cursor key handler to clamp cursor_line.
-    pub total_display_rows: usize,
-    /// Cached MCP status bottom-bar line.
-    /// Valid when (connected_count, failed_count) match.
-    mcp_status_key: (usize, usize),
-    mcp_bottom: Option<Line<'static>>,
-}
-
-impl Default for PanelRenderCache {
-    fn default() -> Self {
-        Self {
-            msg_count: usize::MAX, // force initial render
-            content_width: 0,
-            msg_lines: Vec::new(),
-            msg_row_count: 0,
-            streaming_len: usize::MAX, // force initial render
-            streaming_width: 0,
-            streaming_lines: Vec::new(),
-            streaming_row_count: 0,
-            streaming_stable_end: 0,
-            streaming_stable_lines: Vec::new(),
-            total_display_rows: 0,
-            mcp_status_key: (usize::MAX, usize::MAX),
-            mcp_bottom: None,
-        }
-    }
-}
-
-/// Return the total display row count from the most recent agent panel render.
-/// Used by the nav cursor key handler to clamp `cursor_line` without re-running
-/// the render.  Both the render and the key handler run on the main thread, so
-/// the thread-local is always coherent.
-pub fn agent_panel_total_lines() -> usize {
-    PANEL_CACHE.with(|cell| cell.borrow().total_display_rows)
-}
-
-/// Extract the plain text of a single rendered line from the agent panel cache.
-/// Used by the nav cursor `y` yank command.  Returns an empty string when the
-/// index is out of range (e.g. the blank padding lines at the bottom).
-pub fn agent_panel_line_text(line_idx: usize) -> String {
-    PANEL_CACHE.with(|cell| {
-        let cache = cell.borrow();
-        let total_msg = cache.msg_lines.len();
-        let total_stream = cache.streaming_lines.len();
-        let spans = if line_idx < total_msg {
-            cache.msg_lines[line_idx].spans.iter().map(|s| s.content.as_ref()).collect::<String>()
-        } else if line_idx < total_msg + total_stream {
-            cache.streaming_lines[line_idx - total_msg]
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>()
-        } else {
-            String::new()
-        };
-        spans
-    })
-}
-
 /// Returns the exact number of terminal rows that `lines` would occupy when
 /// rendered in a [`Paragraph`] with `Wrap { trim: false }` at `inner_width`
 /// columns.  Falls back to `lines.len()` (one row each) when `inner_width`
 /// is zero to avoid a division-by-zero in ratatui's layout code.
+#[allow(dead_code)]
 fn wrapped_line_count(lines: &[Line<'static>], inner_width: usize) -> usize {
     if inner_width == 0 || lines.is_empty() {
         return lines.len();
     }
     Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false }).line_count(inner_width as u16)
-}
-
-thread_local! {
-    static PANEL_CACHE: std::cell::RefCell<PanelRenderCache> =
-        std::cell::RefCell::new(PanelRenderCache::default());
 }
 
 /// Data for the release notes popup (Mode::ReleaseNotes).
@@ -141,35 +50,12 @@ pub struct ReleaseNotesView<'a> {
 pub struct DiagnosticsData<'a> {
     /// Crate version string, e.g. "0.3.1".
     pub version: &'static str,
-    /// MCP: (server_name, tool_count) for each connected server.
-    pub mcp_connected: Vec<(&'a str, usize)>,
-    /// MCP: (server_name, error) for each failed server.
-    pub mcp_failed: &'a [(String, String)],
     /// LSP server names that are active.
     pub lsp_servers: Vec<&'a str>,
     /// Path to the log file.
     pub log_path: &'a str,
     /// Recent log entries (level, message) newest-last.
     pub recent_logs: &'a [(String, String)],
-    /// Agent session token totals: (prompt_total, completion_total, context_window, rounds).
-    /// prompt_total is cumulative re-send cost; divide by rounds for avg per-invocation.
-    /// None when no agent session has been active yet (rounds == 0).
-    pub agent_session_tokens: Option<(u32, u32, u32, u32)>,
-    /// Per-segment context breakdown from the most recent agent invocation.
-    /// Drives the Context Breakdown section in this overlay.
-    pub agent_ctx_breakdown: Option<crate::agent::ContextBreakdown>,
-    /// Current observation-masking threshold in characters (0 = disabled).
-    pub observation_mask_threshold_chars: usize,
-    /// Recent MCP tool calls this session (newest-last).
-    pub mcp_call_log: Vec<crate::mcp::McpCallRecord>,
-    /// Retrieval tool call counts this session: (read_file, get_symbol_context, get_file_outline).
-    /// None when no agent session has been active yet.
-    pub tool_retrieval_counts: Option<(u32, u32, u32)>,
-    /// Codified context: (constitution_tokens, max_tokens, specialist_count, knowledge_count).
-    /// None when the feature is disabled.
-    pub codified_context_info: Option<(usize, usize, usize, usize)>,
-    /// Companion sidecar status: (socket_bound, process_running, client_connected).
-    pub sidecar_status: (bool, bool, bool),
 }
 
 /// Data for the file-info popup shown when `i` is pressed in the explorer.
@@ -233,8 +119,6 @@ pub struct RenderContext<'a> {
     pub diagnostics: &'a [Diagnostic],
     /// Ghost-text inline suggestion: (text, buffer_row, buffer_col).
     pub ghost_text: Option<(&'a str, usize, usize)>,
-    /// Agent chat panel; `None` = hidden.
-    pub agent_panel: Option<&'a AgentPanel>,
     /// Pre-computed syntax-highlighted spans for the visible viewport.
     pub highlighted_lines: Option<&'a [Vec<Span<'static>>]>,
     /// File explorer panel; `None` = hidden.
@@ -287,27 +171,12 @@ pub struct RenderContext<'a> {
     pub inline_assist: Option<InlineAssistView<'a>>,
     /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
     pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
-    /// Insights dashboard overlay data (Mode::InsightsDashboard, ADR 0129).
-    pub insights_dashboard: Option<&'a crate::insights::panel::InsightsDashboardState>,
     /// When `true`, long lines are visually wrapped at the viewport edge.
     pub soft_wrap: bool,
     /// Syntax highlighter — used for code blocks inside markdown rendering.
+    #[allow(dead_code)]
     pub highlighter: &'a crate::highlight::Highlighter,
-    /// Debt metrics for the welcome-screen dashboard; `None` while loading.
-    pub debt_report: Option<&'a crate::debt::DebtReport>,
-    /// Qualitative LLM narrative for the debt dashboard; `None` until Ollama responds.
-    pub debt_narrative: Option<&'a str>,
 }
-
-/// Agent panel default width as a percentage of total terminal width when the panel
-/// is visible alongside the editor but WITHOUT the file explorer.
-/// Tune this constant to adjust the agent-to-editor split without touching layout code.
-const AGENT_PANEL_PCT_ALONE: u16 = 55;
-
-/// Agent panel default width as a percentage of total terminal width when the panel
-/// is visible alongside BOTH the editor and the file explorer.
-/// The explorer takes a fixed 25 columns; the editor fills whatever remains.
-const AGENT_PANEL_PCT_WITH_EXPLORER: u16 = 50;
 
 /// UI rendering for the editor
 pub struct UI;
@@ -326,7 +195,6 @@ impl UI {
         let file_list = ctx.file_list;
         let diagnostics = ctx.diagnostics;
         let ghost_text = ctx.ghost_text;
-        let agent_panel = ctx.agent_panel;
         let highlighted_lines = ctx.highlighted_lines;
         let file_explorer = ctx.file_explorer;
         let preview_lines = ctx.preview_lines;
@@ -409,41 +277,17 @@ impl UI {
         // ─────────────────────────────────────────────────────────────────────────────
 
         let explorer_visible = file_explorer.map(|e| e.visible).unwrap_or(false);
-        let agent_visible = agent_panel.map(|p| p.visible).unwrap_or(false);
         let left_sidebar_visible = explorer_visible;
 
-        let (left_sidebar_area, content_area, agent_area) =
-            match (left_sidebar_visible, agent_visible) {
-                (true, true) => {
-                    let cols = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Length(25),
-                            Constraint::Min(1),
-                            Constraint::Percentage(AGENT_PANEL_PCT_WITH_EXPLORER),
-                        ])
-                        .split(size);
-                    (Some(cols[0]), cols[1], Some(cols[2]))
-                },
-                (true, false) => {
-                    let cols = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Length(25), Constraint::Min(1)])
-                        .split(size);
-                    (Some(cols[0]), cols[1], None)
-                },
-                (false, true) => {
-                    let cols = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(100 - AGENT_PANEL_PCT_ALONE),
-                            Constraint::Percentage(AGENT_PANEL_PCT_ALONE),
-                        ])
-                        .split(size);
-                    (None, cols[0], Some(cols[1]))
-                },
-                (false, false) => (None, size, None),
-            };
+        let (left_sidebar_area, content_area) = if left_sidebar_visible {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(25), Constraint::Min(1)])
+                .split(size);
+            (Some(cols[0]), cols[1])
+        } else {
+            (None, size)
+        };
         let editor_area = content_area;
 
         // ── Vertical layout (buffer + status) inside editor_area ─────────────
@@ -561,13 +405,12 @@ impl UI {
                 fold_data,
                 sticky_header,
                 soft_wrap,
-                ctx.debt_report,
-                ctx.debt_narrative,
+                None,
+                None,
             );
         }
 
         // Render status line
-        let agent_fuel = agent_panel.and_then(|p| p.last_breakdown).map(|b| b.used_pct());
         Self::render_status_line(
             frame,
             buffer_data,
@@ -578,15 +421,10 @@ impl UI {
             key_sequence,
             status_area,
             diagnostics,
-            agent_fuel,
+            None,
         );
 
-        // Render agent panel if visible
-        if let (Some(panel), Some(area)) = (agent_panel, agent_area) {
-            Self::render_agent_panel(frame, panel, mode, area, ctx.highlighter);
-        }
-
-        // Render left sidebar (explorer only now)
+        // Render left sidebar (explorer only)
         if let Some(area) = left_sidebar_area {
             if let Some(explorer) = file_explorer {
                 if explorer.visible {
@@ -660,149 +498,5 @@ impl UI {
         if let Some(review) = ctx.review_changes {
             Self::render_review_changes_overlay(frame, review, size);
         }
-
-        // Render insights dashboard overlay (Mode::InsightsDashboard, ADR 0129)
-        if let Some(dashboard) = ctx.insights_dashboard {
-            crate::insights::panel::render_insights_dashboard(frame, dashboard, size);
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests — P1-S8: yank line text from PANEL_CACHE
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod ui_nav_tests {
-    use super::*;
-    use ratatui::text::{Line, Span};
-
-    #[test]
-    fn yank_line_produces_correct_text() {
-        PANEL_CACHE.with(|cell| {
-            let mut cache = cell.borrow_mut();
-            cache.msg_lines = vec![
-                Line::from(vec![Span::raw("╔ 🤖 Copilot ")]),
-                Line::from(vec![Span::raw("Hello, world!")]),
-                Line::from(vec![Span::raw("")]),
-            ];
-            cache.streaming_lines = vec![Line::from(vec![Span::raw("Streaming…")])];
-        });
-
-        assert_eq!(agent_panel_line_text(0), "╔ 🤖 Copilot ");
-        assert_eq!(agent_panel_line_text(1), "Hello, world!");
-        assert_eq!(agent_panel_line_text(2), "");
-        // First streaming line lives right after msg_lines.
-        assert_eq!(agent_panel_line_text(3), "Streaming…");
-        // Out of range → empty string (no panic).
-        assert_eq!(agent_panel_line_text(100), "");
-    }
-
-    #[test]
-    fn total_lines_reflects_cache() {
-        PANEL_CACHE.with(|cell| {
-            let mut cache = cell.borrow_mut();
-            cache.total_display_rows = 42;
-        });
-        assert_eq!(agent_panel_total_lines(), 42);
-    }
-
-    #[test]
-    fn streaming_stable_end_advances_incrementally() {
-        PANEL_CACHE.with(|cell| {
-            let mut cache = cell.borrow_mut();
-            assert_eq!(cache.streaming_stable_end, 0);
-            cache.streaming_stable_end = 42;
-            assert_eq!(cache.streaming_stable_end, 42);
-            // Reset for next test.
-            cache.streaming_stable_end = 0;
-        });
-    }
-}
-
-#[cfg(test)]
-mod layout_tests {
-    use ratatui::{backend::TestBackend, Terminal};
-
-    use super::*;
-    use crate::agent::AgentPanel;
-    use crate::highlight::Highlighter;
-
-    fn render_with_agent_panel_at(cols: u16, rows: u16) {
-        let backend = TestBackend::new(cols, rows);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        let mut panel = AgentPanel::new();
-        panel.visible = true;
-
-        let highlighter = Highlighter::new();
-
-        terminal
-            .draw(|frame| {
-                let ctx = RenderContext {
-                    mode: Mode::Agent,
-                    buffer_data: None,
-                    status_message: None,
-                    command_buffer: None,
-                    which_key_options: None,
-                    key_sequence: "",
-                    buffer_list: None,
-                    file_list: None,
-                    diagnostics: &[],
-                    ghost_text: None,
-                    agent_panel: Some(&panel),
-                    highlighted_lines: None,
-                    file_explorer: None,
-                    preview_lines: None,
-                    search_state: None,
-                    rename_buffer: None,
-                    delete_name: None,
-                    new_folder_buffer: None,
-                    split_buffer_data: None,
-                    split_highlighted_lines: None,
-                    split_right_focused: false,
-                    commit_msg: None,
-                    commit_msg_cursor: 0,
-                    release_notes: None,
-                    diag_overlay: None,
-                    binary_file_path: None,
-                    startup_elapsed: None,
-                    file_info: None,
-                    location_list: None,
-                    in_file_search_query: None,
-                    hover_popup: None,
-                    lsp_rename_buffer: None,
-                    fold_data: None,
-                    sticky_header: None,
-                    inline_assist: None,
-                    review_changes: None,
-                    insights_dashboard: None,
-                    soft_wrap: false,
-                    highlighter: &highlighter,
-                    debt_report: None,
-                    debt_narrative: None,
-                };
-                UI::render(frame, &ctx);
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer().clone();
-        assert_eq!(buf.area().width, cols, "buffer width mismatch at {cols} cols");
-        assert_eq!(buf.area().height, rows, "buffer height mismatch at {cols} cols");
-    }
-
-    #[test]
-    fn agent_panel_renders_at_80_cols() {
-        render_with_agent_panel_at(80, 40);
-    }
-
-    #[test]
-    fn agent_panel_renders_at_120_cols() {
-        render_with_agent_panel_at(120, 40);
-    }
-
-    #[test]
-    fn agent_panel_renders_at_200_cols() {
-        render_with_agent_panel_at(200, 40);
     }
 }

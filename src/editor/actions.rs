@@ -1,8 +1,6 @@
 use anyhow::Result;
 
 use super::{ClipboardType, Editor};
-use crate::agent::{ChatMessage, Role};
-use crate::buffer::Buffer;
 use crate::keymap::{Action, Mode};
 use crate::lsp::LspManager;
 use crate::search::SearchState;
@@ -419,55 +417,16 @@ impl Editor {
                 self.goto_prev_diagnostic();
             },
             Action::AgentToggle => {
-                self.agent_panel.toggle_visible();
-                if self.agent_panel.visible {
-                    self.key_handler.clear_sequence();
-                    self.mode = Mode::Agent;
-                    // Eagerly load models on first show
-                    if self.agent_panel.available_models.is_empty() {
-                        let preferred = self.config.active_default_model().to_string();
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
-                                    tracing::warn!("Could not fetch model list: {e}");
-                                }
-                            });
-                        });
-                    }
-                } else {
-                    self.mode = Mode::Normal;
-                }
+                self.set_status("Agent panel removed in slim build".to_string());
             },
             Action::AgentFocus => {
-                if !self.agent_panel.visible {
-                    self.agent_panel.visible = true;
-                }
-                self.key_handler.clear_sequence();
-                self.agent_panel.focus();
-                self.mode = Mode::Agent;
-                // Eagerly load models on first show
-                if self.agent_panel.available_models.is_empty() {
-                    let preferred = self.config.active_default_model().to_string();
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
-                                tracing::warn!("Could not fetch model list: {e}");
-                            }
-                        });
-                    });
-                }
+                self.set_status("Agent panel removed in slim build".to_string());
             },
             Action::AgentNewConversation => {
-                let model_name = self.agent_panel.selected_model_display().to_string();
-                self.agent_panel.new_conversation(&model_name);
-                self.set_status(format!("New conversation started · {model_name}"));
+                self.set_status("Agent panel removed in slim build".to_string());
             },
             Action::CompanionToggle => {
-                if self.companion_process.is_some() {
-                    self.kill_companion();
-                } else {
-                    self.spawn_companion();
-                }
+                self.set_status("Companion window removed in slim build".to_string());
             },
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
@@ -520,137 +479,27 @@ impl Editor {
             },
             // ── Memory save ───────────────────────────────────────────────────
             Action::MemorySave => {
-                const MEMORY_PROMPT: &str = "\
-Please save the key context from this session to the knowledge graph now.\n\
-\n\
-Steps:\n\
-1. Call `create_entities` for any new concepts, files, or components we discussed.\n\
-2. Call `add_observations` with non-obvious facts discovered during this session \
-(decisions made, bugs found, patterns identified, architectural constraints).\n\
-3. Call `create_relations` to link related entities where useful.\n\
-\n\
-Focus on what would be expensive to re-discover in a future session. \
-Skip anything already obvious from reading the code.";
-                self.agent_panel.conversation.input = MEMORY_PROMPT.to_string();
-                // Ensure the agent panel is open and focused.
-                self.agent_panel.visible = true;
-                self.mode = Mode::Agent;
-                self.set_status("Saving session context to memory…".to_string());
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let max_rounds = self.config.max_agent_rounds;
-                let warning_threshold = self.config.agent_warning_threshold;
-                let preferred_model = self.config.active_default_model().to_string();
-                let auto_compress = self.config.agent.auto_compress_tool_results;
-                let mask_threshold = self.config.agent.observation_mask_threshold_chars;
-                let expand_threshold = self.config.agent.expand_threshold_chars;
-                let fut = self.agent_panel.submit(
-                    None,
-                    project_root,
-                    max_rounds,
-                    warning_threshold,
-                    &preferred_model,
-                    auto_compress,
-                    mask_threshold,
-                    expand_threshold,
-                );
-                let submit_err = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        match fut.await {
-                            Ok(()) => None,
-                            Err(e) => {
-                                tracing::warn!("Memory save error: {}", e);
-                                Some(e.to_string())
-                            },
-                        }
-                    })
-                });
-                if let Some(e) = submit_err {
-                    self.set_status(format!("Memory save error: {e}"));
-                }
+                self.set_status("Agent panel removed in slim build".to_string());
             },
             // ── Auto-Janitor ──────────────────────────────────────────────────
             Action::AgentJanitorCompress => {
-                self.run_janitor_compress();
+                self.set_status("Agent panel removed in slim build".to_string());
             },
-            // ── Investigation subagent (Phase 3.3) ──────────────────────────
+            // ── Investigation subagent ────────────────────────────────────────
             Action::AgentInvestigate => {
-                if self.agent_panel.conversation.input.trim().is_empty() {
-                    self.set_status(
-                        "Clear input first (Ctrl+Bksp), type a query, then SPC a v".to_string(),
-                    );
-                } else {
-                    self.agent_panel.visible = true;
-                    self.mode = Mode::Agent;
-                    self.set_status("Investigation running…".to_string());
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let preferred_model = self.config.active_default_model().to_string();
-                    let fut =
-                        self.agent_panel.start_investigation_agent(project_root, &preferred_model);
-                    let err = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            match fut.await {
-                                Ok(()) => None,
-                                Err(e) => {
-                                    tracing::warn!("Investigation error: {e}");
-                                    Some(e.to_string())
-                                },
-                            }
-                        })
-                    });
-                    if let Some(e) = err {
-                        self.set_status(format!("Investigation error: {e}"));
-                    }
-                }
+                self.set_status("Agent panel removed in slim build".to_string());
             },
-            // ── Multi-file review / change set view (ADR 0113) ───────────────
+            // ── Multi-file review / change set view ───────────────────────────
             Action::ReviewChangesOpen => {
-                if !self.agent_panel.has_checkpoint() {
-                    self.set_status("No agent changes to review".to_string());
-                } else {
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let state = crate::editor::ReviewChangesState::build(
-                        &self.agent_panel.session_snapshots,
-                        &self.agent_panel.session_created_files,
-                        &project_root,
-                    );
-                    self.review_changes = Some(state);
-                    self.mode = Mode::ReviewChanges;
-                }
+                self.set_status("Review changes removed in slim build".to_string());
             },
-            // ── Insights dashboard (ADR 0129 Phase 3) ────────────────────────
+            // ── Insights dashboard ────────────────────────────────────────────
             Action::InsightsDashboardOpen => {
-                let data_dir = crate::config::Config::log_path()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-                let insights = crate::insights::build_insights(&data_dir);
-                let quota = self.agent_panel.copilot_quota.clone();
-                self.insights_dashboard =
-                    Some(crate::insights::panel::InsightsDashboardState::new(insights, quota));
-                self.mode = Mode::InsightsDashboard;
+                self.set_status("Insights dashboard removed in slim build".to_string());
             },
-            // ── Intent Translator toggle (SPC a t) ───────────────────────────
+            // ── Intent Translator toggle ──────────────────────────────────────
             Action::AgentIntentTranslatorToggle => {
-                self.agent_panel.intent_translator_enabled =
-                    !self.agent_panel.intent_translator_enabled;
-                let enabled = self.agent_panel.intent_translator_enabled;
-                let state = if enabled { "on" } else { "off" };
-                self.set_status(format!("Intent translator {state} (SPC a t to toggle)"));
-                let info = if enabled {
-                    "🔄 Intent Translator: on — your messages will be analysed and rephrased for \
-                     clarity before being sent to the model. Useful when prompts are ambiguous or \
-                     terse. Toggle with /translate or SPC a t."
-                } else {
-                    "🔄 Intent Translator: off — messages are sent as-is. Toggle with /translate \
-                     or SPC a t."
-                };
-                self.agent_panel.conversation.messages.push(ChatMessage {
-                    role: Role::System,
-                    content: info.to_string(),
-                    images: vec![],
-                });
+                self.set_status("Intent translator removed in slim build".to_string());
             },
             // ── Codified Context file openers (SPC a c/C/k) ──────────────────
             Action::CodifiedContextOpenConstitution => {
@@ -693,37 +542,9 @@ Skip anything already obvious from reading the code.";
                         .to_string(),
                 );
             },
-            // ── Session revert (checkpoint undo) ─────────────────────────────
+            // ── Session revert ────────────────────────────────────────────────
             Action::AgentSessionRevert => {
-                if !self.agent_panel.has_checkpoint() {
-                    self.set_status(
-                        "No checkpoint: agent has not modified any files this session".to_string(),
-                    );
-                } else {
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let (restored, deleted) = self.agent_panel.revert_session(&project_root);
-                    // Queue restored files for buffer reload.
-                    for rel in &restored {
-                        self.agent_panel.pending_reloads.push(rel.clone());
-                    }
-                    let mut parts = Vec::new();
-                    if !restored.is_empty() {
-                        let n = restored.len();
-                        parts.push(format!("{n} file{} restored", if n == 1 { "" } else { "s" }));
-                    }
-                    if !deleted.is_empty() {
-                        let n = deleted.len();
-                        parts
-                            .push(format!("{n} new file{} deleted", if n == 1 { "" } else { "s" }));
-                    }
-                    let msg = if parts.is_empty() {
-                        "Session reverted (nothing to restore)".to_string()
-                    } else {
-                        format!("Session reverted: {}", parts.join(", "))
-                    };
-                    self.set_status(msg);
-                }
+                self.set_status("Session revert removed in slim build".to_string());
             },
             // ── Diagnostics overlay ───────────────────────────────────────────
             Action::DiagnosticsOpen => {
@@ -1111,85 +932,9 @@ Skip anything already obvious from reading the code.";
                 self.mode = Mode::Normal;
             },
             Action::AgentOpenLastResponse => {
-                let content = self
-                    .agent_panel
-                    .conversation
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| matches!(m.role, Role::Assistant))
-                    .map(|m| m.content.clone());
-                if let Some(text) = content {
-                    let mut buf = Buffer::new("*agent-response*");
-                    buf.insert_text_block(&text);
-                    self.buffers.push(buf);
-                    self.current_buffer_idx = self.buffers.len() - 1;
-                    self.mode = Mode::Normal;
-                    self.set_status("Opened last agent response in buffer".to_string());
-                } else {
-                    self.set_status("No assistant response to open".to_string());
-                }
+                self.set_status("Agent panel removed in slim build".to_string());
             },
         }
         Ok(())
-    }
-
-    /// Capture `last_prompt_tokens` before compression so the JanitorDone status
-    /// can display "N→M tokens", then call `compress_history()` and immediately
-    /// submit the janitor summarisation round.
-    ///
-    /// Called from `Action::AgentJanitorCompress` and the event-loop auto-compact
-    /// path so both share identical behaviour.
-    pub(super) fn run_janitor_compress(&mut self) {
-        self.agent_panel.tokens_before_compact =
-            self.agent_panel.conversation.last_prompt_tokens / 1_000;
-        self.agent_panel.compress_history();
-        if self.agent_panel.conversation.input.is_empty() {
-            self.set_status("Janitor: nothing to compress".to_string());
-        } else {
-            self.agent_panel.visible = true;
-            self.mode = Mode::Agent;
-            self.set_status("⚡ Compacting context…".to_string());
-            self.agent_panel.conversation.messages.push(ChatMessage {
-                role: Role::System,
-                content: "⚡ Compacting context — summarising chat history to free up the \
-                          context window. A structured summary (files changed, key decisions, \
-                          open questions, next step) will replace the archived messages."
-                    .to_string(),
-                images: vec![],
-            });
-            let project_root =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let janitor_model = self.config.agent.janitor_model.clone();
-            let preferred_model = if janitor_model.is_empty() {
-                self.config.active_default_model().to_string()
-            } else {
-                janitor_model
-            };
-            let fut = self.agent_panel.submit(
-                None,
-                project_root,
-                1, // one round only
-                0, // no warning threshold for the janitor itself
-                &preferred_model,
-                false, // don't compress the summariser's own output
-                0,     // no observation masking during compression
-                0,     // no tool-result truncation during compression
-            );
-            let submit_err = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    match fut.await {
-                        Ok(()) => None,
-                        Err(e) => {
-                            tracing::warn!("Janitor compress error: {}", e);
-                            Some(e.to_string())
-                        },
-                    }
-                })
-            });
-            if let Some(e) = submit_err {
-                self.set_status(format!("Janitor error: {e}"));
-            }
-        }
     }
 }

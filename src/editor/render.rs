@@ -303,12 +303,8 @@ impl Editor {
 
         const GUTTER: usize = 2;
         let total_w = size.width as usize;
-        let editor_area_w = match (self.file_explorer.visible, self.agent_panel.visible) {
-            (true, true) => total_w.saturating_sub(25).saturating_sub(total_w * 35 / 100),
-            (true, false) => total_w.saturating_sub(25),
-            (false, true) => total_w * 60 / 100,
-            (false, false) => total_w,
-        };
+        let editor_area_w =
+            if self.file_explorer.visible { total_w.saturating_sub(25) } else { total_w };
         let viewport_width = editor_area_w.saturating_sub(GUTTER);
 
         if self.config.soft_wrap {
@@ -424,7 +420,6 @@ impl Editor {
 
         let split_right_focused = self.split.right_focused;
 
-        let agent_ref = if self.agent_panel.visible { Some(&self.agent_panel) } else { None };
         let explorer_ref =
             if self.file_explorer.visible { Some(&self.file_explorer) } else { None };
         let hl_ref: Option<&[Vec<Span<'static>>]> = highlighted_lines.as_deref().map(Vec::as_slice);
@@ -468,83 +463,16 @@ impl Editor {
         let log_path_buf = crate::config::Config::log_path()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
         let log_path_str = log_path_buf.to_string_lossy().into_owned();
-        let mcp_failed_empty: Vec<(String, String)> = Vec::new();
         let recent_logs_owned: Vec<(String, String)> =
             self.log_buffer.lock().map(|g| g.iter().cloned().collect()).unwrap_or_default();
         let diag_overlay = if mode == Mode::Diagnostics {
-            let mcp_connected =
-                self.mcp_manager.as_ref().map(|m| m.connected_servers()).unwrap_or_default();
-            let mcp_failed: &[(String, String)] = self
-                .mcp_manager
-                .as_ref()
-                .map(|m| m.failed_servers.as_slice())
-                .unwrap_or(mcp_failed_empty.as_slice());
             let lsp_servers =
                 self.config.lsp.servers.iter().map(|s| s.language.as_str()).collect::<Vec<_>>();
-            let agent_session_tokens = if self.agent_panel.conversation.session_rounds > 0 {
-                Some((
-                    self.agent_panel.conversation.total_session_prompt_tokens,
-                    self.agent_panel.conversation.total_session_completion_tokens,
-                    self.agent_panel.context_window_size(),
-                    self.agent_panel.conversation.session_rounds,
-                ))
-            } else {
-                None
-            };
             Some(crate::ui::DiagnosticsData {
                 version: env!("CARGO_PKG_VERSION"),
-                mcp_connected,
-                mcp_failed,
                 lsp_servers,
                 log_path: &log_path_str,
                 recent_logs: recent_logs_owned.as_slice(),
-                agent_session_tokens,
-                agent_ctx_breakdown: self.agent_panel.last_breakdown,
-                observation_mask_threshold_chars: self
-                    .config
-                    .agent
-                    .observation_mask_threshold_chars,
-                mcp_call_log: self
-                    .mcp_manager
-                    .as_ref()
-                    .map(|m| m.recent_calls())
-                    .unwrap_or_default(),
-                tool_retrieval_counts: if self.agent_panel.conversation.session_rounds > 0 {
-                    Some((
-                        self.agent_panel.session_read_file_count,
-                        self.agent_panel.session_symbol_count,
-                        self.agent_panel.session_outline_count,
-                    ))
-                } else {
-                    None
-                },
-                sidecar_status: (
-                    self.sidecar.is_some(),
-                    self.companion_process.is_some(),
-                    self.sidecar_client_connected,
-                ),
-                codified_context_info: if self.agent_panel.codified_context_enabled {
-                    let (ctokens, scount, kcount) = self
-                        .agent_panel
-                        .codified_context
-                        .as_ref()
-                        .map(|cc| {
-                            (
-                                cc.constitution.as_ref().map(|c| c.token_estimate).unwrap_or(0),
-                                cc.specialists.len(),
-                                cc.knowledge_docs.len(),
-                            )
-                        })
-                        .unwrap_or((0, 0, 0));
-                    Some((
-                        ctokens,
-                        self.agent_panel.codified_context_constitution_max_tokens,
-                        scount,
-                        kcount,
-                    ))
-                } else {
-                    None
-                },
             })
         } else {
             None
@@ -602,7 +530,6 @@ impl Editor {
                 file_list: file_list.as_ref(),
                 diagnostics: &self.lsp.diagnostics,
                 ghost_text: ghost,
-                agent_panel: agent_ref,
                 highlighted_lines: hl_ref,
                 file_explorer: explorer_ref,
                 preview_lines: preview_ref,
@@ -652,15 +579,8 @@ impl Editor {
                 } else {
                     None
                 },
-                insights_dashboard: if mode == Mode::InsightsDashboard {
-                    self.insights_dashboard.as_ref()
-                } else {
-                    None
-                },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
-                debt_report: self.debt_report.as_ref(),
-                debt_narrative: self.debt_narrative.as_deref(),
             };
             UI::render(frame, &ctx);
         })?;

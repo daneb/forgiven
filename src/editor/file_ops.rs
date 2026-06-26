@@ -96,12 +96,13 @@ impl Editor {
     /// Returns `(display_name, content, line_count)` where `display_name` is the
     /// cwd-relative path, `content` is the (possibly truncated) file text, and
     /// `line_count` is the number of lines in the returned content.
-    /// Files exceeding `AT_PICKER_MAX_LINES` are truncated and a notice is appended.
+    /// Files exceeding the line limit are truncated and a notice is appended.
+    #[allow(dead_code)]
     pub(super) fn read_file_for_context(
         path: &std::path::Path,
         project_root: &std::path::Path,
     ) -> std::io::Result<(String, String, usize)> {
-        use crate::agent::AT_PICKER_MAX_LINES;
+        const MAX_LINES: usize = 2000;
 
         let display_name =
             path.strip_prefix(project_root).unwrap_or(path).to_string_lossy().into_owned();
@@ -110,11 +111,10 @@ impl Editor {
         let all_lines: Vec<&str> = raw.lines().collect();
         let total = all_lines.len();
 
-        let (content, line_count) = if total > AT_PICKER_MAX_LINES {
-            let truncated = all_lines[..AT_PICKER_MAX_LINES].join("\n");
-            let warned =
-                format!("{truncated}\n\n[Truncated: showing {AT_PICKER_MAX_LINES}/{total} lines]");
-            (warned, AT_PICKER_MAX_LINES)
+        let (content, line_count) = if total > MAX_LINES {
+            let truncated = all_lines[..MAX_LINES].join("\n");
+            let warned = format!("{truncated}\n\n[Truncated: showing {MAX_LINES}/{total} lines]");
+            (warned, MAX_LINES)
         } else {
             (raw, total)
         };

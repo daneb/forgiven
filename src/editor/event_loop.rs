@@ -115,94 +115,9 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // ── Agent warmup: apply pre-fetched token + model list ────────────
-            let preferred = self.config.active_default_model().to_string();
-            if self.agent_panel.poll_warmup(&preferred) {
-                needs_render = true;
-            }
-
-            // ── Agent panel stream polling ─────────────────────────────────────
-            let agent_active = self.agent_panel.poll_stream();
-            if let Some(err) = self.agent_panel.last_error.take() {
-                self.set_status(format!("Agent error: {err}"));
-            }
-            // Auto-compact: triggered by the 70 % threshold check in poll_stream().
-            // Only fires when the agent has gone idle (stream fully drained this tick).
-            if self.agent_panel.pending_auto_compact
-                && self.agent_panel.status == crate::agent::AgentStatus::Idle
-            {
-                self.agent_panel.pending_auto_compact = false;
-                self.run_janitor_compress();
-            }
-            // Clear the hook re-entry guard once the agent goes idle.
-            if self.hooks_firing && self.agent_panel.status == crate::agent::AgentStatus::Idle {
-                self.hooks_firing = false;
-            }
-            if agent_active {
-                // Rate-limit agent-only renders to ≤20 Hz (50 ms between frames).
-                // If another source (keyboard, watcher) already set `needs_render`
-                // we render immediately; the cap only kicks in when streaming is
-                // the sole reason to repaint.
-                const AGENT_RENDER_INTERVAL: std::time::Duration =
-                    std::time::Duration::from_millis(50);
-                if needs_render {
-                    // Another source is already dirty — update stamp and render now.
-                    self.last_agent_render = Some(std::time::Instant::now());
-                } else {
-                    let due = self
-                        .last_agent_render
-                        .map(|t| t.elapsed() >= AGENT_RENDER_INTERVAL)
-                        .unwrap_or(true);
-                    if due {
-                        self.last_agent_render = Some(std::time::Instant::now());
-                        needs_render = true;
-                    }
-                }
-            }
-
             // ── Inline assist stream polling (ADR 0111) ───────────────────────
             if self.poll_inline_assist() {
                 needs_render = true;
-            }
-            // Reload any buffers the agent modified on disk this tick.
-            let reloads: Vec<String> = std::mem::take(&mut self.agent_panel.pending_reloads);
-            for rel_path in reloads {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let abs_path = cwd.join(&rel_path);
-                // Canonicalize once — resolves symlinks, cleans ".." etc.
-                // Falls back to the plain joined path if the file somehow can't be stat'd.
-                let canonical = abs_path.canonicalize().unwrap_or_else(|_| abs_path.clone());
-
-                let mut reloaded = false;
-                for buf in &mut self.buffers {
-                    let matches = buf
-                        .file_path
-                        .as_ref()
-                        .map(|fp| {
-                            // Case 1: buffer stored an absolute path (opened from explorer)
-                            // — compare both canonicalized so symlinks don't fool us.
-                            let fp_canon = fp.canonicalize().unwrap_or_else(|_| fp.clone());
-                            if fp_canon == canonical {
-                                return true;
-                            }
-                            // Case 2: buffer stored a relative path (opened from CLI)
-                            // — compare component-wise suffix of the file_path against rel_path.
-                            fp.ends_with(std::path::Path::new(&rel_path))
-                        })
-                        .unwrap_or(false);
-
-                    if matches {
-                        if let Err(e) = buf.reload_from_disk() {
-                            tracing::warn!("Failed to reload {rel_path}: {e}");
-                        } else {
-                            reloaded = true;
-                        }
-                    }
-                }
-                if reloaded {
-                    self.set_status(format!("↺ reloaded {rel_path}"));
-                    needs_render = true;
-                }
             }
             // ──────────────────────────────────────────────────────────────────
 
@@ -434,126 +349,7 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // ── Insights narrative AI response poll (Phase 4, ADR 0129) ──────────
-            let narrative_done = if let Some(rx) = self.insights_narrative_rx.as_mut() {
-                match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => Some(Err(anyhow::anyhow!("insights narrative channel closed"))),
-                }
-            } else {
-                None
-            };
-            if let Some(result) = narrative_done {
-                self.insights_narrative_rx = None;
-                needs_render = true;
-                match result {
-                    Ok(narrative) => {
-                        // Persist to disk so future dashboard opens include the narrative.
-                        if let Some(data_dir) = crate::config::Config::log_path()
-                            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                        {
-                            let _ =
-                                std::fs::write(data_dir.join("insights_narrative.md"), &narrative);
-                        }
-                        // If the dashboard is currently open, hot-reload the narrative.
-                        if let Some(d) = self.insights_dashboard.as_mut() {
-                            d.insights.narrative = Some(narrative);
-                        }
-                        self.set_status(
-                            "Insights narrative ready — open SPC a I to view".to_string(),
-                        );
-                    },
-                    Err(e) => {
-                        self.set_status(format!("Failed to generate insights narrative: {e}"));
-                    },
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── Debt dashboard metrics poll ───────────────────────────────────
-            if let Some(rx) = self.debt_rx.as_mut() {
-                if let Ok(report) = rx.try_recv() {
-                    self.debt_rx = None;
-                    // If Ollama is configured, kick off the narrative in the background.
-                    if self.config.provider.ollama.default_model != "none" {
-                        let base_url = self.config.provider.ollama.base_url.clone();
-                        let model = self.config.provider.ollama.default_model.clone();
-                        let rpt = report.clone();
-                        let (ntx, nrx) = oneshot::channel();
-                        tokio::spawn(async move {
-                            let narrative =
-                                crate::debt::generate_narrative(&rpt, &base_url, &model).await;
-                            let _ = ntx.send(narrative);
-                        });
-                        self.debt_narrative_rx = Some(nrx);
-                    }
-                    self.debt_report = Some(report);
-                    needs_render = true;
-                }
-            }
-            if let Some(rx) = self.debt_narrative_rx.as_mut() {
-                if let Ok(narrative) = rx.try_recv() {
-                    self.debt_narrative_rx = None;
-                    self.debt_narrative = narrative;
-                    needs_render = true;
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── MCP background connection poll ────────────────────────────────
-            if let Some(rx) = self.mcp_rx.as_mut() {
-                if let Ok(manager) = rx.try_recv() {
-                    tracing::info!("MCP ready: {}", manager.summary());
-                    let arc = std::sync::Arc::new(manager);
-                    self.mcp_manager = Some(std::sync::Arc::clone(&arc));
-                    self.agent_panel.mcp_manager = Some(arc);
-                    self.mcp_rx = None;
-                    needs_render = true;
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── Nexus sidecar: flush debounced events + detect mode changes ────
-            #[cfg(unix)]
-            {
-                // Detect active-buffer switches here (once per tick) rather than
-                // inside flush_sidecar_events() so the arm races no webview timing.
-                if self.sidecar.is_some()
-                    && Some(self.current_buffer_idx) != self.sidecar_last_buffer_idx
-                {
-                    self.sidecar_last_buffer_idx = Some(self.current_buffer_idx);
-                    self.sidecar_last_cursor_line = None;
-                    // Use now() so the 300 ms debounce fires after the webview is ready.
-                    if self.last_sidecar_send.is_none() {
-                        self.last_sidecar_send = Some(std::time::Instant::now());
-                    }
-                }
-                // When a new companion client connects, mark a snapshot as pending.
-                // Re-arm the send timer each tick until a buffer_update is delivered.
-                let new_client = if let Some(ref mut s) = self.sidecar {
-                    s.new_client_rx.try_recv().is_ok()
-                } else {
-                    false
-                };
-                if new_client {
-                    self.sidecar_snapshot_pending = true;
-                    self.sidecar_client_connected = true;
-                }
-                if self.sidecar_snapshot_pending && self.last_sidecar_send.is_none() {
-                    // 300 ms delay ensures webview JS listeners are registered.
-                    self.last_sidecar_send = Some(std::time::Instant::now());
-                }
-                self.flush_sidecar_events();
-                let mode_str = format!("{:?}", self.mode);
-                if self.sidecar_last_mode.as_deref() != Some(&mode_str) {
-                    self.sidecar_last_mode = Some(mode_str.clone());
-                    if let Some(ref s) = self.sidecar {
-                        s.send(crate::sidecar::NexusEvent::mode_change(&mode_str));
-                    }
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
+            // (insights, debt, MCP, sidecar removed in slim build)
 
             // Force a render whenever background work is in-flight OR the
             // which-key timer is pending (so the popup appears after 500 ms
@@ -564,8 +360,6 @@ impl Editor {
                 || self.search_rx.is_some()
                 || self.commit_msg.rx.is_some()
                 || self.release_notes.rx.is_some()
-                || self.mcp_rx.is_some()
-                || self.insights_narrative_rx.is_some()
             {
                 needs_render = true;
             }
@@ -585,32 +379,6 @@ impl Editor {
                 }
                 self.render()?;
                 needs_render = false;
-            }
-
-            // ── Pending submit (queued by handle_key to allow one render first) ──
-            // Runs AFTER render() so the user sees WaitingForResponse status before
-            // the token-exchange / model-fetch HTTP calls run.  submit() is fast when
-            // the warmup task has already cached the token and model list.
-            if let Some(args) = self.pending_submit.take() {
-                if let Err(e) = self
-                    .agent_panel
-                    .submit(
-                        args.context,
-                        args.project_root,
-                        args.max_rounds,
-                        args.warning_threshold,
-                        &args.preferred_model,
-                        args.auto_compress,
-                        args.mask_threshold,
-                        args.expand_threshold,
-                    )
-                    .await
-                {
-                    tracing::warn!("Agent submit error: {e}");
-                    self.set_status(format!("Agent error: {e}"));
-                    self.agent_panel.status = crate::agent::AgentStatus::Idle;
-                }
-                needs_render = true;
             }
 
             // ── Input (blocks up to 50 ms) ─────────────────────────────────────
