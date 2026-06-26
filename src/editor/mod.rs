@@ -35,16 +35,14 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
-use crate::agent::AgentPanel;
+use crate::agent::{CopilotApiToken, ProviderConfig, ProviderKind};
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
 use crate::highlight::Highlighter;
 use crate::keymap::{KeyHandler, Mode};
 use crate::lsp::LspManager;
-use crate::mcp::McpManager;
 use crate::search::SearchState;
-use crate::spec_framework;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 /// The Editor manages the overall application state: buffers, current buffer, mode, etc.
@@ -114,13 +112,17 @@ pub struct Editor {
     /// cleared (used for Copilot device-auth URLs which the user needs to read).
     status_sticky: bool,
 
-    // ── Agent / Copilot Chat panel ────────────────────────────────────────────
-    agent_panel: AgentPanel,
-    /// Timestamp of the last frame triggered exclusively by agent streaming.
-    /// Used to cap agent-only renders to ≤10 Hz (100 ms between frames) so a
-    /// long-running janitor does not spin the render loop at the full 20 Hz
-    /// event-poll rate.
-    last_agent_render: Option<std::time::Instant>,
+    // ── AI provider ───────────────────────────────────────────────────────────
+    /// Active provider kind (Copilot or Ollama).
+    provider: ProviderKind,
+    /// Static per-provider configuration (API keys, endpoints, capabilities).
+    provider_config: ProviderConfig,
+    /// Copilot business API base URL (updated after each token refresh).
+    copilot_api_base: String,
+    /// Short-lived Copilot API token; refreshed automatically when expired.
+    copilot_token: Option<CopilotApiToken>,
+    /// Model ID to use for AI requests (e.g. "claude-sonnet-4" or an Ollama tag).
+    selected_model: String,
 
     // ── Clipboard (yank register) ─────────────────────────────────────────────
     /// Last yanked / deleted text + whether it is linewise or charwise.
@@ -149,22 +151,6 @@ pub struct Editor {
     // ── Multi-file review / change set view (ADR 0113) ───────────────────────
     /// Active only while `mode == Mode::ReviewChanges`.
     pub review_changes: Option<ReviewChangesState>,
-
-    // ── Insights dashboard (ADR 0129 Phase 3) ────────────────────────────────
-    /// Active only while `mode == Mode::InsightsDashboard`.
-    pub insights_dashboard: Option<crate::insights::panel::InsightsDashboardState>,
-
-    // ── Agent hooks (ADR 0114) ────────────────────────────────────────────────
-    /// Per-hook cooldown tracking: `hook_index → last_fired`.
-    /// Prevents the same hook from firing more than once per 5 seconds.
-    hook_cooldowns: std::collections::HashMap<usize, std::time::Instant>,
-    /// Result of the most recent test run: `true` = passing, `false` = failing.
-    /// `None` until the first test run completes.  Used by `on_test_fail` hooks
-    /// to detect pass→fail transitions (repeated failures do not re-fire the hook).
-    last_test_passed: Option<bool>,
-    /// Set to `true` while an agent hook is running to prevent re-entrant test
-    /// runs that would loop (agent fixes → save → tests → agent fires again).
-    hooks_firing: bool,
 
     // ── Tree-sitter AST cache ─────────────────────────────────────────────────
     /// Wraps the Tree-sitter `Parser`; shared across all buffers (language is
@@ -242,28 +228,6 @@ pub struct Editor {
     // ── Release notes generation (Mode::ReleaseNotes) ─────────────────────────
     release_notes: ReleaseNotesState,
 
-    // ── Insights narrative generation (Phase 4, ADR 0129) ─────────────────────
-    /// In-flight `:insights summarize` LLM task. Polled each tick.
-    insights_narrative_rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
-
-    // ── Debt dashboard (welcome screen) ──────────────────────────────────────
-    /// In-flight static+structural debt analysis. Polled each tick.
-    pub(crate) debt_rx: Option<oneshot::Receiver<crate::debt::DebtReport>>,
-    /// Computed debt metrics shown on the welcome screen.
-    pub(crate) debt_report: Option<crate::debt::DebtReport>,
-    /// In-flight Ollama narrative for the debt dashboard. Polled each tick.
-    pub(crate) debt_narrative_rx: Option<oneshot::Receiver<Option<String>>>,
-    /// Cached qualitative narrative text from the LLM.
-    pub(crate) debt_narrative: Option<String>,
-
-    // ── MCP servers ───────────────────────────────────────────────────────────
-    /// Manages connected MCP servers and their tool registries.
-    /// Set once the background connection task completes (see `mcp_rx`).
-    mcp_manager: Option<std::sync::Arc<McpManager>>,
-    /// Receives the completed `McpManager` from the background startup task.
-    /// Polled each tick; cleared and wired into `agent_panel` on first `Ok`.
-    mcp_rx: Option<oneshot::Receiver<McpManager>>,
-
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Watches paths of all open buffers; detects external changes.
     file_watcher: Option<RecommendedWatcher>,
@@ -287,60 +251,6 @@ pub struct Editor {
     // ── Configuration ─────────────────────────────────────────────────────────
     /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
     config: Config,
-
-    // ── Nexus sidecar IPC (Phase 3 — Hybrid Reliability) ─────────────────────
-    /// UDS server broadcasting buffer/cursor/mode events to the Tauri sidecar.
-    #[cfg(unix)]
-    sidecar: Option<crate::sidecar::SidecarServer>,
-    /// Debounce timestamp for buffer-update events (set on every edit, flushed
-    /// after SIDECAR_DEBOUNCE_MS elapses without a further edit).
-    last_sidecar_send: Option<std::time::Instant>,
-    /// Last cursor row sent — avoids spamming cursor_move on every keystroke.
-    sidecar_last_cursor_line: Option<u32>,
-    /// Stringified mode from the previous tick — detects mode transitions.
-    sidecar_last_mode: Option<String>,
-    /// True while the companion has connected but not yet received a snapshot.
-    /// Retries every tick until `current_buffer()` is non-empty and a
-    /// buffer_update is successfully sent.
-    sidecar_snapshot_pending: bool,
-    /// Buffer index sent in the last snapshot — detects buffer switches so
-    /// flush_sidecar_events() can fire an immediate update without patching
-    /// every callsite that changes current_buffer_idx.
-    sidecar_last_buffer_idx: Option<usize>,
-
-    // ── Terminal graphics capability (Phase 1 — Glimpse) ─────────────────────
-    /// Detected inline image protocol for this terminal session.
-    /// `None` until `setup_services()` completes the detection probe.
-    pub image_protocol: Option<crate::graphics::ImageProtocol>,
-
-    // ── Companion process (Step 4.5 — Hybrid Reliability) ────────────────────
-    /// Child process handle for the Tauri companion window.
-    /// `None` when the companion is not running.
-    companion_process: Option<std::process::Child>,
-    /// True from the moment the companion connects to the Nexus socket.
-    /// Reset to false when the companion process is killed.
-    pub sidecar_client_connected: bool,
-
-    // ── Pending agent submit ──────────────────────────────────────────────────
-    /// Arguments queued by `handle_key()` (Enter in Agent mode) so the async
-    /// event loop can call `agent_panel.submit().await` after one render tick
-    /// has run — giving the user immediate visual feedback before the token
-    /// exchange / model-fetch HTTP calls block the loop.
-    pub pending_submit: Option<PendingSubmitArgs>,
-}
-
-/// Arguments captured from config and buffer state when the user presses Enter
-/// in the agent panel.  Stored in `Editor::pending_submit` and consumed by
-/// the async event loop on the next tick.
-pub struct PendingSubmitArgs {
-    pub context: Option<String>,
-    pub project_root: PathBuf,
-    pub max_rounds: usize,
-    pub warning_threshold: usize,
-    pub preferred_model: String,
-    pub auto_compress: bool,
-    pub mask_threshold: usize,
-    pub expand_threshold: usize,
 }
 
 impl Editor {
@@ -374,74 +284,22 @@ impl Editor {
             last_edit_instant: None,
             copilot_auth_rx: None,
             status_sticky: false,
-            agent_panel: {
-                let mut panel = AgentPanel::new();
-                panel.spec_framework =
-                    spec_framework::load_from_config(&config.agent.spec_framework);
-                panel.provider = crate::agent::ProviderKind::from_str(&config.provider.active);
-                let resolved_api_key = match panel.provider {
-                    crate::agent::ProviderKind::Anthropic => {
-                        crate::agent::provider::resolve_api_key(&config.provider.anthropic.api_key)
-                    },
-                    crate::agent::ProviderKind::OpenAi => {
-                        crate::agent::provider::resolve_api_key(&config.provider.openai.api_key)
-                    },
-                    crate::agent::ProviderKind::Gemini => {
-                        crate::agent::provider::resolve_api_key(&config.provider.gemini.api_key)
-                    },
-                    crate::agent::ProviderKind::OpenRouter => {
-                        crate::agent::provider::resolve_api_key(&config.provider.openrouter.api_key)
-                    },
-                    crate::agent::ProviderKind::DeepSeek => {
-                        crate::agent::provider::resolve_api_key(&config.provider.deepseek.api_key)
-                    },
-                    _ => String::new(),
-                };
-                panel.provider_config = crate::agent::ProviderConfig {
-                    api_key: resolved_api_key,
-                    ollama_base_url: config.provider.ollama.base_url.clone(),
-                    ollama_context_length: config.provider.ollama.context_length,
-                    ollama_tool_calls: config.provider.ollama.tool_calls,
-                    ollama_planning_tools: config.provider.ollama.planning_tools,
-                    openai_base_url: config
-                        .provider
-                        .openai
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-                    openrouter_site_url: config.provider.openrouter.site_url.clone(),
-                    openrouter_app_name: config.provider.openrouter.app_name.clone(),
-                    deepseek_base_url: config
-                        .provider
-                        .deepseek
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-                    lmstudio_base_url: config.provider.lmstudio.base_url.clone(),
-                    lmstudio_api_key: crate::agent::provider::resolve_api_key(
-                        &config.provider.lmstudio.api_key,
-                    ),
-                    lmstudio_tool_calls: config.provider.lmstudio.tool_calls,
-                    lmstudio_planning_tools: config.provider.lmstudio.planning_tools,
-                };
-                panel.intent_translator_enabled = config.agent.intent_translator.enabled;
-                panel.intent_translator_provider = config.agent.intent_translator.provider.clone();
-                panel.intent_translator_ollama_model =
-                    config.agent.intent_translator.ollama_model.clone();
-                panel.intent_translator_model = config.agent.intent_translator.model.clone();
-                panel.intent_translator_min_chars =
-                    config.agent.intent_translator.min_chars_to_translate;
-                panel.intent_translator_timeout_ms = config.agent.intent_translator.timeout_ms;
-                panel.intent_translator_skip_patterns =
-                    config.agent.intent_translator.skip_patterns.clone();
-                panel.codified_context_enabled = config.agent.codified_context.enabled;
-                panel.codified_context_constitution_max_tokens =
-                    config.agent.codified_context.constitution_max_tokens;
-                panel.codified_context_max_specialists =
-                    config.agent.codified_context.max_specialists_per_turn;
-                panel.codified_context_knowledge_max_bytes =
-                    config.agent.codified_context.knowledge_fetch_max_bytes;
-                panel
+            provider: ProviderKind::from_str(&config.provider.active),
+            provider_config: ProviderConfig {
+                api_key: String::new(), // Copilot uses OAuth; Ollama needs no key
+                ollama_base_url: config.provider.ollama.base_url.clone(),
+                ollama_context_length: config.provider.ollama.context_length,
+                ollama_tool_calls: config.provider.ollama.tool_calls,
+                ollama_planning_tools: config.provider.ollama.planning_tools,
+            },
+            copilot_api_base: "https://api.githubcopilot.com".to_string(),
+            copilot_token: None,
+            selected_model: {
+                let kind = ProviderKind::from_str(&config.provider.active);
+                match kind {
+                    ProviderKind::Ollama => config.provider.ollama.default_model.clone(),
+                    _ => config.provider.copilot.default_model.clone(),
+                }
             },
             clipboard: None::<(String, ClipboardType)>,
             highlighter: Highlighter::new(),
@@ -450,10 +308,6 @@ impl Editor {
             surround_change_from: None,
             inline_assist: None,
             review_changes: None,
-            insights_dashboard: None,
-            hook_cooldowns: std::collections::HashMap::new(),
-            last_test_passed: None,
-            hooks_firing: false,
             ts_engine: crate::treesitter::TsEngine::new(),
             ts_cache: std::collections::HashMap::new(),
             ts_versions: std::collections::HashMap::new(),
@@ -465,7 +319,6 @@ impl Editor {
             markdown_cache: None,
             sticky_scroll_cache: None,
             fold_cache: None,
-            last_agent_render: None,
             search_state: SearchState::new(),
             search_rx: None,
             last_search_instant: None,
@@ -483,13 +336,6 @@ impl Editor {
                 count_input: String::from("10"),
                 ..Default::default()
             },
-            insights_narrative_rx: None,
-            debt_rx: None,
-            debt_report: None,
-            debt_narrative_rx: None,
-            debt_narrative: None,
-            mcp_manager: None,
-            mcp_rx: None,
             file_watcher: None,
             watcher_rx: None,
             self_saved: std::collections::HashMap::new(),
@@ -498,17 +344,6 @@ impl Editor {
             )),
             startup_elapsed: None,
             config,
-            #[cfg(unix)]
-            sidecar: None,
-            last_sidecar_send: None,
-            sidecar_last_cursor_line: None,
-            sidecar_last_mode: None,
-            sidecar_snapshot_pending: false,
-            sidecar_last_buffer_idx: None,
-            image_protocol: None,
-            companion_process: None,
-            sidecar_client_connected: false,
-            pending_submit: None,
         };
 
         // Spin up the filesystem watcher (best-effort; degrades gracefully).
@@ -676,29 +511,14 @@ impl Editor {
             }
         }
 
-        // Arm sidecar debounce so the companion sees the new file after 300 ms.
-        // Works even when called before the sidecar is bound (setup_services runs later).
-        self.last_sidecar_send = Some(std::time::Instant::now());
-
         Ok(())
     }
 
-    /// Start all LSP servers and MCP servers concurrently, then apply the results.
-    ///
-    /// LSP startup blocks the loading screen (the editor needs completions and
-    /// diagnostics to be useful).  MCP startup is fire-and-forget: a background
-    /// task is spawned immediately and the result is wired in via `mcp_rx` once
-    /// the connections complete — the editor opens without waiting for MCP.
+    /// Start all LSP servers concurrently, then apply the results.
     pub async fn setup_services(&mut self) {
-        // ── Terminal graphics detection (must run first — writes escape seqs) ──
-        let protocol = crate::graphics::detect_protocol().await;
-        tracing::info!("Terminal image protocol: {:?}", protocol);
-        self.image_protocol = Some(protocol);
-
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let lsp_servers = self.config.lsp.servers.clone();
-        let mcp_servers = self.config.mcp.servers.clone();
         let notif_tx = self.lsp.manager.notification_tx();
 
         // ── LSP — filter to workspace-relevant servers, then await ────────────
@@ -745,42 +565,6 @@ impl Editor {
                 let _ = client.did_open(uri, language, text);
             }
         }
-
-        // ── MCP — fire-and-forget background task ─────────────────────────────
-        // The editor opens immediately; MCP tools become available once the
-        // background handshakes complete.  Progress is visible in the agent
-        // panel bottom bar (ADR 0048) and the diagnostics overlay (SPC d).
-        if !mcp_servers.is_empty() {
-            tracing::info!("Spawning {} MCP server(s) in background", mcp_servers.len());
-            let (tx, rx) = oneshot::channel();
-            tokio::spawn(async move {
-                let manager = McpManager::from_config(&mcp_servers).await;
-                let _ = tx.send(manager);
-            });
-            self.mcp_rx = Some(rx);
-        }
-
-        // ── Nexus sidecar UDS listener ────────────────────────────────────────
-        #[cfg(unix)]
-        {
-            let socket_path = crate::sidecar::SidecarServer::socket_path();
-            match crate::sidecar::SidecarServer::bind(&socket_path).await {
-                Ok(server) => {
-                    tracing::info!("Nexus UDS listening at {:?}", socket_path);
-                    self.sidecar = Some(server);
-                },
-                Err(e) => tracing::warn!("Nexus sidecar unavailable: {e}"),
-            }
-            if self.config.sidecar.auto_launch {
-                self.spawn_companion();
-            }
-        }
-
-        // ── Agent warmup: pre-fetch Copilot token + model list ────────────────
-        // Runs in the background so the editor opens immediately.  By the time
-        // the user types their first prompt, ensure_token() + ensure_models()
-        // will find everything cached and return instantly.
-        self.agent_panel.start_warmup();
     }
 
     /// Get the currently active buffer
@@ -872,156 +656,11 @@ impl Editor {
 
     /// Clean up terminal state before exit
     fn cleanup(&mut self) -> Result<()> {
-        // P2-S8: Persist conversation history to .forgiven/sessions/ on exit.
-        if let Ok(root) = std::env::current_dir() {
-            crate::agent::session_log::save_session(
-                &root,
-                self.agent_panel.conversation.session_start_secs,
-                &self.agent_panel.conversation.messages,
-                self.agent_panel.conversation.session_rounds,
-            );
-        }
-        // Notify the sidecar that the editor is exiting before tearing down the socket.
-        #[cfg(unix)]
-        if let Some(ref s) = self.sidecar {
-            s.send(crate::sidecar::NexusEvent::shutdown());
-        }
-        // Belt-and-suspenders: kill the companion process in case it didn't
-        // receive or handle the shutdown event (e.g. failed to connect).
-        self.kill_companion();
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
         Ok(())
     }
-
-    /// Spawn the Tauri companion window as a child process.
-    ///
-    /// The companion auto-discovers the Nexus socket via `NEXUS_SOCKET` env var
-    /// so it connects immediately without polling.
-    ///
-    /// Binary resolution order:
-    /// 1. `config.sidecar.binary_path` — explicit user override
-    /// 2. Directory of the running forgiven executable — works after `make install`
-    /// 3. `forgiven-companion` on `$PATH` — fallback for custom setups
-    #[cfg(unix)]
-    pub(crate) fn spawn_companion(&mut self) {
-        let socket_path = crate::sidecar::SidecarServer::socket_path();
-        let binary = self.resolve_companion_binary();
-        match std::process::Command::new(&binary)
-            .env("NEXUS_SOCKET", socket_path.to_string_lossy().as_ref())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => {
-                self.companion_process = Some(child);
-                tracing::info!("Companion launched: {binary}");
-            },
-            Err(e) => {
-                self.set_status(format!("Companion: could not launch '{binary}' — {e}"));
-                tracing::warn!("Companion launch failed: {e}");
-            },
-        }
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn spawn_companion(&mut self) {}
-
-    /// Resolve the companion binary path using the three-level lookup.
-    fn resolve_companion_binary(&self) -> String {
-        // 1. Explicit config override.
-        if let Some(ref p) = self.config.sidecar.binary_path {
-            return p.clone();
-        }
-        // 2. Same directory as the running forgiven binary.
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let candidate = dir.join("forgiven-companion");
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-        }
-        // 3. Fall back to PATH.
-        "forgiven-companion".to_string()
-    }
-
-    /// Kill the companion child process if it is running.
-    pub(crate) fn kill_companion(&mut self) {
-        if let Some(mut child) = self.companion_process.take() {
-            let _ = child.kill();
-            self.sidecar_client_connected = false;
-            tracing::info!("Companion closed");
-        }
-    }
-
-    /// Flush debounced sidecar events (buffer updates, cursor moves, mode changes).
-    ///
-    /// Called once per event-loop tick. Debouncing mirrors the 300 ms completion
-    /// debounce so rapid typing coalesces into a single buffer_update.
-    #[cfg(unix)]
-    pub(crate) fn flush_sidecar_events(&mut self) {
-        const DEBOUNCE_MS: u128 = 300;
-
-        // Nothing to do when no sidecar is running.
-        if self.sidecar.is_none() {
-            return;
-        }
-
-        // ── Debounced buffer update ───────────────────────────────────────────
-        if let Some(t) = self.last_sidecar_send {
-            if t.elapsed().as_millis() >= DEBOUNCE_MS {
-                self.last_sidecar_send = None;
-                // Collect what we need before borrowing self.sidecar.
-                let event = self.current_buffer().map(|buf| {
-                    let content = buf.lines().join("\n");
-                    let file_path =
-                        buf.file_path.as_deref().and_then(|p| p.to_str()).map(String::from);
-                    let cursor_line = buf.cursor.row as u32;
-                    let content_type = buf
-                        .file_path
-                        .as_deref()
-                        .map(LspManager::language_from_path)
-                        .unwrap_or_default();
-                    crate::sidecar::NexusEvent::buffer_update(
-                        &content,
-                        &content_type,
-                        file_path.as_deref(),
-                        cursor_line,
-                    )
-                });
-                if let Some(evt) = event {
-                    if let Some(ref server) = self.sidecar {
-                        server.send(evt);
-                        self.sidecar_snapshot_pending = false;
-                    }
-                }
-            }
-        }
-
-        // ── Cursor move (threshold: ±3 lines to filter Insert-mode jitter) ────
-        let cursor_event = self.current_buffer().and_then(|buf| {
-            let line = buf.cursor.row as u32;
-            let should_send =
-                self.sidecar_last_cursor_line.is_none_or(|prev| line.abs_diff(prev) >= 3);
-            if should_send {
-                let file_path = buf.file_path.as_deref().and_then(|p| p.to_str()).map(String::from);
-                Some((line, file_path))
-            } else {
-                None
-            }
-        });
-        if let Some((line, file_path)) = cursor_event {
-            self.sidecar_last_cursor_line = Some(line);
-            if let Some(ref server) = self.sidecar {
-                server.send(crate::sidecar::NexusEvent::cursor_move(file_path.as_deref(), line));
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn flush_sidecar_events(&mut self) {}
 }
 
 impl Drop for Editor {

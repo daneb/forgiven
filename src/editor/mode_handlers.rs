@@ -566,7 +566,7 @@ impl Editor {
                     } else {
                         let _ = std::fs::write(&abs, &original);
                     }
-                    self.agent_panel.pending_reloads.push(rel_path.clone());
+                    // (pending_reloads removed in slim build)
                 }
                 let (next_focused, next_offset) = {
                     let Some(s) = self.review_changes.as_mut() else {
@@ -639,7 +639,7 @@ impl Editor {
                     } else {
                         let _ = std::fs::write(&abs, original);
                     }
-                    self.agent_panel.pending_reloads.push(rel_path.clone());
+                    // (pending_reloads removed in slim build)
                 }
                 if let Some(s) = self.review_changes.as_mut() {
                     for diff in &mut s.diffs {
@@ -688,7 +688,7 @@ impl Editor {
                 let _ = std::fs::write(&abs, &content);
             }
         }
-        self.agent_panel.pending_reloads.push(rel_path);
+        // (pending_reloads removed in slim build)
         Ok(())
     }
 
@@ -726,79 +726,15 @@ impl Editor {
                 }
             }
         }
-        self.agent_panel.pending_reloads.push(rel_path);
+        // (pending_reloads removed in slim build)
         Ok(())
     }
 
     // ── Insights dashboard mode key handling (ADR 0129 Phase 3) ──────────────
 
-    pub(super) fn handle_insights_dashboard_mode(&mut self, key: KeyEvent) -> Result<()> {
-        use crossterm::event::KeyModifiers;
-
-        match key.code {
-            // Close — return to Normal
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.insights_dashboard = None;
-                self.mode = crate::keymap::Mode::Normal;
-            },
-            // Tab forward / backward
-            KeyCode::Tab => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        d.prev_tab();
-                    } else {
-                        d.next_tab();
-                    }
-                }
-            },
-            KeyCode::BackTab => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    d.prev_tab();
-                }
-            },
-            // Scroll down: j / Down / Ctrl-d
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    d.scroll_down();
-                }
-            },
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    for _ in 0..10 {
-                        d.scroll_down();
-                    }
-                }
-            },
-            // Scroll up: k / Up / Ctrl-u
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    d.scroll_up();
-                }
-            },
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    for _ in 0..10 {
-                        d.scroll_up();
-                    }
-                }
-            },
-            // Number keys 1-5: jump directly to tab
-            KeyCode::Char(c @ '1'..='5') => {
-                if let Some(d) = self.insights_dashboard.as_mut() {
-                    use crate::insights::panel::InsightsTab;
-                    d.active_tab = match c {
-                        '1' => InsightsTab::Summary,
-                        '2' => InsightsTab::Activity,
-                        '3' => InsightsTab::Models,
-                        '4' => InsightsTab::Efficiency,
-                        '5' => InsightsTab::Errors,
-                        _ => unreachable!(),
-                    };
-                    d.scroll = 0;
-                }
-            },
-            _ => {},
-        }
+    pub(super) fn handle_insights_dashboard_mode(&mut self, _key: KeyEvent) -> Result<()> {
+        // Insights dashboard removed in slim build.
+        self.mode = crate::keymap::Mode::Normal;
         Ok(())
     }
 }

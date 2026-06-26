@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -28,10 +29,9 @@ pub struct CopilotQuota {
 // Token types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Sentinel error returned by `start_chat_stream_with_tools` when the API responds with
-/// 401 Unauthorized so that `agentic_loop` can refresh the token and retry the round.
+/// Sentinel error returned when the API responds with 401 Unauthorized.
 #[derive(Debug)]
-pub(super) struct TokenExpiredError;
+pub struct TokenExpiredError;
 
 impl std::fmt::Display for TokenExpiredError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,7 +42,7 @@ impl std::fmt::Display for TokenExpiredError {
 impl std::error::Error for TokenExpiredError {}
 
 #[derive(Debug, Clone)]
-pub(crate) struct CopilotApiToken {
+pub struct CopilotApiToken {
     pub token: String,
     pub expires_at: u64,
     /// Business API base URL from the token exchange response (e.g.
@@ -51,7 +51,7 @@ pub(crate) struct CopilotApiToken {
 }
 
 impl CopilotApiToken {
-    pub(crate) fn is_expired(&self) -> bool {
+    pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -70,7 +70,7 @@ struct TokenResponse {
 // Auth
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub(super) fn load_oauth_token() -> Result<String> {
+pub fn load_oauth_token() -> Result<String> {
     let home = std::env::var("HOME").context("HOME not set")?;
     let path = format!("{home}/.config/github-copilot/apps.json");
     let raw = std::fs::read_to_string(&path).with_context(|| format!("Cannot read {path}"))?;
@@ -92,7 +92,7 @@ pub async fn acquire_copilot_token() -> Result<String> {
     Ok(api_token.token)
 }
 
-pub(super) async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
+pub async fn exchange_token(oauth_token: &str) -> Result<CopilotApiToken> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()

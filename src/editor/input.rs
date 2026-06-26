@@ -10,17 +10,13 @@ impl Editor {
     pub(super) fn cycle_panel_focus(&mut self) {
         let current: u8 = match self.mode {
             Mode::Explorer => 0,
-            Mode::Agent => 2,
             _ => 1,
         };
 
-        // Build ordered list of visible panel indices (explorer=0, editor=1, agent=2).
+        // Build ordered list of visible panel indices (explorer=0, editor=1).
         let mut visible: Vec<u8> = vec![1]; // editor is always present
         if self.file_explorer.visible {
             visible.insert(0, 0);
-        }
-        if self.agent_panel.visible {
-            visible.push(2);
         }
 
         if visible.len() < 2 {
@@ -31,15 +27,11 @@ impl Editor {
         let next = visible[(pos + 1) % visible.len()];
 
         // Blur the panel losing focus.
-        match current {
-            0 => self.file_explorer.blur(),
-            2 => self.agent_panel.blur(),
-            _ => {},
+        if current == 0 {
+            self.file_explorer.blur();
         }
 
         // Discard any in-flight leader sequence before switching modes.
-        // Without this a partial SPC q sequence started in Normal could
-        // complete with a key typed in the Agent panel and quit unexpectedly.
         self.key_handler.clear_sequence();
 
         // Focus the panel gaining focus.
@@ -47,10 +39,6 @@ impl Editor {
             0 => {
                 self.file_explorer.focus();
                 self.mode = Mode::Explorer;
-            },
-            2 => {
-                self.agent_panel.focus();
-                self.mode = Mode::Agent;
             },
             _ => {
                 self.mode = Mode::Normal;
@@ -411,380 +399,11 @@ impl Editor {
     }
 
     /// Handle keys in PickBuffer mode
-    /// Handle keys while the agent panel is focused.
+    /// Handle keys while the agent panel is focused (agent panel removed in slim build).
     pub(super) fn handle_agent_mode(&mut self, key: KeyEvent) -> Result<()> {
-        // ── Leader key sequences (e.g. SPC a v) from Agent mode ──────────────
-        // Forward Space (when input is empty, so it can't corrupt typed text)
-        // and any already-in-progress leader sequence to the normal-mode handler.
-        // This mirrors the same forwarding in Visual / VisualLine mode.
-        let input_empty = self.agent_panel.conversation.input.is_empty();
-        if (key.code == KeyCode::Char(' ') && input_empty) || self.key_handler.leader_active() {
-            let action = self.key_handler.handle_normal(key);
-            if !matches!(action, Action::Noop) {
-                return self.execute_action(action);
-            }
-            if self.key_handler.leader_active() {
-                return Ok(()); // sequence still in-flight — don't fall through to input_char
-            }
-        }
-
-        // If the agent is waiting for free-text input, intercept all keys for the input dialog.
-        if self.agent_panel.asking_user_input.is_some() {
-            match key.code {
-                KeyCode::Char(c) if key.modifiers.is_empty() => {
-                    self.agent_panel.type_char_to_input(c);
-                },
-                KeyCode::Backspace => {
-                    self.agent_panel.backspace_input();
-                },
-                KeyCode::Left => {
-                    self.agent_panel.move_input_cursor(-1);
-                },
-                KeyCode::Right => {
-                    self.agent_panel.move_input_cursor(1);
-                },
-                KeyCode::Enter => {
-                    self.agent_panel.confirm_user_input();
-                },
-                KeyCode::Esc => {
-                    self.agent_panel.cancel_user_input();
-                },
-                _ => {},
-            }
-            return Ok(());
-        }
-
-        // If the agent is waiting for a question answer, intercept all keys for the dialog.
-        if self.agent_panel.asking_user.is_some() {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.agent_panel.move_question_selection(-1);
-                },
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.agent_panel.move_question_selection(1);
-                },
-                KeyCode::Enter => {
-                    self.agent_panel.confirm_user_question();
-                },
-                KeyCode::Esc => {
-                    self.agent_panel.cancel_user_question();
-                },
-                _ => {},
-            }
-            return Ok(());
-        }
-
-        // Ctrl+P file-context picker: intercept all keys while the overlay is open.
-        if self.agent_panel.at_picker.is_some() {
-            return self.handle_at_picker_key(key);
-        }
-
-        // Slash-command autocomplete: intercept navigation keys when the menu is visible.
-        if self.agent_panel.slash_menu.is_some() {
-            match key.code {
-                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
-                    self.agent_panel.move_slash_selection(1);
-                    return Ok(());
-                },
-                KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
-                    self.agent_panel.move_slash_selection(-1);
-                    return Ok(());
-                },
-                KeyCode::Enter => {
-                    self.agent_panel.complete_slash_selection();
-                    return Ok(());
-                },
-                KeyCode::Esc => {
-                    self.agent_panel.slash_menu = None;
-                    return Ok(());
-                },
-                _ => {}, // fall through to normal input handling
-            }
-        }
-
-        match key.code {
-            // Esc — exit nav mode if active; otherwise blur the panel.
-            KeyCode::Esc => {
-                if self.agent_panel.nav_state.active {
-                    self.agent_panel.nav_state.active = false;
-                } else {
-                    self.agent_panel.blur();
-                    self.mode = Mode::Normal;
-                }
-            },
-            // Tab — toggle navigation mode (P1-S5, ADR 0149).
-            // When nav mode is active, j/k move the history cursor and y yanks
-            // the current line to clipboard.  Tab again or Esc deactivates it.
-            KeyCode::Tab => {
-                if self.agent_panel.nav_state.active {
-                    self.agent_panel.nav_state.active = false;
-                } else {
-                    self.agent_panel.nav_state.active = true;
-                    // Start at the bottom of the rendered history.
-                    let total = crate::ui::agent_panel_total_lines();
-                    self.agent_panel.nav_state.cursor_line = total.saturating_sub(1);
-                }
-            },
-            // Alt+Enter — insert a newline into the multi-line input.
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.agent_panel.input_newline();
-                self.agent_panel.update_slash_menu();
-            },
-            // Enter — submit the input.
-            KeyCode::Enter => {
-                // Action slash-command interception: /compress and /translate are
-                // editor actions, not prompt templates — handle them before submit.
-                let trimmed = self.agent_panel.conversation.input.trim().to_string();
-                if trimmed == "/compress" {
-                    self.agent_panel.conversation.input.clear();
-                    self.agent_panel.update_slash_menu();
-                    let _ = self.execute_action(Action::AgentJanitorCompress);
-                    return Ok(());
-                }
-                if trimmed == "/translate" {
-                    self.agent_panel.conversation.input.clear();
-                    self.agent_panel.update_slash_menu();
-                    let _ = self.execute_action(Action::AgentIntentTranslatorToggle);
-                    return Ok(());
-                }
-                // Snapshot current buffer content as context, including its path
-                // so the model knows which file is open and can reference it directly.
-                let context = self.current_buffer().map(|buf| {
-                    let path_header =
-                        buf.file_path.as_deref().and_then(|p| p.to_str()).unwrap_or(&buf.name);
-                    format!("File: {path_header}\n\n{}", buf.lines().join("\n"))
-                });
-                // Project root for tool sandboxing.
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                // Queue the submit for the async event loop so handle_key() returns
-                // immediately.  The event loop renders once (showing WaitingForResponse
-                // status) before calling submit().await — eliminating the frozen-screen
-                // symptom where the UI was unresponsive for 10+ seconds while the token
-                // exchange / model-fetch HTTP calls ran inside block_in_place.
-                self.agent_panel.status =
-                    crate::agent::AgentStatus::WaitingForResponse { round: 1 };
-                self.pending_submit = Some(crate::editor::PendingSubmitArgs {
-                    context,
-                    project_root,
-                    max_rounds: self.config.max_agent_rounds,
-                    warning_threshold: self.config.agent_warning_threshold,
-                    preferred_model: self.config.active_default_model().to_string(),
-                    auto_compress: self.config.agent.auto_compress_tool_results,
-                    mask_threshold: self.config.agent.observation_mask_threshold_chars,
-                    expand_threshold: self.config.agent.expand_threshold_chars,
-                });
-                self.agent_panel.update_slash_menu();
-            },
-            // Ctrl+Backspace — clear all pending input (text, pastes, images, files).
-            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_panel.clear_input();
-                self.set_status("Input cleared".to_string());
-            },
-            // Backspace — delete last input character.
-            KeyCode::Backspace => {
-                self.agent_panel.input_backspace();
-                self.agent_panel.update_slash_menu();
-            },
-            // Left/Right — move cursor within the input field.
-            KeyCode::Left => self.agent_panel.cursor_left(),
-            KeyCode::Right => self.agent_panel.cursor_right(),
-            // Alt+Up / Alt+Down — navigate input history.
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.agent_panel.history_up();
-            },
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.agent_panel.history_down();
-            },
-            // Up / Down — scroll the session message list.
-            KeyCode::Up => self.agent_panel.scroll_up(),
-            KeyCode::Down => self.agent_panel.scroll_down(),
-            // Ctrl+T — cycle through available models.
-            // Note: Ctrl+M = Enter (0x0D) in all terminals and cannot be used here.
-            // Ctrl+T (0x14) is safe in raw mode and not used by this editor.
-            // On first press, fetches the live model list from the Copilot API.
-            // Ctrl+C — abort the running agentic loop (stream + tool calls).
-            KeyCode::Char('c')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.agent_panel.stream_rx.is_some() =>
-            {
-                self.agent_panel.cancel_stream();
-                self.set_status("Agent stopped".to_string());
-            },
-            // Ctrl+K — copy next code block from the last reply (cycles through all blocks).
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(reply) = self.agent_panel.last_assistant_reply() {
-                    let blocks = crate::agent::AgentPanel::extract_code_blocks(&reply);
-                    if blocks.is_empty() {
-                        self.set_status("No code blocks in last reply".to_string());
-                    } else {
-                        let idx = self.agent_panel.code_block_idx % blocks.len();
-                        self.sync_system_clipboard(&blocks[idx]);
-                        self.set_status(format!(
-                            "Code block {}/{} copied  (Ctrl+K for next)",
-                            idx + 1,
-                            blocks.len()
-                        ));
-                        self.agent_panel.code_block_idx =
-                            (self.agent_panel.code_block_idx + 1) % blocks.len();
-                    }
-                } else {
-                    self.set_status("No reply to copy".to_string());
-                }
-            },
-            // Ctrl+M — open the next mermaid diagram from the last reply in the browser.
-            // Auto-fixes unquoted parentheses in node labels (common AI generation bug).
-            // Cycles through multiple diagrams; resets on new reply.
-            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_mermaid_in_browser();
-            },
-            // Ctrl+Y — yank the full last reply to the system clipboard.
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(text) = self.agent_panel.last_assistant_reply() {
-                    let len = text.lines().count();
-                    self.sync_system_clipboard(&text);
-                    self.set_status(format!("Copied {} lines to clipboard", len));
-                } else {
-                    self.set_status("No reply to copy".to_string());
-                }
-            },
-            // Ctrl+P — open the file-context picker (attach a file to agent message).
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_at_picker();
-            },
-            // Ctrl+V — paste from clipboard (image-first, then text fallback).
-            // On macOS Cmd+V triggers bracketed paste (text only via Event::Paste);
-            // Ctrl+V is passed to the app and allows us to read images via arboard.
-            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                use crate::agent::AgentPanel;
-                match AgentPanel::try_paste_image() {
-                    Ok(Some(img)) => {
-                        let w = img.width;
-                        let h = img.height;
-                        self.agent_panel.image_blocks.push(img);
-                        self.set_status(format!("Image pasted ({w}x{h})"));
-                    },
-                    Ok(None) => {
-                        // No image — try text from clipboard.
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                            Ok(text) if !text.is_empty() => {
-                                self.handle_paste(text)?;
-                            },
-                            _ => {
-                                self.set_status("Clipboard empty".to_string());
-                            },
-                        }
-                    },
-                    Err(e) => {
-                        self.set_status(format!("Image paste failed: {e}"));
-                    },
-                }
-            },
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Eagerly load models if not yet fetched (brief one-time network call).
-                let was_empty = self.agent_panel.available_models.is_empty();
-                if was_empty {
-                    self.set_status("Loading model list…".to_string());
-                    let preferred = self.config.active_default_model().to_string();
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            if let Err(e) = self.agent_panel.ensure_models(&preferred).await {
-                                tracing::warn!("Could not fetch model list: {e}");
-                            }
-                        });
-                    });
-                    // First press: just confirm the config-preferred model; don't advance past it.
-                } else {
-                    // Subsequent presses: cycle to next model and persist the choice.
-                    self.agent_panel.cycle_model();
-                    let model_id = self.agent_panel.selected_model_id().to_string();
-                    let model_name = self.agent_panel.selected_model_display().to_string();
-                    self.config.set_active_default_model(&model_id);
-                    if let Err(e) = self.config.save() {
-                        tracing::warn!("Failed to save config: {e}");
-                    }
-                    // Clear conversation history so the new model gets a clean context.
-                    self.agent_panel.new_conversation(&model_name);
-                }
-                let model_name = self.agent_panel.selected_model_display().to_string();
-                let n = self.agent_panel.available_models.len();
-                let idx = self.agent_panel.selected_model + 1;
-
-                self.set_status(format!(
-                    "Agent model → {model_name}  [{idx}/{n}]  (Ctrl+T to cycle)"
-                ));
-            },
-            // Ctrl+Shift+T — refresh model list from API (picks up new releases).
-            KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.set_status("Refreshing model list from API…".to_string());
-                let preferred = self.config.active_default_model().to_string();
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        if let Err(e) = self.agent_panel.refresh_models(&preferred).await {
-                            tracing::warn!("Could not refresh model list: {e}");
-                            self.set_status(format!("Failed to refresh models: {e}"));
-                        } else {
-                            let model_name = self.agent_panel.selected_model_display().to_string();
-                            let n = self.agent_panel.available_models.len();
-                            self.set_status(format!(
-                                "Refreshed {n} models, selected: {model_name}"
-                            ));
-                        }
-                    });
-                });
-            },
-            // Regular characters — handle special agent commands before appending to input.
-            KeyCode::Char(ch) => {
-                // If awaiting continuation, 'y' approves and 'n' denies.
-                if self.agent_panel.awaiting_continuation {
-                    match ch {
-                        'y' | 'Y' => {
-                            self.agent_panel.approve_continuation();
-                            self.set_status("Continuing agent work...".to_string());
-                        },
-                        'n' | 'N' => {
-                            self.agent_panel.deny_continuation();
-                            self.set_status("Agent stopped by user".to_string());
-                        },
-                        _ => {
-                            // Ignore other keys when awaiting continuation
-                        },
-                    }
-                    return Ok(());
-                }
-
-                // Nav mode: j/k move the history cursor; y yanks the current line (P1-S5/P1-S6).
-                if self.agent_panel.nav_state.active {
-                    match ch {
-                        'j' => {
-                            let total = crate::ui::agent_panel_total_lines();
-                            let next = (self.agent_panel.nav_state.cursor_line + 1)
-                                .min(total.saturating_sub(1));
-                            self.agent_panel.nav_state.cursor_line = next;
-                        },
-                        'k' => {
-                            self.agent_panel.nav_state.cursor_line =
-                                self.agent_panel.nav_state.cursor_line.saturating_sub(1);
-                        },
-                        'y' => {
-                            let idx = self.agent_panel.nav_state.cursor_line;
-                            let text = crate::ui::agent_panel_line_text(idx);
-                            let trimmed = text.trim().to_string();
-                            self.sync_system_clipboard(&trimmed);
-                            self.set_status(format!("Line {} copied to clipboard", idx + 1));
-                        },
-                        _ => {},
-                    }
-                    return Ok(());
-                }
-
-                // All other characters type into the input box.
-                // (Apply-diff, copy code block, and yank-reply moved to Ctrl+A / Ctrl+K / Ctrl+Y
-                // so single letters never intercept the first character of a message.)
-                self.agent_panel.input_char(ch);
-                self.agent_panel.update_slash_menu();
-            },
-            _ => {},
+        // Agent panel removed — Esc returns to Normal, everything else is a noop.
+        if key.code == KeyCode::Esc {
+            self.mode = Mode::Normal;
         }
         Ok(())
     }
@@ -792,18 +411,8 @@ impl Editor {
     // ── Paste handling ─────────────────────────────────────────────────────────
 
     /// Handle a bracketed-paste event.
-    ///
-    /// In Agent mode newlines are preserved so multi-line pastes work correctly.
-    /// The user still presses Enter to send.
     pub(super) fn handle_paste(&mut self, text: String) -> Result<()> {
-        if self.mode == Mode::Agent {
-            // Store the paste as a block; the UI shows a compact summary line
-            // ("⎘ Pasted N lines") and the full content is sent with the message.
-            let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-            let line_count = normalised.lines().count();
-            self.agent_panel.pasted_blocks.push((normalised, line_count));
-        } else if self.mode == Mode::Insert {
-            // In insert mode, paste the text as-is into the current buffer.
+        if self.mode == Mode::Insert {
             let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
             self.with_buffer(|buf| buf.insert_text_block(&normalised));
         }
@@ -1143,30 +752,9 @@ impl Editor {
                     }
                 }
             },
-            // :insights summarize — generate LLM narrative (Phase 4, ADR 0129)
-            "insights summarize" => {
-                self.generate_insights_narrative(20);
-            },
-            // :insights — show collaboration analytics from forgiven.log
-            "insights" => {
-                let log_path = crate::config::Config::log_path()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
-                match crate::insights::parse_log_file(&log_path) {
-                    Some(summary) => {
-                        let report = summary.format_report();
-                        self.agent_panel.visible = true;
-                        self.agent_panel.conversation.messages.push(crate::agent::ChatMessage {
-                            role: crate::agent::Role::Assistant,
-                            content: report,
-                            images: vec![],
-                        });
-                        self.agent_panel.scroll_to_bottom();
-                        self.set_status("Insights loaded".to_string());
-                    },
-                    None => {
-                        self.set_status(format!("No log found at {}", log_path.display()));
-                    },
-                }
+            // :insights — removed in slim build
+            "insights" | "insights summarize" => {
+                self.set_status("Insights removed in slim build".to_string());
             },
             // :12 — jump to line 12 (1-based), same as vim
             _ if cmd.chars().all(|c| c.is_ascii_digit()) => {

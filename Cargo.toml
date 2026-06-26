@@ -70,10 +70,6 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 
-# Inline graphics (Phase 1 — Glimpse)
-ratatui-image = "2"
-resvg = "0.44"
-tiny-skia = "0.11"
 
 # Markdown rendering (agent panel + editor preview)
 pulldown-cmark = "0.12"

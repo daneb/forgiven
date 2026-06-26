@@ -3,6 +3,7 @@
 //! All public functions take cursor positions in **char-index coordinates**
 //! (matching `Buffer.cursor.col`) and return ranges in the same coordinates.
 //! Byte↔char conversions are handled internally using the joined source string.
+#![allow(dead_code)]
 
 use tree_sitter::Node;
 

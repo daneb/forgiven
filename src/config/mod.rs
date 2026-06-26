@@ -790,6 +790,7 @@ impl Default for Config {
     }
 }
 
+#[allow(dead_code)]
 impl Config {
     /// Set the preferred model ID for the active provider.
     ///

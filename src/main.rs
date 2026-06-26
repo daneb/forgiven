@@ -61,20 +61,13 @@ impl tracing::field::Visit for MessageVisitor {
 mod agent;
 mod buffer;
 mod config;
-mod debt;
 mod editor;
 mod explorer;
-mod graphics;
 mod highlight;
-mod insights;
 mod keymap;
 mod lsp;
 mod markdown;
-mod mcp;
 mod search;
-#[cfg(unix)]
-mod sidecar;
-mod spec_framework;
 mod treesitter;
 mod ui;
 
@@ -205,17 +198,6 @@ async fn main() -> Result<()> {
         let model = config.provider.ollama.default_model.clone();
         tracing::info!("[ollama] background warmup started for model={model:?}");
         tokio::spawn(crate::agent::provider::warmup_ollama(base_url, model));
-    }
-
-    // Compute debt metrics in the background — result delivered via oneshot channel.
-    // Falls back gracefully if the project root is unavailable.
-    if let Ok(project_root) = std::env::current_dir() {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let report = crate::debt::compute(&project_root).await;
-            let _ = tx.send(report);
-        });
-        editor.debt_rx = Some(rx);
     }
 
     editor.startup_elapsed = Some(t0.elapsed());

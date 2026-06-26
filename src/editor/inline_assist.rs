@@ -48,10 +48,6 @@ impl Editor {
                             error = Some(e);
                             break;
                         },
-                        // Ignore tool / file / task events — inline assist has no tools.
-                        Ok(_) => {
-                            active = true;
-                        },
                         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                             // Stream ended without explicit Done.
@@ -113,15 +109,21 @@ impl Editor {
                         return Ok(());
                     }
 
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-                    // Build the future while agent_panel is mutably borrowed,
-                    // then await it inside block_in_place (same pattern as submit()).
-                    let fut = self.agent_panel.start_inline_assist(
+                    // Build the future and run it in block_in_place.
+                    let token_str: Option<String> =
+                        self.copilot_token.as_ref().map(|t| t.token.clone());
+                    let provider = self.provider.clone();
+                    let provider_config = self.provider_config.clone();
+                    let copilot_api_base = self.copilot_api_base.clone();
+                    let model_id = self.selected_model.clone();
+                    let fut = crate::agent::start_inline_assist(
+                        &provider,
+                        &provider_config,
+                        token_str.as_deref(),
+                        &copilot_api_base,
+                        &model_id,
                         selection_text.clone(),
                         prompt.clone(),
-                        project_root,
                         language.clone(),
                     );
                     let result = tokio::task::block_in_place(|| {

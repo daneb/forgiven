@@ -195,139 +195,15 @@ impl Editor {
         }
     }
 
-    /// Open the Ctrl+P file-context picker in the agent panel.
-    ///
-    /// Rescans the project files (always fresh) and initialises `at_picker` with
-    /// an unfiltered list of all files.
+    /// Open the file-context picker (agent panel removed — no-op in slim build).
+    #[allow(dead_code)]
     pub(super) fn open_at_picker(&mut self) {
-        self.scan_files();
-        let results: Vec<(PathBuf, Vec<usize>)> =
-            self.file_all.iter().map(|p| (p.clone(), vec![])).collect();
-        let total = results.len();
-        self.agent_panel.at_picker =
-            Some(crate::agent::AtPickerState { query: String::new(), results, selected: 0 });
-        self.set_status(format!("Attach file ({total} files) — type to filter"));
+        self.set_status("File-context picker removed in slim build".to_string());
     }
 
-    /// Recompute `at_picker.results` from `file_all` using the current query.
-    pub(super) fn refilter_at_picker(&mut self) {
-        let query = match self.agent_panel.at_picker.as_ref() {
-            Some(p) => p.query.clone(),
-            None => return,
-        };
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-        let results: Vec<(PathBuf, Vec<usize>)> = if query.is_empty() {
-            self.file_all.iter().map(|p| (p.clone(), vec![])).collect()
-        } else {
-            let mut scored: Vec<(i64, PathBuf, Vec<usize>)> = self
-                .file_all
-                .iter()
-                .filter_map(|p| {
-                    let display = p.strip_prefix(&cwd).unwrap_or(p).to_string_lossy().to_string();
-                    Self::fuzzy_score(&query, &display).map(|(sc, idxs)| (sc, p.clone(), idxs))
-                })
-                .collect();
-            scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-            scored.into_iter().map(|(_, p, idxs)| (p, idxs)).collect()
-        };
-
-        if let Some(ref mut picker) = self.agent_panel.at_picker {
-            let max = results.len().saturating_sub(1);
-            picker.selected = picker.selected.min(max);
-            picker.results = results;
-        }
-    }
-
-    /// Handle a key event while the Ctrl+P file-context picker is open.
-    pub(super) fn handle_at_picker_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                self.agent_panel.at_picker = None;
-                self.set_status(String::new());
-            },
-
-            KeyCode::Up | KeyCode::BackTab => {
-                if let Some(ref mut picker) = self.agent_panel.at_picker {
-                    if picker.selected > 0 {
-                        picker.selected -= 1;
-                    }
-                }
-            },
-
-            KeyCode::Down | KeyCode::Tab => {
-                if let Some(ref mut picker) = self.agent_panel.at_picker {
-                    let max = picker.results.len().saturating_sub(1);
-                    if picker.selected < max {
-                        picker.selected += 1;
-                    }
-                }
-            },
-
-            KeyCode::Enter => {
-                // Toggle: if already attached remove it, otherwise add it.
-                // Picker stays open so the user can attach/detach multiple files.
-                let path_opt = self
-                    .agent_panel
-                    .at_picker
-                    .as_ref()
-                    .and_then(|p| p.results.get(p.selected))
-                    .map(|(path, _)| path.clone());
-
-                if let Some(path) = path_opt {
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let display_name =
-                        path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
-
-                    if let Some(pos) = self
-                        .agent_panel
-                        .file_blocks
-                        .iter()
-                        .position(|(name, _, _)| name == &display_name)
-                    {
-                        // Already attached — remove it.
-                        self.agent_panel.file_blocks.remove(pos);
-                        self.set_status(format!("Removed: {display_name}"));
-                    } else {
-                        // Not yet attached — read and add it.
-                        match Self::read_file_for_context(&path, &cwd) {
-                            Ok((display_name, content, line_count)) => {
-                                let msg = format!(
-                                    "Attached: {display_name} ({line_count} line{})",
-                                    if line_count == 1 { "" } else { "s" }
-                                );
-                                self.agent_panel.file_blocks.push((
-                                    display_name,
-                                    content,
-                                    line_count,
-                                ));
-                                self.set_status(msg);
-                            },
-                            Err(e) => {
-                                self.set_status(format!("Cannot read file: {e}"));
-                            },
-                        }
-                    }
-                    // Picker stays open; Esc closes it.
-                }
-            },
-
-            KeyCode::Backspace => {
-                if let Some(ref mut picker) = self.agent_panel.at_picker {
-                    picker.query.pop();
-                }
-                self.refilter_at_picker();
-            },
-
-            KeyCode::Char(ch) => {
-                if let Some(ref mut picker) = self.agent_panel.at_picker {
-                    picker.query.push(ch);
-                }
-                self.refilter_at_picker();
-            },
-
-            _ => {},
-        }
+    /// Handle a key event while the file-context picker is open (no-op in slim build).
+    #[allow(dead_code)]
+    pub(super) fn handle_at_picker_key(&mut self, _key: KeyEvent) -> Result<()> {
         Ok(())
     }
 }
