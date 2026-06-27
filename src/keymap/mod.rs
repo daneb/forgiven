@@ -9,28 +9,23 @@ pub enum Mode {
     Normal,
     Insert,
     Command,
-    Visual,            // character-wise visual selection (v)
-    VisualLine,        // line-wise visual selection (V)
-    PickBuffer,        // For buffer selection UI
-    PickFile,          // For file finder UI
-    Agent,             // Copilot Chat / agent panel focused
-    Explorer,          // File explorer tree focused
-    MarkdownPreview,   // Read-only rendered markdown view (SPC p p toggle)
-    Search,            // Project-wide ripgrep search overlay (SPC s g)
-    InFileSearch,      // In-file search mode (/)
-    RenameFile,        // Rename popup: user edits a filename from the explorer
-    DeleteFile,        // Confirmation popup: y=delete, n/Esc=cancel
-    NewFolder,         // New folder popup: user types a folder name from the explorer
-    CommitMsg,         // Editable commit message popup (SPC g s / SPC g l)
-    ReleaseNotes,      // Release notes generation popup (SPC g n)
-    Diagnostics,       // Read-only diagnostics overlay (SPC d)
-    BinaryFile,        // Unsupported binary file popup: o=open default app, Esc=dismiss
-    LocationList,      // LSP location list overlay (goto-definition / references / symbols)
-    LspHover,          // Read-only hover info popup (K / SPC l h)
-    LspRename,         // LSP rename input popup (SPC l r)
-    InlineAssist,      // Inline AI transform overlay (SPC a i)
-    ReviewChanges,     // Multi-file review / change set view (SPC a r, ADR 0113)
-    InsightsDashboard, // Collaboration analytics overlay (SPC a I, ADR 0129)
+    Visual,          // character-wise visual selection (v)
+    VisualLine,      // line-wise visual selection (V)
+    PickBuffer,      // For buffer selection UI
+    PickFile,        // For file finder UI
+    Explorer,        // File explorer tree focused
+    MarkdownPreview, // Read-only rendered markdown view (SPC p p toggle)
+    Search,          // Project-wide ripgrep search overlay (SPC s g)
+    InFileSearch,    // In-file search mode (/)
+    RenameFile,      // Rename popup: user edits a filename from the explorer
+    DeleteFile,      // Confirmation popup: y=delete, n/Esc=cancel
+    NewFolder,       // New folder popup: user types a folder name from the explorer
+    Diagnostics,     // Read-only diagnostics overlay (SPC d)
+    BinaryFile,      // Unsupported binary file popup: o=open default app, Esc=dismiss
+    LocationList,    // LSP location list overlay (goto-definition / references / symbols)
+    LspHover,        // Read-only hover info popup (K / SPC l h)
+    LspRename,       // LSP rename input popup (SPC l r)
+    ReviewChanges,   // Multi-file review / change set view (ADR 0113)
 }
 
 /// The semantic kind of a tree-sitter text object.
@@ -149,43 +144,16 @@ pub enum Action {
     LspPrevDiagnostic,
     // Visual modes
     VisualLine,
-    // Agent panel
-    AgentToggle,
-    AgentFocus,
-    AgentNewConversation, // SPC a n — clear history, start fresh conversation
     // Explorer panel
     ExplorerToggle,
     ExplorerFocus,
     ExplorerToggleHidden,
     // Git
-    GitOpen,         // SPC g g — open lazygit
-    GitCommitStaged, // SPC g s — generate commit msg from staged diff
-    GitCommitLast,   // SPC g l — generate commit msg from last commit
-    GitReleaseNotes, // SPC g n — generate release notes from last N commits
+    GitOpen, // SPC g g — open lazygit
     // Markdown preview
     MarkdownPreviewToggle, // SPC p p — toggle markdown preview for .md buffers
     MarkdownOpenBrowser,   // SPC p b — render current buffer to HTML and open in browser
     SoftWrapToggle,        // SPC p w — toggle soft-wrap (word wrap at viewport edge)
-    // Memory
-    MemorySave, // SPC a s — flush session context to MCP memory knowledge graph
-    // Janitor
-    AgentJanitorCompress, // SPC a j — summarise + compress chat history
-    // Investigation subagent (Phase 3.3)
-    AgentInvestigate, // SPC a v — run input as a single-round investigation query
-    // Checkpoints / session undo (ADR 0112)
-    AgentSessionRevert, // SPC a u — revert all agent-touched files to pre-session state
-    // Multi-file review / change set view (ADR 0113)
-    ReviewChangesOpen, // SPC a r — open review overlay for all agent-touched files
-    // Insights dashboard (ADR 0129 Phase 3)
-    InsightsDashboardOpen, // SPC a I — open collaboration analytics overlay
-    // Companion sidecar (Step 4.5 — Hybrid Reliability)
-    CompanionToggle, // SPC p c — toggle the Tauri companion window
-    // Intent Translator (docs/intent-translator.md)
-    AgentIntentTranslatorToggle, // SPC a t — toggle intent translator for current session
-    // Codified Context (docs/codified-context.md)
-    CodifiedContextOpenConstitution, // SPC a c — open .forgiven/constitution.md
-    CodifiedContextOpenSpecialist,   // SPC a C — open a .forgiven/agents/*.md specialist
-    CodifiedContextOpenKnowledge,    // SPC a k — open a .forgiven/knowledge/*.md document
     // Project-wide text search
     SearchOpen, // SPC s g — open the project search overlay
     // In-file search
@@ -248,15 +216,6 @@ pub enum Action {
     // Bracket navigation
     /// `%` — jump to the matching bracket/paren/brace
     JumpMatchingPair,
-    // Inline assistant (ADR 0111)
-    /// `SPC a i` — open the inline AI assist overlay on the current selection (or cursor)
-    InlineAssistStart,
-    /// Accept the streamed replacement (Enter in Preview phase)
-    InlineAssistAccept,
-    /// Cancel and discard (Esc at any phase)
-    InlineAssistCancel,
-    /// `SPC a o` — open the last assistant response in a new buffer
-    AgentOpenLastResponse,
 }
 
 /// Represents a keybinding tree node
@@ -355,45 +314,6 @@ impl KeyHandler {
         lsp_node.children.insert('s', KeyNode::leaf("symbols", Action::LspDocumentSymbols));
         tree.insert('l', lsp_node);
 
-        // SPC a - Agent / Copilot Chat panel
-        let mut agent_node = KeyNode::new("agent");
-        agent_node.children.insert('a', KeyNode::leaf("toggle agent panel", Action::AgentToggle));
-        agent_node.children.insert('f', KeyNode::leaf("focus agent panel", Action::AgentFocus));
-        agent_node
-            .children
-            .insert('n', KeyNode::leaf("new conversation", Action::AgentNewConversation));
-        agent_node
-            .children
-            .insert('s', KeyNode::leaf("save session to memory", Action::MemorySave));
-        agent_node
-            .children
-            .insert('i', KeyNode::leaf("inline AI assist", Action::InlineAssistStart));
-        agent_node
-            .children
-            .insert('u', KeyNode::leaf("revert session (undo agent)", Action::AgentSessionRevert));
-        agent_node
-            .children
-            .insert('v', KeyNode::leaf("investigate (single-round)", Action::AgentInvestigate));
-        agent_node.children.insert('r', KeyNode::leaf("review changes", Action::ReviewChangesOpen));
-        agent_node.children.insert(
-            'o',
-            KeyNode::leaf("open last response in buffer", Action::AgentOpenLastResponse),
-        );
-        // SPC a x - Codified context file openers (sub-tree to free top-level slots)
-        let mut ctx_node = KeyNode::new("codified context");
-        ctx_node.children.insert(
-            'c',
-            KeyNode::leaf("open constitution", Action::CodifiedContextOpenConstitution),
-        );
-        ctx_node
-            .children
-            .insert('C', KeyNode::leaf("open specialist", Action::CodifiedContextOpenSpecialist));
-        ctx_node
-            .children
-            .insert('k', KeyNode::leaf("open knowledge doc", Action::CodifiedContextOpenKnowledge));
-        agent_node.children.insert('x', ctx_node);
-        tree.insert('a', agent_node);
-
         // SPC e - Explorer / file tree
         let mut explorer_node = KeyNode::new("explorer");
         explorer_node
@@ -410,16 +330,6 @@ impl KeyHandler {
         // SPC g - Git
         let mut git_node = KeyNode::new("git");
         git_node.children.insert('g', KeyNode::leaf("open lazygit", Action::GitOpen));
-        git_node
-            .children
-            .insert('s', KeyNode::leaf("commit msg from staged", Action::GitCommitStaged));
-        git_node
-            .children
-            .insert('l', KeyNode::leaf("commit msg from last commit", Action::GitCommitLast));
-        git_node.children.insert(
-            'n',
-            KeyNode::leaf("release notes from last N commits", Action::GitReleaseNotes),
-        );
         tree.insert('g', git_node);
 
         // SPC s - Search
@@ -436,7 +346,7 @@ impl KeyHandler {
         window_node.children.insert('c', KeyNode::leaf("close split", Action::WindowClose));
         tree.insert('w', window_node);
 
-        // SPC p - Preview (markdown, browser, soft-wrap, companion)
+        // SPC p - Preview (markdown, browser, soft-wrap)
         let mut preview_node = KeyNode::new("preview");
         preview_node
             .children
@@ -447,9 +357,6 @@ impl KeyHandler {
         preview_node
             .children
             .insert('w', KeyNode::leaf("toggle soft wrap", Action::SoftWrapToggle));
-        preview_node
-            .children
-            .insert('c', KeyNode::leaf("toggle companion window", Action::CompanionToggle));
         tree.insert('p', preview_node);
 
         // SPC d - Diagnostics
@@ -458,9 +365,6 @@ impl KeyHandler {
             .children
             .insert('d', KeyNode::leaf("diagnostics overlay", Action::DiagnosticsOpen));
         diag_node.children.insert('l', KeyNode::leaf("open log file", Action::DiagnosticsOpenLog));
-        diag_node
-            .children
-            .insert('i', KeyNode::leaf("insights dashboard", Action::InsightsDashboardOpen));
         tree.insert('d', diag_node);
 
         tree
@@ -835,14 +739,6 @@ mod tests {
             last = press(handler, KeyCode::Char(ch));
         }
         last
-    }
-
-    #[test]
-    fn spc_p_c_companion_toggle_still_works() {
-        // Regression: adding SPC i must not disturb the adjacent SPC p namespace.
-        let mut h = KeyHandler::new();
-        let action = leader_seq(&mut h, &['p', 'c']);
-        assert_eq!(action, Action::CompanionToggle);
     }
 
     #[test]

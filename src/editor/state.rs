@@ -133,44 +133,6 @@ pub struct LocationListState {
     pub selected: usize,
 }
 
-// ── Inline assistant (ADR 0111) ───────────────────────────────────────────────
-
-/// Lifecycle phase of the inline assist overlay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InlineAssistPhase {
-    /// User is typing their transformation directive.
-    Input,
-    /// LLM request is in-flight; tokens are accumulating.
-    Generating,
-    /// Response complete; waiting for user to accept or reject.
-    Preview,
-}
-
-/// All state owned by `Editor` while `Mode::InlineAssist` is active.
-/// Dropped when the user accepts or cancels.
-pub struct InlineAssistState {
-    /// Directive typed by the user during `Phase::Input`.
-    pub prompt: String,
-    /// Original selected text (empty when invoked without a selection).
-    pub original_text: String,
-    /// Buffer selection at the moment `InlineAssistStart` was fired.
-    /// Used to locate and replace the text on accept.
-    pub original_selection: Option<crate::buffer::Selection>,
-    /// Buffer index the assist is targeting.
-    pub target_buffer_idx: usize,
-    /// File language hint derived from the buffer's extension (e.g. "Rust", "Python").
-    /// Injected into the system prompt so the model knows what language to produce.
-    pub language: Option<String>,
-    /// LLM response accumulator.
-    pub response: String,
-    pub phase: InlineAssistPhase,
-    /// Populated when the LLM request is launched (Input → Generating).
-    pub stream_rx: Option<tokio::sync::mpsc::Receiver<crate::agent::StreamEvent>>,
-    /// Kept alive to abort on cancel; dropped (fires abort) when `inline_assist` is set to None.
-    #[allow(dead_code)]
-    pub abort_tx: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
 /// State for Mode::LspHover — a scrollable popup showing hover documentation.
 pub struct HoverPopupState {
     /// Hover text (plain text or Markdown).
@@ -444,30 +406,4 @@ pub(crate) struct SplitState {
     pub right_focused: bool,
     /// Per-viewport highlight cache for the inactive (background) pane.
     pub highlight_cache: Option<HighlightCache>,
-}
-
-/// State for the commit message generation popup (Mode::CommitMsg).
-#[derive(Default)]
-pub(crate) struct CommitMsgState {
-    /// Editable commit message buffer.
-    pub buffer: String,
-    /// Byte offset of the edit cursor within `buffer`.
-    pub cursor: usize,
-    /// In-flight AI generation task.
-    pub rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
-    /// `true` = generated from staged diff (`SPC g s`); `false` = last commit (`SPC g l`).
-    pub from_staged: bool,
-}
-
-/// State for the release notes generation popup (Mode::ReleaseNotes).
-#[derive(Default)]
-pub(crate) struct ReleaseNotesState {
-    /// Commit count input string (count-entry phase).
-    pub count_input: String,
-    /// In-flight AI generation task.
-    pub rx: Option<oneshot::Receiver<anyhow::Result<String>>>,
-    /// Completed release notes text (display phase).
-    pub buffer: String,
-    /// Scroll offset for the display popup.
-    pub scroll: u16,
 }

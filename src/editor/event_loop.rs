@@ -2,34 +2,25 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use tokio::sync::oneshot;
 
-use super::ai::strip_markdown_fence;
 use super::Editor;
 use crate::keymap::Mode;
-use crate::lsp::{parse_first_inline_completion, LspManager};
+use crate::lsp::LspManager;
 use crate::search::SearchStatus;
 
 impl Editor {
     /// Main event loop
     pub async fn run(&mut self) -> Result<()> {
-        const COMPLETION_DEBOUNCE_MS: u128 = 300;
-
         // Render on the very first frame regardless of activity.
         let mut needs_render = true;
         // Set to true whenever the terminal cell grid may be stale (resize, SIGCONT, Ctrl+L).
-        // A full terminal clear is issued before the next render to force a repaint.
         let mut force_clear = false;
 
         // ── SIGCONT: laptop-lid-open / process-resume repaint ─────────────────
-        // When the OS suspends and resumes a process it sends SIGCONT.  The
-        // terminal has already forgotten our screen contents, so we must clear
-        // and repaint everything.  Tokio's signal module is already available
-        // (tokio full feature); no extra dependency is needed.
         #[cfg(unix)]
         let (sigcont_tx, mut sigcont_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         #[cfg(unix)]
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
-            // SIGCONT = 18 on Linux and macOS.
             if let Ok(mut sig) = signal(SignalKind::from_raw(18)) {
                 loop {
                     sig.recv().await;
@@ -47,15 +38,14 @@ impl Editor {
                 needs_render = true;
             }
 
-            // Surface any human-readable LSP messages (e.g. Copilot auth instructions).
+            // Surface any human-readable LSP messages.
             // These are sticky so they persist until the user presses Esc.
             for msg in self.lsp.manager.drain_messages() {
                 self.set_sticky(msg);
                 needs_render = true;
             }
 
-            // Update diagnostics for current buffer — only when LSP sent something new
-            // to avoid cloning the full diagnostic Vec on every frame.
+            // Update diagnostics for current buffer — only when LSP sent something new.
             if lsp_changed {
                 if let Some(buf) = self.current_buffer() {
                     if let Some(path) = &buf.file_path {
@@ -65,61 +55,6 @@ impl Editor {
                     }
                 }
             }
-
-            // ── Copilot auth polling ───────────────────────────────────────────
-            let auth_done = if let Some(rx) = self.copilot_auth_rx.as_mut() {
-                match rx.try_recv() {
-                    Ok(val) => Some(val),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => Some(serde_json::Value::Null),
-                }
-            } else {
-                None
-            };
-            if let Some(val) = auth_done {
-                self.copilot_auth_rx = None;
-                needs_render = true;
-                let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                tracing::info!("Copilot auth response: {:?}", val);
-                match status {
-                    "OK" | "AlreadySignedIn" => {
-                        let user = val.get("user").and_then(|u| u.as_str()).unwrap_or("unknown");
-                        self.set_sticky(format!("Copilot: signed in as {}", user));
-                    },
-                    "NotSignedIn" => {
-                        // Auto-escalate: start the device auth flow
-                        if let Some(client) = self.lsp.manager.get_client("copilot") {
-                            match client.copilot_sign_in_initiate() {
-                                Ok(rx) => {
-                                    self.copilot_auth_rx = Some(rx);
-                                },
-                                Err(e) => {
-                                    self.set_sticky(format!("Copilot sign-in failed: {}", e));
-                                },
-                            }
-                        }
-                    },
-                    "PromptUserDeviceFlow" => {
-                        let uri =
-                            val.get("verificationUri").and_then(|u| u.as_str()).unwrap_or("?");
-                        let code = val.get("userCode").and_then(|c| c.as_str()).unwrap_or("?");
-                        self.set_sticky(format!(
-                            "Copilot auth: go to {}  and enter code: {}  (Esc to dismiss)",
-                            uri, code
-                        ));
-                    },
-                    _ => {
-                        self.set_sticky(format!("Copilot: {}", val));
-                    },
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── Inline assist stream polling (ADR 0111) ───────────────────────
-            if self.poll_inline_assist() {
-                needs_render = true;
-            }
-            // ──────────────────────────────────────────────────────────────────
 
             // ── Filesystem watcher: reload buffers changed externally ──────────
             // Prune self_saved entries older than 500 ms.
@@ -133,7 +68,6 @@ impl Editor {
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         for p in event.paths {
                             let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
-                            // Skip events caused by our own saves.
                             let self_saved = self.self_saved.keys().any(|saved| {
                                 saved.canonicalize().unwrap_or_else(|_| saved.clone()) == canonical
                             });
@@ -173,45 +107,6 @@ impl Editor {
                 }
                 if let Some(msg) = status_msg {
                     self.set_status(msg);
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── Inline completion debounce + poll ──────────────────────────────
-            // Fire a new request once the debounce delay has elapsed in Insert mode.
-            if self.pending_completion.is_none() && self.ghost_text.is_none() {
-                if let Some(instant) = self.last_edit_instant {
-                    if instant.elapsed().as_millis() >= COMPLETION_DEBOUNCE_MS
-                        && self.mode == Mode::Insert
-                    {
-                        self.last_edit_instant = None; // consume
-                        self.request_inline_completion();
-                    }
-                }
-            }
-
-            // Poll for a response from an in-flight request.
-            let completed = if let Some(rx) = self.pending_completion.as_mut() {
-                match rx.try_recv() {
-                    Ok(value) => Some(value),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => {
-                        // channel closed without a response
-                        Some(serde_json::Value::Null)
-                    },
-                }
-            } else {
-                None
-            };
-            if let Some(value) = completed {
-                self.pending_completion = None;
-                needs_render = true;
-                if let Some(text) = parse_first_inline_completion(value) {
-                    if let Some(buf) = self.current_buffer() {
-                        let row = buf.cursor.row;
-                        let col = buf.cursor.col;
-                        self.ghost_text = Some((text, row, col));
-                    }
                 }
             }
             // ──────────────────────────────────────────────────────────────────
@@ -290,77 +185,9 @@ impl Editor {
             }
             // ──────────────────────────────────────────────────────────────────
 
-            // ── Commit-message AI response poll ───────────────────────────────
-            let commit_done = if let Some(rx) = self.commit_msg.rx.as_mut() {
-                match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => Some(Err(anyhow::anyhow!("commit msg channel closed"))),
-                }
-            } else {
-                None
-            };
-            if let Some(result) = commit_done {
-                self.commit_msg.rx = None;
-                needs_render = true;
-                match result {
-                    Ok(msg) => {
-                        self.commit_msg.cursor = msg.len();
-                        self.commit_msg.buffer = msg;
-                        self.set_status(
-                            "Commit message ready — edit then Enter to commit, Esc to discard"
-                                .to_string(),
-                        );
-                    },
-                    Err(e) => {
-                        self.mode = Mode::Normal;
-                        self.set_status(format!("Failed to generate commit message: {e}"));
-                    },
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // ── Release-notes AI response poll ────────────────────────────────
-            let release_notes_done = if let Some(rx) = self.release_notes.rx.as_mut() {
-                match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(_) => Some(Err(anyhow::anyhow!("release notes channel closed"))),
-                }
-            } else {
-                None
-            };
-            if let Some(result) = release_notes_done {
-                self.release_notes.rx = None;
-                needs_render = true;
-                match result {
-                    Ok(notes) => {
-                        self.release_notes.buffer = strip_markdown_fence(&notes);
-                        self.set_status(
-                            "Release notes ready — y=copy to clipboard, j/k=scroll, Esc=close"
-                                .to_string(),
-                        );
-                    },
-                    Err(e) => {
-                        self.mode = Mode::Normal;
-                        self.set_status(format!("Failed to generate release notes: {e}"));
-                    },
-                }
-            }
-            // ──────────────────────────────────────────────────────────────────
-
-            // (insights, debt, MCP, sidecar removed in slim build)
-
             // Force a render whenever background work is in-flight OR the
-            // which-key timer is pending (so the popup appears after 500 ms
-            // even when no key event arrives to trigger a normal render).
-            if self.copilot_auth_rx.is_some()
-                || self.pending_completion.is_some()
-                || self.key_handler.which_key_pending()
-                || self.search_rx.is_some()
-                || self.commit_msg.rx.is_some()
-                || self.release_notes.rx.is_some()
-            {
+            // which-key timer is pending.
+            if self.key_handler.which_key_pending() || self.search_rx.is_some() {
                 needs_render = true;
             }
 
@@ -385,8 +212,6 @@ impl Editor {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) => {
-                        // Ctrl+L: force a full redraw (universal terminal convention).
-                        // Intercepted before handle_key so it works in every mode.
                         if key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL
                         {
                             force_clear = true;
@@ -395,15 +220,10 @@ impl Editor {
                         }
                         needs_render = true;
                     },
-                    // Bracketed paste: the terminal wraps pasted text in escape sequences
-                    // so it arrives as a single Event::Paste(String) instead of a stream
-                    // of KeyCode::Char / KeyCode::Enter events.
                     Event::Paste(text) => {
                         self.handle_paste(text)?;
                         needs_render = true;
                     },
-                    // Terminal resize: the cell grid has been invalidated — clear and
-                    // repaint so ratatui lays out to the new dimensions correctly.
                     Event::Resize(_, _) => {
                         force_clear = true;
                         needs_render = true;

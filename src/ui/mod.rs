@@ -9,7 +9,7 @@ use ratatui::{
 use std::path::PathBuf;
 
 use crate::buffer::{Cursor, Selection};
-use crate::editor::{HoverPopupState, InlineAssistPhase, LocationListState};
+use crate::editor::{HoverPopupState, LocationListState};
 use crate::explorer::FileExplorer;
 use crate::keymap::Mode;
 use crate::search::{SearchFocus, SearchState, SearchStatus};
@@ -32,18 +32,6 @@ fn wrapped_line_count(lines: &[Line<'static>], inner_width: usize) -> usize {
         return lines.len();
     }
     Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false }).line_count(inner_width as u16)
-}
-
-/// Data for the release notes popup (Mode::ReleaseNotes).
-pub struct ReleaseNotesView<'a> {
-    /// User's count input (phase 1: count-entry).
-    pub count_input: &'a str,
-    /// True while the AI request is in flight (phase 2: generating).
-    pub generating: bool,
-    /// Completed release notes text (phase 3: displaying).
-    pub notes: &'a str,
-    /// Vertical scroll offset for the notes display.
-    pub scroll: u16,
 }
 
 /// Data for the diagnostics overlay (Mode::Diagnostics).
@@ -72,13 +60,6 @@ pub struct FileInfoData {
     pub created: Option<std::time::SystemTime>,
     /// Unix permission string e.g. "rwxr-xr-x". None on non-Unix platforms.
     pub permissions: Option<String>,
-}
-
-/// View data for the inline assist overlay (Mode::InlineAssist, ADR 0111).
-pub struct InlineAssistView<'a> {
-    pub prompt: &'a str,
-    pub response: &'a str,
-    pub phase: InlineAssistPhase,
 }
 
 // Buffer data tuple: (name, is_modified, cursor, scroll_row, scroll_col, lines, selection)
@@ -117,8 +98,6 @@ pub struct RenderContext<'a> {
     pub file_list: Option<&'a FileList>,
     /// LSP diagnostics for the current buffer.
     pub diagnostics: &'a [Diagnostic],
-    /// Ghost-text inline suggestion: (text, buffer_row, buffer_col).
-    pub ghost_text: Option<(&'a str, usize, usize)>,
     /// Pre-computed syntax-highlighted spans for the visible viewport.
     pub highlighted_lines: Option<&'a [Vec<Span<'static>>]>,
     /// File explorer panel; `None` = hidden.
@@ -139,12 +118,6 @@ pub struct RenderContext<'a> {
     pub split_highlighted_lines: Option<&'a [Vec<Span<'static>>]>,
     /// `true` when the right pane is the focused pane.
     pub split_right_focused: bool,
-    /// Editable commit message buffer (Mode::CommitMsg only).
-    pub commit_msg: Option<&'a str>,
-    /// Byte-offset cursor position within `commit_msg` (Mode::CommitMsg only).
-    pub commit_msg_cursor: usize,
-    /// Release notes popup data (Mode::ReleaseNotes only).
-    pub release_notes: Option<&'a ReleaseNotesView<'a>>,
     /// Diagnostics overlay data (Mode::Diagnostics only).
     pub diag_overlay: Option<&'a DiagnosticsData<'a>>,
     /// Path of the binary file that triggered Mode::BinaryFile; `None` otherwise.
@@ -167,8 +140,6 @@ pub struct RenderContext<'a> {
     /// Sticky scroll context header text (ADR 0107).
     /// First line of the innermost enclosing scope that started above `scroll_row`.
     pub sticky_header: Option<&'a str>,
-    /// Inline assist overlay data (Mode::InlineAssist, ADR 0111).
-    pub inline_assist: Option<InlineAssistView<'a>>,
     /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
     pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
     /// When `true`, long lines are visually wrapped at the viewport edge.
@@ -194,7 +165,6 @@ impl UI {
         let buffer_list = ctx.buffer_list;
         let file_list = ctx.file_list;
         let diagnostics = ctx.diagnostics;
-        let ghost_text = ctx.ghost_text;
         let highlighted_lines = ctx.highlighted_lines;
         let file_explorer = ctx.file_explorer;
         let preview_lines = ctx.preview_lines;
@@ -205,9 +175,6 @@ impl UI {
         let split_buffer_data = ctx.split_buffer_data;
         let split_highlighted_lines = ctx.split_highlighted_lines;
         let split_right_focused = ctx.split_right_focused;
-        let commit_msg = ctx.commit_msg;
-        let commit_msg_cursor = ctx.commit_msg_cursor;
-        let release_notes = ctx.release_notes;
         let diag_overlay = ctx.diag_overlay;
         let binary_file_path = ctx.binary_file_path;
         let startup_elapsed = ctx.startup_elapsed;
@@ -345,8 +312,6 @@ impl UI {
             } else {
                 (highlighted_lines, split_highlighted_lines)
             };
-            let (left_ghost, right_ghost) =
-                if split_right_focused { (None, ghost_text) } else { (ghost_text, None) };
             let left_preview = if split_right_focused { None } else { preview_lines };
 
             Self::render_buffer(
@@ -355,7 +320,7 @@ impl UI {
                 mode,
                 split_chunks[0],
                 diagnostics,
-                left_ghost,
+                None,
                 left_hl,
                 left_preview,
                 !split_right_focused,
@@ -379,7 +344,7 @@ impl UI {
                 mode,
                 split_chunks[2],
                 diagnostics,
-                right_ghost,
+                None,
                 right_hl,
                 None,
                 split_right_focused,
@@ -397,7 +362,7 @@ impl UI {
                 mode,
                 main_area,
                 diagnostics,
-                ghost_text,
+                None,
                 highlighted_lines,
                 preview_lines,
                 true,
@@ -453,16 +418,6 @@ impl UI {
             Self::render_new_folder_popup(frame, name, size);
         }
 
-        // Render commit message popup if active
-        if let Some(msg) = commit_msg {
-            Self::render_commit_msg_popup(frame, msg, commit_msg_cursor, size);
-        }
-
-        // Render release notes popup if active
-        if let Some(view) = release_notes {
-            Self::render_release_notes_popup(frame, view, size);
-        }
-
         // Render diagnostics overlay if active
         if let Some(diag) = diag_overlay {
             Self::render_diagnostics_overlay(frame, diag, size);
@@ -487,11 +442,6 @@ impl UI {
         if let Some(info) = file_info {
             let explorer_right_edge = if explorer_visible { 25u16 } else { 0 };
             Self::render_file_info_popup(frame, info, size, explorer_right_edge);
-        }
-
-        // Render inline assist overlay (Mode::InlineAssist, ADR 0111)
-        if let Some(view) = &ctx.inline_assist {
-            Self::render_inline_assist_overlay(frame, view, size);
         }
 
         // Render review changes overlay (Mode::ReviewChanges, ADR 0113)

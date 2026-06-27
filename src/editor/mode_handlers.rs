@@ -729,12 +729,4 @@ impl Editor {
         // (pending_reloads removed in slim build)
         Ok(())
     }
-
-    // ── Insights dashboard mode key handling (ADR 0129 Phase 3) ──────────────
-
-    pub(super) fn handle_insights_dashboard_mode(&mut self, _key: KeyEvent) -> Result<()> {
-        // Insights dashboard removed in slim build.
-        self.mode = crate::keymap::Mode::Normal;
-        Ok(())
-    }
 }

@@ -1,10 +1,7 @@
 mod actions;
-mod ai;
 mod event_loop;
 mod file_ops;
 mod folding;
-mod hooks;
-mod inline_assist;
 mod input;
 mod lsp;
 mod mode_handlers;
@@ -15,12 +12,11 @@ mod state;
 mod surround;
 mod text_objects;
 pub(crate) use state::{
-    apply_hunk_verdicts, ClipboardType, CommitMsgState, FoldCache, HighlightCache, LspState,
-    MarkdownCache, ReleaseNotesState, SplitState, StickyScrollCache,
+    apply_hunk_verdicts, ClipboardType, FoldCache, HighlightCache, LspState, MarkdownCache,
+    SplitState, StickyScrollCache,
 };
 pub use state::{
-    DiffLine, HoverPopupState, InlineAssistPhase, InlineAssistState, LocationEntry,
-    LocationListState, ReviewChangesState, Verdict,
+    DiffLine, HoverPopupState, LocationEntry, LocationListState, ReviewChangesState, Verdict,
 };
 
 use anyhow::Result;
@@ -32,10 +28,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
 use tokio::sync::oneshot;
 
-use crate::agent::{CopilotApiToken, ProviderConfig, ProviderKind};
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::explorer::FileExplorer;
@@ -71,6 +65,10 @@ pub struct Editor {
     /// Status message to display (for feedback)
     status_message: Option<String>,
 
+    /// When true the status message persists across keypresses until explicitly
+    /// cleared (used for auth URLs which the user needs to read).
+    status_sticky: bool,
+
     /// Currently selected buffer in PickBuffer mode
     buffer_picker_idx: usize,
 
@@ -93,37 +91,6 @@ pub struct Editor {
     /// All LSP state — manager, diagnostics, in-flight RPCs, overlays (ADR 0144).
     lsp: LspState,
 
-    // ── Inline completion / ghost text ────────────────────────────────────────
-    /// Current ghost text suggestion and the buffer position it belongs to.
-    /// Format: (text, row, col)
-    ghost_text: Option<(String, usize, usize)>,
-
-    /// In-flight inline completion request; polled non-blocking each frame.
-    pending_completion: Option<oneshot::Receiver<serde_json::Value>>,
-
-    /// Timestamp of the last buffer edit, used to debounce completion requests.
-    last_edit_instant: Option<Instant>,
-
-    // ── Copilot auth ──────────────────────────────────────────────────────────
-    /// In-flight Copilot auth request (checkStatus or signInInitiate).
-    copilot_auth_rx: Option<oneshot::Receiver<serde_json::Value>>,
-
-    /// When true the status message persists across keypresses until explicitly
-    /// cleared (used for Copilot device-auth URLs which the user needs to read).
-    status_sticky: bool,
-
-    // ── AI provider ───────────────────────────────────────────────────────────
-    /// Active provider kind (Copilot or Ollama).
-    provider: ProviderKind,
-    /// Static per-provider configuration (API keys, endpoints, capabilities).
-    provider_config: ProviderConfig,
-    /// Copilot business API base URL (updated after each token refresh).
-    copilot_api_base: String,
-    /// Short-lived Copilot API token; refreshed automatically when expired.
-    copilot_token: Option<CopilotApiToken>,
-    /// Model ID to use for AI requests (e.g. "claude-sonnet-4" or an Ollama tag).
-    selected_model: String,
-
     // ── Clipboard (yank register) ─────────────────────────────────────────────
     /// Last yanked / deleted text + whether it is linewise or charwise.
     clipboard: Option<(String, ClipboardType)>,
@@ -143,10 +110,6 @@ pub struct Editor {
     // ── Surround operations (ADR 0110) ────────────────────────────────────────
     /// The `from` char stored between `cs{from}` and `{to}` keypresses.
     surround_change_from: Option<char>,
-
-    // ── Inline assistant (ADR 0111) ───────────────────────────────────────────
-    /// Active only while `mode == Mode::InlineAssist`.
-    inline_assist: Option<InlineAssistState>,
 
     // ── Multi-file review / change set view (ADR 0113) ───────────────────────
     /// Active only while `mode == Mode::ReviewChanges`.
@@ -188,7 +151,7 @@ pub struct Editor {
     /// In-flight ripgrep task receiver; `Some` while a search is running.
     search_rx: Option<oneshot::Receiver<anyhow::Result<Vec<crate::search::SearchResult>>>>,
     /// Timestamp of the last query/glob change — drives the 300 ms debounce.
-    last_search_instant: Option<Instant>,
+    last_search_instant: Option<std::time::Instant>,
 
     // ── In-file search ────────────────────────────────────────────────────────
     /// Text typed so far while in Mode::InFileSearch (the `/` prompt).
@@ -222,12 +185,6 @@ pub struct Editor {
     // ── Vertical split ────────────────────────────────────────────────────────
     split: SplitState,
 
-    // ── Commit message generation (Mode::CommitMsg) ───────────────────────────
-    commit_msg: CommitMsgState,
-
-    // ── Release notes generation (Mode::ReleaseNotes) ─────────────────────────
-    release_notes: ReleaseNotesState,
-
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Watches paths of all open buffers; detects external changes.
     file_watcher: Option<RecommendedWatcher>,
@@ -244,12 +201,12 @@ pub struct Editor {
     pub log_buffer: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(String, String)>>>,
 
     // ── Startup timing ────────────────────────────────────────────────────────
-    /// Time from process start to the editor being fully ready (LSP + MCP set up).
+    /// Time from process start to the editor being fully ready (LSP set up).
     /// Set by main() after setup completes; displayed on the welcome screen.
     pub startup_elapsed: Option<std::time::Duration>,
 
     // ── Configuration ─────────────────────────────────────────────────────────
-    /// Editor configuration (LSP servers, tab width, Copilot defaults, etc.)
+    /// Editor configuration (LSP servers, tab width, etc.)
     config: Config,
 }
 
@@ -272,6 +229,7 @@ impl Editor {
             terminal,
             should_quit: false,
             status_message: None,
+            status_sticky: false,
             buffer_picker_idx: 0,
             file_picker_idx: 0,
             file_all: Vec::new(),
@@ -279,34 +237,11 @@ impl Editor {
             file_list: Vec::new(),
             recent_files: Self::load_recents(),
             lsp: LspState::default(),
-            ghost_text: None,
-            pending_completion: None,
-            last_edit_instant: None,
-            copilot_auth_rx: None,
-            status_sticky: false,
-            provider: ProviderKind::from_str(&config.provider.active),
-            provider_config: ProviderConfig {
-                api_key: String::new(), // Copilot uses OAuth; Ollama needs no key
-                ollama_base_url: config.provider.ollama.base_url.clone(),
-                ollama_context_length: config.provider.ollama.context_length,
-                ollama_tool_calls: config.provider.ollama.tool_calls,
-                ollama_planning_tools: config.provider.ollama.planning_tools,
-            },
-            copilot_api_base: "https://api.githubcopilot.com".to_string(),
-            copilot_token: None,
-            selected_model: {
-                let kind = ProviderKind::from_str(&config.provider.active);
-                match kind {
-                    ProviderKind::Ollama => config.provider.ollama.default_model.clone(),
-                    _ => config.provider.copilot.default_model.clone(),
-                }
-            },
             clipboard: None::<(String, ClipboardType)>,
             highlighter: Highlighter::new(),
             highlight_cache: None,
             visual_text_obj_prefix: None,
             surround_change_from: None,
-            inline_assist: None,
             review_changes: None,
             ts_engine: crate::treesitter::TsEngine::new(),
             ts_cache: std::collections::HashMap::new(),
@@ -331,11 +266,6 @@ impl Editor {
             new_folder_parent: None,
             show_file_info: false,
             split: SplitState::default(),
-            commit_msg: CommitMsgState { from_staged: true, ..Default::default() },
-            release_notes: ReleaseNotesState {
-                count_input: String::from("10"),
-                ..Default::default()
-            },
             file_watcher: None,
             watcher_rx: None,
             self_saved: std::collections::HashMap::new(),
@@ -361,7 +291,7 @@ impl Editor {
         Ok(editor)
     }
 
-    /// Render a loading frame while async setup (LSP / MCP) is in progress.
+    /// Render a loading frame while async setup (LSP) is in progress.
     /// The terminal is already in alternate-screen mode at this point.
     pub fn render_loading(&mut self, msg: &str) -> Result<()> {
         use ratatui::{
@@ -536,14 +466,6 @@ impl Editor {
                 },
                 Ok(client) => {
                     self.lsp.manager.insert_client(language.clone(), client);
-                    if language == "copilot" {
-                        if let Some(c) = self.lsp.manager.get_client("copilot") {
-                            match c.copilot_check_status() {
-                                Ok(rx) => self.copilot_auth_rx = Some(rx),
-                                Err(e) => tracing::warn!("copilot checkStatus failed: {e}"),
-                            }
-                        }
-                    }
                 },
             }
         }
@@ -579,10 +501,6 @@ impl Editor {
 
     /// Return the Tree-sitter parse snapshot for the current buffer, parsing or
     /// re-parsing lazily if the cached version is stale.
-    ///
-    /// Returns `None` when no buffer is open, the file has an unknown extension,
-    /// or Tree-sitter parsing fails (grammar ABI mismatch). All callers must
-    /// handle `None` — Tree-sitter features degrade gracefully for unsupported files.
     pub(crate) fn ts_tree_for_current_buffer(&mut self) -> Option<&crate::treesitter::TsSnapshot> {
         let idx = self.current_buffer_idx;
         let buf = self.buffers.get(idx)?;
@@ -603,17 +521,12 @@ impl Editor {
         self.ts_cache.get(&idx)
     }
 
-    /// Apply a mutating closure to the current buffer, returning `Some(T)` on
-    /// success or `None` when no buffer is open. Prefer this over the raw
-    /// `if let Some(buf) = self.current_buffer_mut()` pattern so that future
-    /// additions stay uniform and the nesting depth stays flat.
+    /// Apply a mutating closure to the current buffer.
     #[inline]
     fn with_buffer<T, F: FnOnce(&mut Buffer) -> T>(&mut self, f: F) -> Option<T> {
         self.current_buffer_mut().map(f)
     }
 
-    /// Cycle focus left-to-right through visible panels: Explorer → Editor → Agent → (wrap).
-    /// Panels that are not currently visible  Visual mode
     fn check_quit(&mut self) -> Result<()> {
         for buf in &self.buffers {
             if buf.is_modified {
@@ -635,14 +548,12 @@ impl Editor {
     }
 
     /// Set a sticky status message that persists until the user presses Esc.
-    /// Use for important notifications the user must read (e.g. Copilot auth URL).
     fn set_sticky(&mut self, msg: String) {
         self.status_sticky = true;
         self.status_message = Some(msg);
     }
 
     /// Write `text` to the OS system clipboard.
-    /// Errors are silently swallowed — the internal register is always primary.
     fn sync_system_clipboard(&self, text: &str) {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {

@@ -62,7 +62,7 @@ impl Editor {
             self.status_message = None;
         }
 
-        // Global: Ctrl+W cycles visible panels (Explorer → Editor → Agent → wrap).
+        // Global: Ctrl+W cycles visible panels (Explorer → Editor → wrap).
         // Skip in modes that capture text input or show modal overlays.
         if key.code == KeyCode::Char('w')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -75,10 +75,8 @@ impl Editor {
                     | Mode::RenameFile
                     | Mode::DeleteFile
                     | Mode::NewFolder
-                    | Mode::CommitMsg
                     | Mode::Diagnostics
                     | Mode::LspRename
-                    | Mode::InlineAssist
             )
         {
             self.cycle_panel_focus();
@@ -93,7 +91,6 @@ impl Editor {
             Mode::VisualLine => self.handle_visual_line_mode(key)?,
             Mode::PickBuffer => self.handle_pick_buffer_mode(key)?,
             Mode::PickFile => self.handle_pick_file_mode(key)?,
-            Mode::Agent => self.handle_agent_mode(key)?,
             Mode::Explorer => self.handle_explorer_mode(key)?,
             Mode::MarkdownPreview => self.handle_preview_mode(key)?,
             Mode::Search => self.handle_search_mode(key)?,
@@ -101,8 +98,6 @@ impl Editor {
             Mode::RenameFile => self.handle_rename_mode(key)?,
             Mode::DeleteFile => self.handle_delete_mode(key)?,
             Mode::NewFolder => self.handle_new_folder_mode(key)?,
-            Mode::CommitMsg => self.handle_commit_msg_mode(key)?,
-            Mode::ReleaseNotes => self.handle_release_notes_mode(key)?,
             Mode::Diagnostics => {
                 // Any key closes the overlay.
                 self.mode = Mode::Normal;
@@ -111,9 +106,7 @@ impl Editor {
             Mode::LocationList => self.handle_location_list_mode(key)?,
             Mode::LspHover => self.handle_lsp_hover_mode(key)?,
             Mode::LspRename => self.handle_lsp_rename_mode(key)?,
-            Mode::InlineAssist => self.handle_inline_assist_mode(key)?,
             Mode::ReviewChanges => self.handle_review_changes_mode(key)?,
-            Mode::InsightsDashboard => self.handle_insights_dashboard_mode(key)?,
         }
 
         Ok(())
@@ -398,16 +391,6 @@ impl Editor {
         Ok(())
     }
 
-    /// Handle keys in PickBuffer mode
-    /// Handle keys while the agent panel is focused (agent panel removed in slim build).
-    pub(super) fn handle_agent_mode(&mut self, key: KeyEvent) -> Result<()> {
-        // Agent panel removed — Esc returns to Normal, everything else is a noop.
-        if key.code == KeyCode::Esc {
-            self.mode = Mode::Normal;
-        }
-        Ok(())
-    }
-
     // ── Paste handling ─────────────────────────────────────────────────────────
 
     /// Handle a bracketed-paste event.
@@ -429,32 +412,8 @@ impl Editor {
     /// Handle keys in Insert mode
     pub(super) fn handle_insert_mode(&mut self, key: KeyEvent) -> Result<()> {
         let should_notify_lsp = match key.code {
-            // Tab: accept ghost text suggestion if one is displayed at the cursor.
+            // Tab: insert indent (spaces or tab based on config).
             KeyCode::Tab => {
-                if let Some((text, row, col)) = self.ghost_text.take() {
-                    let cursor_matches = self
-                        .current_buffer()
-                        .map(|b| b.cursor.row == row && b.cursor.col == col)
-                        .unwrap_or(false);
-                    if cursor_matches {
-                        for ch in text.chars() {
-                            if ch == '\n' {
-                                if let Some(buf) = self.current_buffer_mut() {
-                                    buf.insert_newline();
-                                }
-                            } else if let Some(buf) = self.current_buffer_mut() {
-                                buf.insert_char(ch);
-                            }
-                        }
-                        self.pending_completion = None;
-                        // Notify LSP of the accepted text.
-                        self.notify_lsp_change();
-                        // Immediately clear the debounce so we don't re-request right away.
-                        self.last_edit_instant = None;
-                        return Ok(());
-                    }
-                }
-                // No ghost text — insert indent (spaces or tab based on config).
                 let use_spaces = self.config.use_spaces;
                 let tab_width = self.config.tab_width;
                 self.with_buffer(|buf| {
@@ -476,10 +435,6 @@ impl Editor {
                 true
             },
             KeyCode::Esc => {
-                // Clear ghost text when leaving Insert mode.
-                self.ghost_text = None;
-                self.pending_completion = None;
-                self.last_edit_instant = None;
                 self.mode = Mode::Normal;
                 false
             },
@@ -500,22 +455,18 @@ impl Editor {
                 true
             },
             KeyCode::Left => {
-                self.ghost_text = None;
                 self.with_buffer(|buf| buf.move_cursor_left());
                 false
             },
             KeyCode::Right => {
-                self.ghost_text = None;
                 self.with_buffer(|buf| buf.move_cursor_right());
                 false
             },
             KeyCode::Up => {
-                self.ghost_text = None;
                 self.with_buffer(|buf| buf.move_cursor_up());
                 false
             },
             KeyCode::Down => {
-                self.ghost_text = None;
                 self.with_buffer(|buf| buf.move_cursor_down());
                 false
             },
@@ -662,39 +613,6 @@ impl Editor {
                     self.set_status(format!("Closed buffer: {name} (discarded changes)"));
                 }
             },
-            "copilot status" => {
-                let completion_state = if self.ghost_text.is_some() {
-                    "suggestion ready (Tab to accept)"
-                } else if self.pending_completion.is_some() {
-                    "fetching suggestion..."
-                } else {
-                    "idle (type in Insert mode to trigger)"
-                };
-                let has_server = self.lsp.manager.get_client("copilot").is_some();
-                self.set_status(format!(
-                    "Copilot: server={} | {}",
-                    if has_server { "running" } else { "not connected" },
-                    completion_state
-                ));
-            },
-            "copilot auth" => {
-                // Re-run the auth check + sign-in initiate flow manually.
-                if let Some(client) = self.lsp.manager.get_client("copilot") {
-                    match client.copilot_check_status() {
-                        Ok(rx) => {
-                            self.copilot_auth_rx = Some(rx);
-                            self.set_status("Copilot: checking auth status…".to_string());
-                        },
-                        Err(e) => {
-                            self.set_status(format!("Copilot auth error: {}", e));
-                        },
-                    }
-                } else {
-                    self.set_status(
-                        "Copilot: server not connected (check config.toml)".to_string(),
-                    );
-                }
-            },
             // :e <path> / :edit <path> — open or create a file
             _ if cmd.starts_with("e ") || cmd.starts_with("edit ") => {
                 let path_str = cmd.split_once(' ').map(|(_, rest)| rest).unwrap_or("").trim();
@@ -751,10 +669,6 @@ impl Editor {
                         }
                     }
                 }
-            },
-            // :insights — removed in slim build
-            "insights" | "insights summarize" => {
-                self.set_status("Insights removed in slim build".to_string());
             },
             // :12 — jump to line 12 (1-based), same as vim
             _ if cmd.chars().all(|c| c.is_ascii_digit()) => {

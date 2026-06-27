@@ -500,44 +500,34 @@ impl LspClient {
     fn handle_notification(&mut self, notif: lsp_server::Notification) {
         match notif.method.as_str() {
             "textDocument/publishDiagnostics" => {
-                if let Ok(params) =
-                    serde_json::from_value::<PublishDiagnosticsParams>(notif.params)
+                if let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(notif.params)
                 {
-                    info!(
-                        "Diagnostics for {:?}: {} items",
-                        params.uri,
-                        params.diagnostics.len()
-                    );
+                    info!("Diagnostics for {:?}: {} items", params.uri, params.diagnostics.len());
                     let _ = self.notification_tx.send(LspNotificationMsg::Diagnostics {
                         uri: params.uri,
                         diagnostics: params.diagnostics,
                     });
                 }
-            }
+            },
             // Auth / info messages — surface to the user via status line.
             "window/showMessage" | "window/showMessageRequest" => {
-                if let Some(msg) = notif.params
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(msg) = notif.params.get("message").and_then(|v| v.as_str()) {
                     info!("LSP window/showMessage: {}", msg);
-                    let _ = self.notification_tx.send(LspNotificationMsg::ShowMessage {
-                        message: msg.to_string(),
-                    });
+                    let _ = self
+                        .notification_tx
+                        .send(LspNotificationMsg::ShowMessage { message: msg.to_string() });
                 }
-            }
+            },
             // High-frequency server chatter — log at trace so normal debug runs stay clean.
             "$/progress"
             | "window/logMessage"
             | "window/workDoneProgress/create"
-            | "telemetry/event"
-            | "$/copilot/openURL"       // Copilot browser-open requests
-            | "$/copilot/didChangeStatus" => {
+            | "telemetry/event" => {
                 debug!("LSP [{}]", notif.method);
-            }
+            },
             _ => {
                 debug!("Unhandled LSP notification: {}", notif.method);
-            }
+            },
         }
     }
 
@@ -660,86 +650,6 @@ impl LspClient {
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         })
-    }
-
-    // -------------------------------------------------------------------------
-    // Copilot custom auth methods (non-standard JSON-RPC)
-    // -------------------------------------------------------------------------
-
-    /// Send a raw JSON-RPC request with an arbitrary method name.
-    /// Used for Copilot's custom `checkStatus` / `signInInitiate` protocol.
-    fn copilot_request(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<oneshot::Receiver<serde_json::Value>> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        let request_id = RequestId::from(id);
-
-        let request = Request::new(request_id.clone(), method.to_string(), params);
-
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.insert(request_id, tx);
-
-        self.writer_tx
-            .send(Message::Request(request))
-            .map_err(|_| anyhow::anyhow!("LSP writer channel closed"))?;
-
-        debug!("Sent copilot request '{}' (id={})", method, id);
-        Ok(rx)
-    }
-
-    /// Ask the Copilot server whether the user is signed in.
-    /// Response JSON: `{"status": "OK", "user": "…"}` or `{"status": "NotSignedIn"}`
-    pub fn copilot_check_status(&mut self) -> Result<oneshot::Receiver<serde_json::Value>> {
-        self.copilot_request("checkStatus", serde_json::json!({ "options": {} }))
-    }
-
-    /// Start the GitHub device auth flow.
-    /// Response JSON: `{"status": "PromptUserDeviceFlow", "verificationUri": "…", "userCode": "XXXX-XXXX"}`
-    /// or `{"status": "AlreadySignedIn", "user": "…"}` if already authenticated.
-    pub fn copilot_sign_in_initiate(&mut self) -> Result<oneshot::Receiver<serde_json::Value>> {
-        self.copilot_request("signInInitiate", serde_json::json!({ "options": {} }))
-    }
-
-    // -------------------------------------------------------------------------
-    // Inline completion (LSP 3.18 / Copilot)
-    // -------------------------------------------------------------------------
-
-    /// Request inline completions at the given position.
-    ///
-    /// Uses raw JSON to avoid dependency on lsp-types 3.18 types.
-    /// The response is a raw `serde_json::Value` — use
-    /// `parse_first_inline_completion()` to extract the first suggestion.
-    pub fn inline_completion(
-        &mut self,
-        uri: &Uri,
-        line: u32,
-        character: u32,
-    ) -> Result<oneshot::Receiver<serde_json::Value>> {
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri.to_string() },
-            "position": { "line": line, "character": character },
-            "context": { "triggerKind": 2 }   // Automatic = 2
-        });
-
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        let request_id = RequestId::from(id);
-
-        let request =
-            Request::new(request_id.clone(), "textDocument/inlineCompletion".to_string(), params);
-
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.insert(request_id, tx);
-
-        self.writer_tx
-            .send(Message::Request(request))
-            .map_err(|_| anyhow::anyhow!("LSP writer channel closed"))?;
-
-        debug!("Sent inlineCompletion request (id={})", id);
-        Ok(rx)
     }
 
     // -------------------------------------------------------------------------
@@ -946,9 +856,8 @@ impl Default for LspManager {
 /// prevents slow timeout-based failures (e.g. `rust-analyzer` on a TypeScript
 /// project) from blocking editor startup.
 ///
-/// * `copilot` is always included — it is a cross-language completion engine.
-/// * Languages not in the known list are always included (opt-out rather than
-///   opt-in, so a user-configured server is never silently dropped).
+/// Languages not in the known list are always included (opt-out rather than
+/// opt-in, so a user-configured server is never silently dropped).
 pub fn filter_servers_for_workspace(
     servers: &[crate::config::LspServerConfig],
     workspace_root: &std::path::Path,
@@ -960,11 +869,6 @@ fn server_relevant_for_workspace(
     server: &crate::config::LspServerConfig,
     workspace_root: &std::path::Path,
 ) -> bool {
-    // Copilot is a cross-language completion engine — always start it.
-    if server.language == "copilot" {
-        return true;
-    }
-
     // For well-known languages, require an indicator file in the workspace root.
     let indicators: &[&str] = match server.language.as_str() {
         "rust" => &["Cargo.toml"],
@@ -1047,36 +951,9 @@ pub async fn init_servers_parallel(
             let result = async {
                 let mut client = LspClient::spawn(&command, &args_ref, root, tx, &env)?;
 
-                // Build built-in defaults for servers that need special initialization.
-                let builtin: Option<serde_json::Value> = if language == "copilot" {
-                    Some(serde_json::json!({
-                        "editorInfo":       { "name": "forgiven", "version": "0.1.0" },
-                        "editorPluginInfo": { "name": "forgiven-copilot", "version": "0.1.0" }
-                    }))
-                } else {
-                    None
-                };
-
-                // Merge user-supplied initialization_options over the built-in defaults.
-                // User values take precedence at the top level; nested merging is not
-                // performed (a user key fully replaces the corresponding built-in key).
-                let init_options = match (builtin, user_init_options) {
-                    (Some(mut base), Some(overrides)) => {
-                        if let Ok(overrides_json) = serde_json::to_value(&overrides) {
-                            if let (Some(base_obj), Some(override_obj)) =
-                                (base.as_object_mut(), overrides_json.as_object())
-                            {
-                                for (k, v) in override_obj {
-                                    base_obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-                        Some(base)
-                    },
-                    (Some(base), None) => Some(base),
-                    (None, Some(overrides)) => serde_json::to_value(&overrides).ok(),
-                    (None, None) => None,
-                };
+                // Merge user-supplied initialization_options into the request.
+                let init_options =
+                    user_init_options.as_ref().and_then(|o| serde_json::to_value(o).ok());
 
                 client.initialize(init_options).await?;
                 Ok::<LspClient, anyhow::Error>(client)
@@ -1100,25 +977,6 @@ pub async fn init_servers_parallel(
 }
 
 // =============================================================================
-
-/// Extract the first suggestion text from a raw `textDocument/inlineCompletion` response.
-///
-/// The spec allows either `InlineCompletionList { items: [...] }` or a bare array `[...]`.
-/// Each item has an `insertText` field (string or `{ value: string }`).
-pub fn parse_first_inline_completion(value: serde_json::Value) -> Option<String> {
-    let items = value.get("items").and_then(|v| v.as_array()).or_else(|| value.as_array())?;
-
-    let item = items.first()?;
-
-    // insertText may be a plain string or { value: "..." }
-    item.get("insertText").and_then(|v| {
-        if let Some(s) = v.as_str() {
-            Some(s.to_string())
-        } else {
-            v.get("value").and_then(|s| s.as_str()).map(|s| s.to_string())
-        }
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -1159,55 +1017,7 @@ mod tests {
         assert_eq!(LspManager::language_from_path(Path::new("Makefile")), "plaintext");
     }
 
-    // ── parse_first_inline_completion ────────────────────────────────────────
-
-    #[test]
-    fn inline_completion_list_format() {
-        let val = serde_json::json!({
-            "items": [{ "insertText": "fn main() {}" }]
-        });
-        assert_eq!(parse_first_inline_completion(val), Some("fn main() {}".to_string()));
-    }
-
-    #[test]
-    fn inline_completion_bare_array_format() {
-        let val = serde_json::json!([{ "insertText": "let x = 1;" }]);
-        assert_eq!(parse_first_inline_completion(val), Some("let x = 1;".to_string()));
-    }
-
-    #[test]
-    fn inline_completion_insert_text_value_object() {
-        let val = serde_json::json!({
-            "items": [{ "insertText": { "value": "hello world" } }]
-        });
-        assert_eq!(parse_first_inline_completion(val), Some("hello world".to_string()));
-    }
-
-    #[test]
-    fn inline_completion_empty_items_returns_none() {
-        let val = serde_json::json!({ "items": [] });
-        assert!(parse_first_inline_completion(val).is_none());
-    }
-
-    #[test]
-    fn inline_completion_missing_insert_text_returns_none() {
-        let val = serde_json::json!({ "items": [{ "filterText": "something" }] });
-        assert!(parse_first_inline_completion(val).is_none());
-    }
-
     // ── server_relevant_for_workspace ────────────────────────────────────────
-
-    #[test]
-    fn copilot_always_relevant() {
-        let server = crate::config::LspServerConfig {
-            language: "copilot".to_string(),
-            command: "copilot".to_string(),
-            args: vec![],
-            env: Default::default(),
-            initialization_options: None,
-        };
-        assert!(server_relevant_for_workspace(&server, Path::new("/nonexistent")));
-    }
 
     #[test]
     fn rust_relevant_when_cargo_toml_present() {
