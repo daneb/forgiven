@@ -1,7 +1,7 @@
 # ADR 0148 — Companion: Plain Binary Distribution
 
 **Date:** 2026-05-07
-**Status:** Accepted
+**Status:** Superseded by [ADR 0149](0149-scope-reduction-editor-first.md)
 
 ---
 
