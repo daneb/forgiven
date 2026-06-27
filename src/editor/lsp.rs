@@ -1,6 +1,5 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::time::Instant;
 
 use super::{Editor, HoverPopupState, LocationEntry, LocationListState};
 use crate::keymap::Mode;
@@ -833,10 +832,5 @@ impl Editor {
         if let Some(client) = self.lsp.manager.get_client(&language) {
             let _ = client.did_change(uri, version, text);
         }
-
-        // Discard stale ghost text and reset debounce timer.
-        self.ghost_text = None;
-        self.pending_completion = None;
-        self.last_edit_instant = Some(Instant::now());
     }
 }

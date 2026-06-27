@@ -1,36 +1,10 @@
 // Configuration module
-// Phase 1: Basic config + LSP server registration via TOML
-// Phase 6: Full Lua-based configuration system
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
 /// A single MCP server entry in the config file.
-///
-/// Two transport modes are supported:
-///
-/// **stdio** — the editor spawns the process and communicates over stdin/stdout:
-/// ```toml
-/// [[mcp.servers]]
-/// name    = "filesystem"
-/// command = "npx"
-/// args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-/// ```
-///
-/// **HTTP** — connect to an externally-managed server (e.g. a Docker container
-/// the user started themselves).  The editor owns no process lifecycle:
-/// ```toml
-/// [[mcp.servers]]
-/// name = "searxng"
-/// url  = "http://localhost:8080"
-/// ```
-/// Start the container once with:
-/// ```sh
-/// docker run -d --rm -p 8080:8080 isokoliuk/mcp-searxng
-/// ```
-/// The editor will connect on startup and disconnect cleanly on exit without
-/// touching the container.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpServerConfig {
     /// Human-readable name shown in the UI.
@@ -40,15 +14,12 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub url: Option<String>,
     /// Executable to spawn for stdio transport.
-    /// Ignored when `url` is set.
     #[serde(default)]
     pub command: String,
     /// Arguments passed to the executable (stdio transport only).
     #[serde(default)]
     pub args: Vec<String>,
     /// Optional environment variables to set for the server process (stdio only).
-    /// Values beginning with `$` are resolved from the shell environment at
-    /// startup (e.g. `GITHUB_TOKEN = "$GITHUB_TOKEN"`).
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }
@@ -60,21 +31,6 @@ pub struct McpConfig {
 }
 
 /// A single language server entry in the config file.
-///
-/// Example (`~/.config/forgiven/config.toml`):
-/// ```toml
-/// [[lsp.servers]]
-/// language = "rust"
-/// command  = "rust-analyzer"
-/// args     = []
-///
-/// # Optional: pass custom initialization_options to the LSP server.
-/// # Values are merged with forgiven's built-in defaults (user values win).
-/// # Example for OmniSharp — override the analysis timeout:
-/// [lsp.servers.initialization_options.RoslynExtensionsOptions]
-/// documentAnalysisTimeoutMs = 60000
-/// enableImportCompletion    = true
-/// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LspServerConfig {
     /// Language ID (must match the extension mapping in LspManager::language_from_path).
@@ -85,16 +41,10 @@ pub struct LspServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Optional environment variables injected into the server process.
-    ///
-    /// Values prefixed with `$` are resolved from the host environment at
-    /// startup (e.g. `RUSTUP_TOOLCHAIN = "$RUSTUP_TOOLCHAIN"`).
-    /// Useful for disambiguating toolchains when multiple Rust installations
-    /// coexist (Homebrew + rustup) by setting `RUSTUP_TOOLCHAIN = "stable"`.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
     /// Optional initialization options forwarded verbatim to the LSP server's
-    /// `initialize` request. Merged with forgiven's built-in defaults; user
-    /// values take precedence.
+    /// `initialize` request.
     #[serde(default)]
     pub initialization_options: Option<toml::Value>,
 }
@@ -103,608 +53,6 @@ pub struct LspServerConfig {
 pub struct LspConfig {
     #[serde(default)]
     pub servers: Vec<LspServerConfig>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Provider configuration
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-provider settings for GitHub Copilot.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CopilotProviderConfig {
-    /// Preferred model ID (e.g. `"claude-sonnet-4"`, `"gpt-5.1"`).
-    /// Falls back to `"claude-sonnet-4"` if not set or no longer available.
-    #[serde(default = "default_copilot_model")]
-    pub default_model: String,
-}
-
-impl Default for CopilotProviderConfig {
-    fn default() -> Self {
-        Self { default_model: default_copilot_model() }
-    }
-}
-
-/// Per-provider settings for a local Ollama server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OllamaProviderConfig {
-    /// Base URL of the Ollama server.
-    ///
-    /// Default: `"http://localhost:11434"`.
-    /// Override to reach a remote Ollama instance (e.g. `"http://192.168.1.10:11434"`).
-    #[serde(default = "default_ollama_base_url")]
-    pub base_url: String,
-    /// Preferred Ollama model tag (e.g. `"qwen2.5-coder:14b"`, `"llama3.3:latest"`).
-    /// Must match a tag returned by `ollama list` on the server.
-    #[serde(default = "default_ollama_model")]
-    pub default_model: String,
-    /// Active context-window size in tokens sent to Ollama as `options.num_ctx`.
-    ///
-    /// Without this, Ollama may use a server default as low as 4 096 tokens.
-    /// Recommended values:
-    ///
-    /// | RAM   | Model | `context_length` |
-    /// |-------|-------|-----------------|
-    /// | 16 GB | 14 B  | 32768           |
-    /// | 24 GB | 14 B  | 65536           |
-    ///
-    /// Omit to let Ollama choose (uses `OLLAMA_CONTEXT_LENGTH` env var or its
-    /// own default, which may be very small for older versions).
-    #[serde(default)]
-    pub context_length: Option<u32>,
-    /// Enable the agentic tool-calling loop for Ollama.
-    ///
-    /// Defaults to `false`.  Tool-calling behaviour varies widely across Ollama
-    /// model versions — many models emit calls as raw JSON text instead of the
-    /// structured OpenAI `tool_calls` delta format, which breaks the loop and
-    /// shows garbled JSON in the panel.
-    ///
-    /// Enable only for models you have verified support it:
-    /// ```toml
-    /// [provider.ollama]
-    /// tool_calls = true   # requires qwen2.5-coder:14b + Ollama ≥ 0.5
-    /// ```
-    #[serde(default)]
-    pub tool_calls: bool,
-    /// Enable `create_task`, `complete_task`, and `ask_user` planning tools for
-    /// Ollama.
-    ///
-    /// Defaults to `false`.  Small models (≤ 7 B) reliably misuse these tools
-    /// — calling `create_task` instead of actually performing the work or
-    /// answering a question.  Only enable for larger models (≥ 14 B) that you
-    /// have verified handle conditional tool instructions correctly.
-    #[serde(default)]
-    pub planning_tools: bool,
-}
-
-impl Default for OllamaProviderConfig {
-    fn default() -> Self {
-        Self {
-            base_url: default_ollama_base_url(),
-            default_model: default_ollama_model(),
-            context_length: None,
-            tool_calls: false,
-            planning_tools: false,
-        }
-    }
-}
-
-/// Per-provider settings for the Anthropic direct API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AnthropicProviderConfig {
-    /// API key — use `"$ANTHROPIC_API_KEY"` to read from the environment (recommended).
-    #[serde(default)]
-    pub api_key: String,
-    /// Preferred model ID (e.g. `"claude-sonnet-4-6"`).
-    #[serde(default = "default_anthropic_model")]
-    pub default_model: String,
-}
-
-impl Default for AnthropicProviderConfig {
-    fn default() -> Self {
-        Self { api_key: String::new(), default_model: default_anthropic_model() }
-    }
-}
-
-fn default_anthropic_model() -> String {
-    "claude-sonnet-4-6".to_string()
-}
-
-/// Per-provider settings for the OpenAI direct API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OpenAiProviderConfig {
-    /// API key — use `"$OPENAI_API_KEY"` to read from the environment (recommended).
-    #[serde(default)]
-    pub api_key: String,
-    /// Preferred model ID (e.g. `"gpt-4o"`).
-    #[serde(default = "default_openai_model")]
-    pub default_model: String,
-    /// Base URL override.  Omit to use `"https://api.openai.com/v1"`.
-    /// Override for Azure: `"https://MY-DEPLOYMENT.openai.azure.com/openai/deployments/MY-MODEL"`.
-    #[serde(default)]
-    pub base_url: Option<String>,
-}
-
-impl Default for OpenAiProviderConfig {
-    fn default() -> Self {
-        Self { api_key: String::new(), default_model: default_openai_model(), base_url: None }
-    }
-}
-
-fn default_openai_model() -> String {
-    "gpt-4o".to_string()
-}
-
-/// Per-provider settings for the Google Gemini API (OpenAI-compatible endpoint).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GeminiProviderConfig {
-    /// API key — use `"$GEMINI_API_KEY"` to read from the environment (recommended).
-    #[serde(default)]
-    pub api_key: String,
-    /// Preferred model ID (e.g. `"gemini-2.5-pro"`).
-    #[serde(default = "default_gemini_model")]
-    pub default_model: String,
-}
-
-impl Default for GeminiProviderConfig {
-    fn default() -> Self {
-        Self { api_key: String::new(), default_model: default_gemini_model() }
-    }
-}
-
-fn default_gemini_model() -> String {
-    "gemini-2.5-pro".to_string()
-}
-
-/// Per-provider settings for OpenRouter.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OpenRouterProviderConfig {
-    /// API key — use `"$OPENROUTER_API_KEY"` to read from the environment (recommended).
-    #[serde(default)]
-    pub api_key: String,
-    /// Preferred model ID (e.g. `"anthropic/claude-sonnet-4-5"`).
-    #[serde(default = "default_openrouter_model")]
-    pub default_model: String,
-    /// Forwarded as `HTTP-Referer` per OpenRouter etiquette.
-    #[serde(default)]
-    pub site_url: String,
-    /// Forwarded as `X-Title` per OpenRouter etiquette.
-    #[serde(default)]
-    pub app_name: String,
-}
-
-impl Default for OpenRouterProviderConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            default_model: default_openrouter_model(),
-            site_url: String::new(),
-            app_name: String::new(),
-        }
-    }
-}
-
-fn default_openrouter_model() -> String {
-    "anthropic/claude-sonnet-4-5".to_string()
-}
-
-/// Per-provider settings for the DeepSeek direct API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeepSeekProviderConfig {
-    /// API key — use `"$DEEPSEEK_API_KEY"` to read from the environment (recommended).
-    #[serde(default)]
-    pub api_key: String,
-    /// Preferred model ID (e.g. `"deepseek-chat"`, `"deepseek-coder"`).
-    #[serde(default = "default_deepseek_model")]
-    pub default_model: String,
-    /// Base URL override.  Omit to use `"https://api.deepseek.com/v1"`.
-    #[serde(default)]
-    pub base_url: Option<String>,
-}
-
-impl Default for DeepSeekProviderConfig {
-    fn default() -> Self {
-        Self { api_key: String::new(), default_model: default_deepseek_model(), base_url: None }
-    }
-}
-
-fn default_deepseek_model() -> String {
-    "deepseek-chat".to_string()
-}
-
-/// Per-provider settings for a local LM Studio server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LmStudioProviderConfig {
-    /// Preferred model ID — must match the model currently loaded in LM Studio.
-    #[serde(default)]
-    pub default_model: String,
-    /// API token — LM Studio ≥0.3.0 requires `Authorization: Bearer <token>`.
-    /// Use `"$LM_API_TOKEN"` to read from the environment (recommended).
-    /// Leave empty for older LM Studio versions that don't require auth.
-    #[serde(default)]
-    pub api_key: String,
-    /// Base URL of the LM Studio server.
-    ///
-    /// Default: `"http://localhost:1234/v1"`.
-    #[serde(default = "default_lmstudio_base_url")]
-    pub base_url: String,
-    /// Enable the agentic tool-calling loop for LM Studio.
-    ///
-    /// Defaults to `false`.  Tool-calling support depends on the loaded model.
-    #[serde(default)]
-    pub tool_calls: bool,
-    /// Enable `create_task`, `complete_task`, and `ask_user` planning tools.
-    ///
-    /// Defaults to `false`.  Only enable for larger models that handle conditional
-    /// tool instructions reliably.
-    #[serde(default)]
-    pub planning_tools: bool,
-}
-
-impl Default for LmStudioProviderConfig {
-    fn default() -> Self {
-        Self {
-            default_model: String::new(),
-            api_key: String::new(),
-            base_url: default_lmstudio_base_url(),
-            tool_calls: false,
-            planning_tools: false,
-        }
-    }
-}
-
-fn default_lmstudio_base_url() -> String {
-    "http://localhost:1234/v1".to_string()
-}
-
-/// Top-level provider selection block (`[provider]` in `config.toml`).
-///
-/// Example:
-/// ```toml
-/// [provider]
-/// active = "anthropic"
-///
-/// [provider.anthropic]
-/// api_key       = "$ANTHROPIC_API_KEY"
-/// default_model = "claude-sonnet-4-6"
-///
-/// [provider.ollama]
-/// base_url       = "http://localhost:11434"
-/// default_model  = "qwen2.5-coder:14b"
-/// context_length = 32768
-///
-/// [provider.deepseek]
-/// api_key       = "$DEEPSEEK_API_KEY"
-/// default_model = "deepseek-chat"
-///
-/// [provider.lmstudio]
-/// default_model = "my-model"
-/// base_url      = "http://localhost:1234/v1"
-/// ```
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ProviderConfig {
-    /// Which provider to use: `"copilot"` (default), `"ollama"`, `"anthropic"`,
-    /// `"openai"`, `"gemini"`, `"openrouter"`, `"deepseek"`, or `"lmstudio"`.
-    /// Only one provider is active at a time; switching requires a restart.
-    #[serde(default = "default_provider_active")]
-    pub active: String,
-    /// Copilot-specific settings.
-    #[serde(default)]
-    pub copilot: CopilotProviderConfig,
-    /// Ollama-specific settings.
-    #[serde(default)]
-    pub ollama: OllamaProviderConfig,
-    /// Anthropic direct API settings.
-    #[serde(default)]
-    pub anthropic: AnthropicProviderConfig,
-    /// OpenAI direct API settings.
-    #[serde(default)]
-    pub openai: OpenAiProviderConfig,
-    /// Google Gemini API settings.
-    #[serde(default)]
-    pub gemini: GeminiProviderConfig,
-    /// OpenRouter aggregator settings.
-    #[serde(default)]
-    pub openrouter: OpenRouterProviderConfig,
-    /// DeepSeek direct API settings.
-    #[serde(default)]
-    pub deepseek: DeepSeekProviderConfig,
-    /// LM Studio local server settings.
-    #[serde(default)]
-    pub lmstudio: LmStudioProviderConfig,
-}
-
-fn default_provider_active() -> String {
-    "copilot".to_string()
-}
-
-fn default_ollama_base_url() -> String {
-    "http://localhost:11434".to_string()
-}
-
-fn default_ollama_model() -> String {
-    "qwen2.5-coder:14b".to_string()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Agent config
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Agent hooks (ADR 0114) ────────────────────────────────────────────────────
-
-fn bool_true() -> bool {
-    true
-}
-
-/// A single event-driven automation hook.
-///
-/// Defined in config as `[[agent.hooks]]`.  Example:
-///
-/// ```toml
-/// [[agent.hooks]]
-/// trigger = "on_save"
-/// glob    = "*.rs"
-/// prompt  = "File {file} saved — check for obvious issues."
-/// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AgentHook {
-    /// When to fire.  Currently only `"on_save"` is supported.
-    pub trigger: String,
-    /// Glob pattern matched against the project-relative path of the file that
-    /// triggered the event.  Supports `*`, `**`, and `?`.
-    pub glob: String,
-    /// Prompt sent to the agent.  `{file}` is replaced with the file path.
-    pub prompt: String,
-    /// Set `false` to disable the hook without removing it from config.
-    #[serde(default = "bool_true")]
-    pub enabled: bool,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ── Intent Translator config (docs/intent-translator.md) ─────────────────────
-
-/// Configuration for the Intent Translator preprocessing step.
-///
-/// When enabled, every user message is sent to a small, fast model for
-/// rewriting into a structured task spec before the main agent loop starts.
-/// Disabled by default until validated against `forgiven-bench/`.
-///
-/// To use a local Ollama model:
-/// ```toml
-/// [agent.intent_translator]
-/// enabled      = true
-/// provider     = "ollama"
-/// ollama_model = "qwen2.5-coder:7b"
-/// timeout_ms   = 10000
-/// ```
-///
-/// To use the same provider as the main agent (e.g. Copilot → haiku):
-/// ```toml
-/// [agent.intent_translator]
-/// enabled  = true
-/// provider = "active"
-/// model    = "claude-haiku-4-5-20251001"
-/// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IntentTranslatorConfig {
-    /// Enable the translator.  Default: `false` until measured on corpus.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Which backend to use for the translation call.
-    ///
-    /// | value      | endpoint used                                    |
-    /// |------------|--------------------------------------------------|
-    /// | `"ollama"` | local Ollama (`[provider.ollama] base_url`)     |
-    /// | `"active"` | same provider as the main agent (default)       |
-    ///
-    /// Default: `"ollama"` — no API key needed, runs entirely locally.
-    #[serde(default = "default_intent_translator_provider")]
-    pub provider: String,
-    /// Model tag for Ollama (e.g. `"qwen2.5-coder:7b"`, `"llama3.2:3b"`).
-    /// Only used when `provider = "ollama"`.
-    #[serde(default = "default_intent_ollama_model")]
-    pub ollama_model: String,
-    /// Model ID when `provider = "active"` (e.g. `"claude-haiku-4-5-20251001"`).
-    /// Ignored when `provider = "ollama"`.
-    #[serde(default = "default_intent_active_model")]
-    pub model: String,
-    /// Skip translation for messages shorter than this character count.
-    /// Very short messages are already crisp; translation adds only latency.
-    /// Default: 40.
-    #[serde(default = "default_intent_min_chars")]
-    pub min_chars_to_translate: usize,
-    /// Abort the translation call if no response arrives within this window.
-    /// Ollama on a cold start may need longer (model loading).
-    /// Default: 10 000 ms.
-    #[serde(default = "default_intent_timeout_ms")]
-    pub timeout_ms: u64,
-    /// Literal string prefixes — messages that start with any of these are
-    /// passed through without translation (e.g. `["/speckit"]`).
-    #[serde(default)]
-    pub skip_patterns: Vec<String>,
-}
-
-impl Default for IntentTranslatorConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: default_intent_translator_provider(),
-            ollama_model: default_intent_ollama_model(),
-            model: default_intent_active_model(),
-            min_chars_to_translate: default_intent_min_chars(),
-            timeout_ms: default_intent_timeout_ms(),
-            skip_patterns: Vec::new(),
-        }
-    }
-}
-
-fn default_intent_translator_provider() -> String {
-    "ollama".to_string()
-}
-
-fn default_intent_ollama_model() -> String {
-    "qwen2.5-coder:7b".to_string()
-}
-
-fn default_intent_active_model() -> String {
-    "claude-haiku-4-5-20251001".to_string()
-}
-
-fn default_intent_min_chars() -> usize {
-    40
-}
-
-fn default_intent_timeout_ms() -> u64 {
-    5000
-}
-
-// ── Codified Context config (docs/codified-context.md) ───────────────────────
-
-/// Three-tier context loader: constitution (hot), specialists (warm), knowledge (cold).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CodifiedContextConfig {
-    /// Enable the three-tier loader. Default: false until validated.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Path to the .forgiven directory relative to project root.
-    #[serde(default = "default_codified_context_directory")]
-    pub directory: String,
-    /// Hard cap on constitution size in tokens. Larger triggers a warning in SPC d.
-    #[serde(default = "default_constitution_max_tokens")]
-    pub constitution_max_tokens: usize,
-    /// Max number of specialists loaded per turn (if more match, first wins).
-    #[serde(default = "default_max_specialists_per_turn")]
-    pub max_specialists_per_turn: usize,
-    /// Cold memory size cap per fetch_knowledge() call in bytes.
-    #[serde(default = "default_knowledge_fetch_max_bytes")]
-    pub knowledge_fetch_max_bytes: usize,
-}
-
-impl Default for CodifiedContextConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            directory: default_codified_context_directory(),
-            constitution_max_tokens: default_constitution_max_tokens(),
-            max_specialists_per_turn: default_max_specialists_per_turn(),
-            knowledge_fetch_max_bytes: default_knowledge_fetch_max_bytes(),
-        }
-    }
-}
-
-fn default_codified_context_directory() -> String {
-    ".forgiven".to_string()
-}
-
-fn default_constitution_max_tokens() -> usize {
-    500
-}
-
-fn default_max_specialists_per_turn() -> usize {
-    2
-}
-
-fn default_knowledge_fetch_max_bytes() -> usize {
-    8192
-}
-
-/// Configuration for the agent panel.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct AgentConfig {
-    /// Which prompt framework to enable for slash commands in the agent panel.
-    ///
-    /// | value            | effect                                               |
-    /// |------------------|------------------------------------------------------|
-    /// | `"none"` / `""`  | disabled — no slash-command interception (default)  |
-    /// | `"open-spec"`    | built-in OpenSpec 3-command workflow                |
-    /// | `/path/to/dir`   | custom framework loaded from a directory of `.md`   |
-    #[serde(default)]
-    pub spec_framework: String,
-    /// Automatically compress eligible tool results using LLMLingua before
-    /// they are appended to the conversation history.
-    ///
-    /// Requires a connected MCP server named `"llmlingua"` that exposes a
-    /// `compress_text` tool (see `mcp_servers/llmlingua_server.py`).
-    ///
-    /// Code-reading tools (`read_file`, `get_file_outline`, `get_symbol_context`)
-    /// are always excluded — compressing source code corrupts identifiers and
-    /// operators.  Only tool results longer than 2 000 characters are compressed;
-    /// shorter results are returned unchanged.
-    ///
-    /// Adds ~100 ms–2 s latency per eligible tool call (CPU BERT inference).
-    /// Recommended for heavy sessions where context pressure is the bottleneck.
-    #[serde(default)]
-    pub auto_compress_tool_results: bool,
-    /// Model ID used for the cheap summarisation call made by the Auto-Janitor.
-    /// Falls back to the active default model when empty.
-    /// Example: `"claude-haiku-4-5-20251001"`.
-    #[serde(default)]
-    pub janitor_model: String,
-    /// Character-length threshold for observation masking in the API payload.
-    /// Any non-recent assistant message longer than this is replaced with a
-    /// one-line stub before the request is sent, keeping token usage down while
-    /// leaving the display history intact.  Set to 0 to disable.
-    /// Default: 2 000 chars (≈ 500 tokens).
-    #[serde(default = "default_observation_mask_threshold")]
-    pub observation_mask_threshold_chars: usize,
-    /// Character-length threshold for expand-on-demand tool result truncation.
-    /// Tool results longer than this are stored in an in-memory cache and
-    /// truncated in conversation history; the full content is retrievable via
-    /// the `expand_result` tool.  Set to 0 to disable.
-    /// Default: 800 chars (≈ 200 tokens).
-    #[serde(default = "default_expand_threshold")]
-    pub expand_threshold_chars: usize,
-    /// Event-driven hooks that fire the agent automatically.
-    /// Defined as `[[agent.hooks]]` in the config file.
-    #[serde(default)]
-    pub hooks: Vec<AgentHook>,
-    /// Test runner configuration for the `on_test_fail` hook trigger.
-    #[serde(default)]
-    pub test: TestConfig,
-    /// Intent Translator preprocessing step (Option D).
-    #[serde(default)]
-    pub intent_translator: IntentTranslatorConfig,
-    /// Codified Context three-tier loader (Option B).
-    #[serde(default)]
-    pub codified_context: CodifiedContextConfig,
-}
-
-// ── Test runner config (ADR 0114 — on_test_fail trigger) ─────────────────────
-
-/// Configuration for the test runner used by `on_test_fail` hooks.
-///
-/// Example:
-/// ```toml
-/// [agent.test]
-/// command      = "cargo test"
-/// run_on_save  = true
-/// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TestConfig {
-    /// The shell command to run tests.  When empty, the project root is
-    /// inspected to auto-detect the test framework:
-    /// - `Cargo.toml` present → `cargo test`
-    /// - `package.json` present → `npm test`
-    /// - `pyproject.toml` or `pytest.ini` present → `pytest`
-    #[serde(default)]
-    pub command: String,
-    /// Run tests automatically after every file save (when at least one
-    /// `on_test_fail` hook is configured).  Defaults to `false` so that
-    /// test runs are opt-in.
-    #[serde(default)]
-    pub run_on_save: bool,
-}
-
-/// Companion sidecar window configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct SidecarConfig {
-    /// Spawn the companion window automatically on editor startup.
-    /// Default: false (opt-in).
-    #[serde(default)]
-    pub auto_launch: bool,
-    /// Path to the companion binary (e.g. the inner executable inside a .app bundle).
-    /// When None, forgiven searches for `forgiven-companion` on $PATH.
-    #[serde(default)]
-    pub binary_path: Option<String>,
 }
 
 /// Top-level editor configuration.
@@ -718,36 +66,10 @@ pub struct Config {
     pub lsp: LspConfig,
     #[serde(default)]
     pub mcp: McpConfig,
-    #[serde(default)]
-    pub agent: AgentConfig,
-    /// Active provider and per-provider settings.
-    /// See [`ProviderConfig`] for the full TOML schema.
-    #[serde(default)]
-    pub provider: ProviderConfig,
-    /// Preferred Copilot model ID — kept for backwards compatibility with configs
-    /// that predate the `[provider]` block.  When `provider.active = "copilot"`,
-    /// this value seeds `provider.copilot.default_model` if the latter is absent.
-    /// Prefer setting `[provider.copilot] default_model` in new configs.
-    #[serde(default = "default_copilot_model")]
-    pub default_copilot_model: String,
-    /// Maximum number of agentic tool-calling rounds before prompting the user.
-    /// Prevents runaway loops while allowing user to continue if needed.
-    #[serde(default = "default_max_agent_rounds")]
-    pub max_agent_rounds: usize,
-    /// Warn the user when this many rounds remain before hitting the limit.
-    #[serde(default = "default_agent_warning_threshold")]
-    pub agent_warning_threshold: usize,
     /// Visually wrap long lines at the viewport edge instead of scrolling horizontally.
     /// The buffer is unchanged — no newlines are inserted.  Defaults to `false`.
-    /// Enable in `~/.config/forgiven/config.toml`:
-    /// ```toml
-    /// soft_wrap = true
-    /// ```
     #[serde(default)]
     pub soft_wrap: bool,
-    /// Companion sidecar window settings.
-    #[serde(default)]
-    pub sidecar: SidecarConfig,
 }
 
 fn default_tab_width() -> usize {
@@ -755,21 +77,6 @@ fn default_tab_width() -> usize {
 }
 fn default_use_spaces() -> bool {
     true
-}
-fn default_copilot_model() -> String {
-    "claude-sonnet-4".to_string()
-}
-fn default_max_agent_rounds() -> usize {
-    10
-}
-fn default_agent_warning_threshold() -> usize {
-    3
-}
-fn default_observation_mask_threshold() -> usize {
-    2000
-}
-fn default_expand_threshold() -> usize {
-    800
 }
 
 impl Default for Config {
@@ -779,70 +86,12 @@ impl Default for Config {
             use_spaces: default_use_spaces(),
             lsp: LspConfig::default(),
             mcp: McpConfig::default(),
-            agent: AgentConfig::default(),
-            provider: ProviderConfig::default(),
-            default_copilot_model: default_copilot_model(),
-            max_agent_rounds: default_max_agent_rounds(),
-            agent_warning_threshold: default_agent_warning_threshold(),
             soft_wrap: false,
-            sidecar: SidecarConfig::default(),
         }
     }
 }
 
-#[allow(dead_code)]
 impl Config {
-    /// Set the preferred model ID for the active provider.
-    ///
-    /// Writes to the correct per-provider `default_model` field so model selection
-    /// (Ctrl+T) persists correctly regardless of which provider is active.
-    pub fn set_active_default_model(&mut self, model: &str) {
-        match self.provider.active.as_str() {
-            "ollama" => self.provider.ollama.default_model = model.to_string(),
-            "anthropic" => self.provider.anthropic.default_model = model.to_string(),
-            "openai" => self.provider.openai.default_model = model.to_string(),
-            "gemini" => self.provider.gemini.default_model = model.to_string(),
-            "openrouter" => self.provider.openrouter.default_model = model.to_string(),
-            "deepseek" => self.provider.deepseek.default_model = model.to_string(),
-            "lmstudio" | "lm-studio" | "lm_studio" => {
-                self.provider.lmstudio.default_model = model.to_string()
-            },
-            _ => {
-                self.provider.copilot.default_model = model.to_string();
-                self.default_copilot_model = model.to_string();
-            },
-        }
-    }
-
-    /// Return the preferred model ID for the active provider.
-    ///
-    /// - For `"copilot"`: returns `provider.copilot.default_model`, falling back to
-    ///   the legacy `default_copilot_model` field for backwards-compatible configs.
-    /// - For `"ollama"`: returns `provider.ollama.default_model`.
-    pub fn active_default_model(&self) -> &str {
-        match self.provider.active.as_str() {
-            "ollama" => &self.provider.ollama.default_model,
-            "anthropic" => &self.provider.anthropic.default_model,
-            "openai" => &self.provider.openai.default_model,
-            "gemini" => &self.provider.gemini.default_model,
-            "openrouter" => &self.provider.openrouter.default_model,
-            "deepseek" => &self.provider.deepseek.default_model,
-            "lmstudio" | "lm-studio" | "lm_studio" => &self.provider.lmstudio.default_model,
-            _ => {
-                // Honour the legacy top-level field when the new nested field
-                // still holds its default ("claude-sonnet-4"), giving precedence
-                // to an explicit `[provider.copilot] default_model` setting.
-                let nested = &self.provider.copilot.default_model;
-                let legacy = &self.default_copilot_model;
-                if nested == "claude-sonnet-4" && legacy != "claude-sonnet-4" {
-                    legacy
-                } else {
-                    nested
-                }
-            },
-        }
-    }
-
     /// Load config from `~/.config/forgiven/config.toml`.
     /// Falls back to defaults silently if the file is missing; logs a warning on parse errors.
     pub fn load() -> Self {
@@ -868,6 +117,7 @@ impl Config {
 
     /// Save the current config to `~/.config/forgiven/config.toml`.
     /// Creates the directory if it doesn't exist.
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::config_path().ok_or("HOME environment variable not set")?;
 
@@ -892,9 +142,6 @@ impl Config {
     }
 
     /// Return the path to the persistent log file.
-    /// `$XDG_DATA_HOME/forgiven/forgiven.log`, falling back to
-    /// `$HOME/.local/share/forgiven/forgiven.log`.
-    /// Returns `None` if `$HOME` is not set; callers should fall back to `/tmp/forgiven.log`.
     pub fn log_path() -> Option<PathBuf> {
         let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
             PathBuf::from(xdg)
@@ -912,145 +159,12 @@ mod tests {
 
     #[test]
     fn config_default_serialises_cleanly() {
-        // Config::default() uses Rust's Default derive, not serde defaults.
-        // Verify it round-trips without error and structural fields are intact.
         let original = Config::default();
         let toml_str = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.tab_width, 4);
         assert!(parsed.use_spaces);
-        assert_eq!(parsed.max_agent_rounds, 10);
         assert!(!parsed.soft_wrap);
-    }
-
-    #[test]
-    fn serde_defaults_applied_when_section_present_but_field_absent() {
-        // When [provider] exists but 'active' is omitted, the serde default fires.
-        let cfg: Config = toml::from_str("[provider]\n").unwrap();
-        assert_eq!(cfg.provider.active, "copilot");
-        assert_eq!(cfg.tab_width, 4);
-        assert!(cfg.use_spaces);
-        assert_eq!(cfg.max_agent_rounds, 10);
-    }
-
-    #[test]
-    fn ollama_serde_defaults() {
-        let cfg: Config = toml::from_str("[provider.ollama]\n").unwrap();
-        assert_eq!(cfg.provider.ollama.base_url, "http://localhost:11434");
-        assert_eq!(cfg.provider.ollama.default_model, "qwen2.5-coder:14b");
-        assert!(!cfg.provider.ollama.tool_calls);
-    }
-
-    #[test]
-    fn anthropic_serde_defaults() {
-        let cfg: Config = toml::from_str("[provider.anthropic]\n").unwrap();
-        assert_eq!(cfg.provider.anthropic.default_model, "claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn active_model_copilot() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "copilot".to_string();
-        cfg.provider.copilot.default_model = "gpt-5".to_string();
-        assert_eq!(cfg.active_default_model(), "gpt-5");
-    }
-
-    #[test]
-    fn active_model_anthropic() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "anthropic".to_string();
-        cfg.provider.anthropic.default_model = "claude-opus-4".to_string();
-        assert_eq!(cfg.active_default_model(), "claude-opus-4");
-    }
-
-    #[test]
-    fn active_model_ollama() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "ollama".to_string();
-        cfg.provider.ollama.default_model = "llama3.3:latest".to_string();
-        assert_eq!(cfg.active_default_model(), "llama3.3:latest");
-    }
-
-    #[test]
-    fn active_model_openai() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "openai".to_string();
-        cfg.provider.openai.default_model = "gpt-4o-mini".to_string();
-        assert_eq!(cfg.active_default_model(), "gpt-4o-mini");
-    }
-
-    #[test]
-    fn active_model_gemini() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "gemini".to_string();
-        cfg.provider.gemini.default_model = "gemini-2.5-flash".to_string();
-        assert_eq!(cfg.active_default_model(), "gemini-2.5-flash");
-    }
-
-    #[test]
-    fn active_model_openrouter() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "openrouter".to_string();
-        cfg.provider.openrouter.default_model = "anthropic/claude-opus-4".to_string();
-        assert_eq!(cfg.active_default_model(), "anthropic/claude-opus-4");
-    }
-
-    #[test]
-    fn active_model_deepseek() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "deepseek".to_string();
-        cfg.provider.deepseek.default_model = "deepseek-coder".to_string();
-        assert_eq!(cfg.active_default_model(), "deepseek-coder");
-    }
-
-    #[test]
-    fn active_model_lmstudio() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "lmstudio".to_string();
-        cfg.provider.lmstudio.default_model = "qwen2.5-coder-7b".to_string();
-        assert_eq!(cfg.active_default_model(), "qwen2.5-coder-7b");
-    }
-
-    #[test]
-    fn deepseek_serde_defaults() {
-        let cfg: Config = toml::from_str("[provider.deepseek]\n").unwrap();
-        assert_eq!(cfg.provider.deepseek.default_model, "deepseek-chat");
-        assert_eq!(cfg.provider.deepseek.api_key, "");
-    }
-
-    #[test]
-    fn lmstudio_serde_defaults() {
-        let cfg: Config = toml::from_str("[provider.lmstudio]\n").unwrap();
-        assert_eq!(cfg.provider.lmstudio.base_url, "http://localhost:1234/v1");
-        assert!(!cfg.provider.lmstudio.tool_calls);
-    }
-
-    #[test]
-    fn active_model_unknown_falls_back_to_copilot_default() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "notareal".to_string();
-        // both nested and legacy are default "claude-sonnet-4" → returns nested
-        assert_eq!(cfg.active_default_model(), "claude-sonnet-4");
-    }
-
-    #[test]
-    fn legacy_default_copilot_model_honoured() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "copilot".to_string();
-        // nested still holds the default sentinel "claude-sonnet-4"
-        cfg.default_copilot_model = "old-gpt-4".to_string();
-        // nested == default && legacy != default → returns legacy
-        assert_eq!(cfg.active_default_model(), "old-gpt-4");
-    }
-
-    #[test]
-    fn nested_copilot_model_beats_legacy() {
-        let mut cfg = Config::default();
-        cfg.provider.active = "copilot".to_string();
-        cfg.provider.copilot.default_model = "claude-sonnet-4-6".to_string();
-        cfg.default_copilot_model = "old-gpt-4".to_string();
-        // nested != default → nested wins regardless of legacy
-        assert_eq!(cfg.active_default_model(), "claude-sonnet-4-6");
     }
 
     #[test]
@@ -1098,35 +212,5 @@ url  = "http://localhost:8080"
         assert_eq!(server.name, "searxng");
         assert_eq!(server.url.as_deref(), Some("http://localhost:8080"));
         assert_eq!(server.command, "");
-    }
-
-    #[test]
-    fn agent_hook_parse() {
-        let toml_str = r#"
-[[agent.hooks]]
-trigger = "on_save"
-glob    = "*.rs"
-prompt  = "check {file}"
-enabled = false
-"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.agent.hooks.len(), 1);
-        let hook = &cfg.agent.hooks[0];
-        assert_eq!(hook.trigger, "on_save");
-        assert_eq!(hook.glob, "*.rs");
-        assert_eq!(hook.prompt, "check {file}");
-        assert!(!hook.enabled);
-    }
-
-    #[test]
-    fn agent_hook_enabled_defaults_true() {
-        let toml_str = r#"
-[[agent.hooks]]
-trigger = "on_save"
-glob    = "*"
-prompt  = "check"
-"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert!(cfg.agent.hooks[0].enabled);
     }
 }

@@ -24,7 +24,6 @@ impl UI {
             Mode::VisualLine => "VISUAL LINE",
             Mode::PickBuffer => "PICK",
             Mode::PickFile => "FIND",
-            Mode::Agent => "AGENT",
             Mode::Explorer => "EXPLORE",
             Mode::MarkdownPreview => "PREVIEW",
             Mode::Search => "SEARCH",
@@ -32,16 +31,11 @@ impl UI {
             Mode::RenameFile => "RENAME",
             Mode::DeleteFile => "DELETE",
             Mode::NewFolder => "MKDIR",
-            Mode::CommitMsg => "COMMIT",
-            Mode::ReleaseNotes => "RELEASE",
             Mode::Diagnostics => "DIAG",
             Mode::BinaryFile => "BINARY",
             Mode::LocationList => "LSP",
             Mode::LspHover => "HOVER",
             Mode::LspRename => "RENAME",
-            Mode::InlineAssist => "INLINE AI",
-            Mode::ReviewChanges => "REVIEW",
-            Mode::InsightsDashboard => "INSIGHTS",
         };
 
         let mode_color = match mode {
@@ -52,7 +46,6 @@ impl UI {
             Mode::VisualLine => Color::Magenta,
             Mode::PickBuffer => Color::Cyan,
             Mode::PickFile => Color::LightCyan,
-            Mode::Agent => Color::Cyan,
             Mode::Explorer => Color::LightGreen,
             Mode::MarkdownPreview => Color::Magenta,
             Mode::Search => Color::LightRed,
@@ -60,16 +53,11 @@ impl UI {
             Mode::RenameFile => Color::Yellow,
             Mode::DeleteFile => Color::Red,
             Mode::NewFolder => Color::LightGreen,
-            Mode::CommitMsg => Color::LightYellow,
-            Mode::ReleaseNotes => Color::LightCyan,
             Mode::Diagnostics => Color::LightCyan,
             Mode::BinaryFile => Color::Yellow,
             Mode::LocationList => Color::LightCyan,
             Mode::LspHover => Color::LightYellow,
             Mode::LspRename => Color::LightGreen,
-            Mode::InlineAssist => Color::LightCyan,
-            Mode::ReviewChanges => Color::LightGreen,
-            Mode::InsightsDashboard => Color::Cyan,
         };
 
         let mut spans = vec![

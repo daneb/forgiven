@@ -388,12 +388,6 @@ impl Editor {
             None
         };
 
-        // Clone ghost text so the borrow on self.ghost_text doesn't conflict
-        // with the &mut self borrow taken by render_preview_lines below.
-        let ghost_owned =
-            self.ghost_text.as_ref().map(|(text, row, col)| (text.clone(), *row, *col));
-        let ghost = ghost_owned.as_ref().map(|(text, row, col)| (text.as_str(), *row, *col));
-
         // ── Preview lines (Markdown / CSV / JSON) — ADR 0138 ─────────────────
         let preview_lines_owned = self.render_preview_lines(mode, buf_idx, viewport_width);
 
@@ -445,20 +439,6 @@ impl Editor {
             None
         };
         let delete_name = delete_path_owned.as_deref();
-
-        let commit_msg_buf =
-            if mode == Mode::CommitMsg { Some(self.commit_msg.buffer.as_str()) } else { None };
-
-        let release_notes_view = if mode == Mode::ReleaseNotes {
-            Some(crate::ui::ReleaseNotesView {
-                count_input: self.release_notes.count_input.as_str(),
-                generating: self.release_notes.rx.is_some(),
-                notes: self.release_notes.buffer.as_str(),
-                scroll: self.release_notes.scroll,
-            })
-        } else {
-            None
-        };
 
         let log_path_buf = crate::config::Config::log_path()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/forgiven.log"));
@@ -529,7 +509,6 @@ impl Editor {
                 buffer_list: buffer_list.as_ref(),
                 file_list: file_list.as_ref(),
                 diagnostics: &self.lsp.diagnostics,
-                ghost_text: ghost,
                 highlighted_lines: hl_ref,
                 file_explorer: explorer_ref,
                 preview_lines: preview_ref,
@@ -540,9 +519,6 @@ impl Editor {
                 split_buffer_data: split_buffer_data.as_ref(),
                 split_highlighted_lines: split_hl_ref,
                 split_right_focused,
-                commit_msg: commit_msg_buf,
-                commit_msg_cursor: self.commit_msg.cursor,
-                release_notes: release_notes_view.as_ref(),
                 diag_overlay: diag_overlay.as_ref(),
                 binary_file_path: self.binary_file_path.as_deref(),
                 startup_elapsed: self.startup_elapsed,
@@ -569,16 +545,6 @@ impl Editor {
                 },
                 fold_data: fold_data_ref,
                 sticky_header: sticky_header_ref,
-                inline_assist: self.inline_assist.as_ref().map(|s| crate::ui::InlineAssistView {
-                    prompt: &s.prompt,
-                    response: &s.response,
-                    phase: s.phase,
-                }),
-                review_changes: if mode == Mode::ReviewChanges {
-                    self.review_changes.as_ref()
-                } else {
-                    None
-                },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
             };

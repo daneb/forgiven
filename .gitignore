@@ -33,3 +33,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Claude Code worktrees and session data
+.claude/worktrees/
+.forgiven/

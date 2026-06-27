@@ -63,7 +63,7 @@ Numeric count prefixes are supported: `3dd`, `5j`, etc.
 | Key | Action |
 |-----|--------|
 | `Esc` | Return to Normal mode |
-| `Tab` | Accept ghost-text completion (if visible) |
+| `Tab` | Insert a tab / spaces (per `use_spaces` config) |
 | `Backspace/Delete` | Delete before / after cursor |
 | Arrows | Move cursor |
 

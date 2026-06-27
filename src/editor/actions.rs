@@ -382,14 +382,6 @@ impl Editor {
                             let _ = client.did_save(uri, Some(text));
                         }
                     }
-                    // Fire any matching on_save hooks (ADR 0114).
-                    if let Err(e) = self.fire_hooks_for_save(&path) {
-                        tracing::warn!("Hook error: {e}");
-                    }
-                    // Run tests and fire on_test_fail hooks if configured.
-                    if let Err(e) = self.run_tests_if_configured(&path) {
-                        tracing::warn!("Test hook error: {e}");
-                    }
                 }
             },
             Action::Quit => {
@@ -416,18 +408,6 @@ impl Editor {
             Action::LspPrevDiagnostic => {
                 self.goto_prev_diagnostic();
             },
-            Action::AgentToggle => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            Action::AgentFocus => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            Action::AgentNewConversation => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            Action::CompanionToggle => {
-                self.set_status("Companion window removed in slim build".to_string());
-            },
             Action::ExplorerToggle => {
                 self.file_explorer.toggle_visible();
                 if self.file_explorer.visible {
@@ -453,9 +433,6 @@ impl Editor {
             Action::GitOpen => {
                 self.open_lazygit()?;
             },
-            Action::GitCommitStaged => self.start_commit_msg(true),
-            Action::GitCommitLast => self.start_commit_msg(false),
-            Action::GitReleaseNotes => self.start_release_notes(),
             // ── Markdown preview ──────────────────────────────────────────────
             Action::MarkdownPreviewToggle => {
                 if self.mode == Mode::MarkdownPreview {
@@ -476,75 +453,6 @@ impl Editor {
                 self.config.soft_wrap = !self.config.soft_wrap;
                 let state = if self.config.soft_wrap { "on" } else { "off" };
                 self.set_status(format!("Soft wrap {state}"));
-            },
-            // ── Memory save ───────────────────────────────────────────────────
-            Action::MemorySave => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            // ── Auto-Janitor ──────────────────────────────────────────────────
-            Action::AgentJanitorCompress => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            // ── Investigation subagent ────────────────────────────────────────
-            Action::AgentInvestigate => {
-                self.set_status("Agent panel removed in slim build".to_string());
-            },
-            // ── Multi-file review / change set view ───────────────────────────
-            Action::ReviewChangesOpen => {
-                self.set_status("Review changes removed in slim build".to_string());
-            },
-            // ── Insights dashboard ────────────────────────────────────────────
-            Action::InsightsDashboardOpen => {
-                self.set_status("Insights dashboard removed in slim build".to_string());
-            },
-            // ── Intent Translator toggle ──────────────────────────────────────
-            Action::AgentIntentTranslatorToggle => {
-                self.set_status("Intent translator removed in slim build".to_string());
-            },
-            // ── Codified Context file openers (SPC a c/C/k) ──────────────────
-            Action::CodifiedContextOpenConstitution => {
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let path = project_root.join(".forgiven/constitution.md");
-                if !path.exists() {
-                    // Create the directory and an empty stub so the user can start writing.
-                    let dir = path.parent().unwrap();
-                    let _ = std::fs::create_dir_all(dir);
-                    let _ = std::fs::write(
-                        &path,
-                        "# Project Constitution\n\n\
-                         ## Language\n\n\
-                         ## Style\n\n\
-                         ## Architecture\n\n\
-                         ## Hard rules\n",
-                    );
-                }
-                let _ = self.open_file(&path);
-            },
-            Action::CodifiedContextOpenSpecialist => {
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let agents_dir = project_root.join(".forgiven/agents");
-                let _ = std::fs::create_dir_all(&agents_dir);
-                // Open the directory in the file explorer so the user can pick a file.
-                self.set_status(
-                    "Specialists are in .forgiven/agents/ — use the file explorer to open one"
-                        .to_string(),
-                );
-            },
-            Action::CodifiedContextOpenKnowledge => {
-                let project_root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let knowledge_dir = project_root.join(".forgiven/knowledge");
-                let _ = std::fs::create_dir_all(&knowledge_dir);
-                self.set_status(
-                    "Knowledge docs are in .forgiven/knowledge/ — use the file explorer to open one"
-                        .to_string(),
-                );
-            },
-            // ── Session revert ────────────────────────────────────────────────
-            Action::AgentSessionRevert => {
-                self.set_status("Session revert removed in slim build".to_string());
             },
             // ── Diagnostics overlay ───────────────────────────────────────────
             Action::DiagnosticsOpen => {
@@ -821,118 +729,6 @@ impl Editor {
                 self.with_buffer(|buf| buf.save_undo_snapshot());
                 self.apply_surround_add_word(ch);
                 self.notify_lsp_change();
-            },
-
-            // ── Inline assistant (ADR 0111) ───────────────────────────────────
-            Action::InlineAssistStart => {
-                if self.current_buffer().is_none() {
-                    return Ok(());
-                }
-                // Capture the current selection (if any) and the selected text.
-                // When there is no visual selection (Normal mode), synthesise a
-                // line-covering selection so accept replaces the line rather than
-                // inserting alongside it.
-                let has_visual_selection =
-                    self.current_buffer().and_then(|buf| buf.selection.as_ref()).is_some();
-
-                let (original_selection, original_text) = if has_visual_selection {
-                    let sel = self.current_buffer().and_then(|buf| buf.selection.clone());
-                    let text = self
-                        .current_buffer()
-                        .and_then(|buf| buf.yank_selection())
-                        .unwrap_or_default();
-                    (sel, text)
-                } else {
-                    // No visual selection — treat the current line as the target.
-                    let (row, line_len, line_text) = self
-                        .current_buffer()
-                        .map(|buf| {
-                            let row = buf.cursor.row;
-                            let text = buf.lines().get(row).cloned().unwrap_or_default();
-                            let len = text.chars().count();
-                            (row, len, text)
-                        })
-                        .unwrap_or((0, 0, String::new()));
-
-                    let sel = crate::buffer::Selection::new(
-                        crate::buffer::Cursor { row, col: 0 },
-                        crate::buffer::Cursor { row, col: line_len },
-                    );
-                    (Some(sel), line_text)
-                };
-                let target_buffer_idx = self.current_buffer_idx;
-                let language = self
-                    .current_buffer()
-                    .and_then(|buf| buf.file_path.as_deref())
-                    .and_then(|p| p.extension())
-                    .and_then(|e| e.to_str())
-                    .map(|ext| match ext.to_ascii_lowercase().as_str() {
-                        "rs" => "Rust".to_string(),
-                        "py" => "Python".to_string(),
-                        "js" => "JavaScript".to_string(),
-                        "ts" => "TypeScript".to_string(),
-                        "tsx" => "TypeScript TSX".to_string(),
-                        "go" => "Go".to_string(),
-                        "c" | "h" => "C".to_string(),
-                        "cpp" | "cc" | "cxx" | "hpp" => "C++".to_string(),
-                        "java" => "Java".to_string(),
-                        "kt" => "Kotlin".to_string(),
-                        "swift" => "Swift".to_string(),
-                        "rb" => "Ruby".to_string(),
-                        "sh" | "bash" | "zsh" => "Shell".to_string(),
-                        "toml" => "TOML".to_string(),
-                        "json" => "JSON".to_string(),
-                        "yaml" | "yml" => "YAML".to_string(),
-                        "md" => "Markdown".to_string(),
-                        "html" => "HTML".to_string(),
-                        "css" => "CSS".to_string(),
-                        "sql" => "SQL".to_string(),
-                        other => other.to_string(),
-                    });
-
-                self.inline_assist = Some(crate::editor::InlineAssistState {
-                    prompt: String::new(),
-                    original_text,
-                    original_selection,
-                    target_buffer_idx,
-                    language,
-                    response: String::new(),
-                    phase: crate::editor::InlineAssistPhase::Input,
-                    stream_rx: None,
-                    abort_tx: None,
-                });
-                self.mode = Mode::InlineAssist;
-            },
-
-            Action::InlineAssistAccept => {
-                if let Some(state) = self.inline_assist.take() {
-                    let response = state.response.clone();
-                    let buf_idx = state.target_buffer_idx;
-                    if let Some(buf) = self.buffers.get_mut(buf_idx) {
-                        buf.save_undo_snapshot();
-                        // Restore and delete the original selection, then insert response.
-                        if let Some(sel) = state.original_selection {
-                            buf.selection = Some(sel);
-                            buf.delete_selection();
-                        }
-                        if !response.is_empty() {
-                            buf.insert_text_block(&response);
-                        }
-                        // mark_modified() is called internally by delete_selection() and
-                        // insert_text_block(), so no explicit call needed.
-                    }
-                    self.notify_lsp_change();
-                }
-                self.mode = Mode::Normal;
-            },
-
-            Action::InlineAssistCancel => {
-                // Dropping inline_assist fires abort_tx (oneshot sender drops = sends).
-                self.inline_assist = None;
-                self.mode = Mode::Normal;
-            },
-            Action::AgentOpenLastResponse => {
-                self.set_status("Agent panel removed in slim build".to_string());
             },
         }
         Ok(())
