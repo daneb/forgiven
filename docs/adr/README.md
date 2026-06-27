@@ -158,6 +158,7 @@ that motivated it, what was decided, and the consequences.
 | [0148](0148-companion-plain-binary-distribution.md) | Companion: Plain Binary Distribution | Accepted |
 | [0149](0149-scope-reduction-strip-agent-panel-mcp-sidecar-peripheral-features.md) | Scope Reduction: Strip Agent Panel, MCP, Sidecar, and Peripheral Features | Accepted |
 | [0150](0150-remove-all-ai-functionality.md) | Remove All AI Functionality | Accepted |
+| [0151](0151-delete-companion-tauri-app.md) | Delete Companion Tauri App | Accepted |
 
 ## What is an ADR?
 
