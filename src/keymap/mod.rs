@@ -25,7 +25,6 @@ pub enum Mode {
     LocationList,    // LSP location list overlay (goto-definition / references / symbols)
     LspHover,        // Read-only hover info popup (K / SPC l h)
     LspRename,       // LSP rename input popup (SPC l r)
-    ReviewChanges,   // Multi-file review / change set view (ADR 0113)
 }
 
 /// The semantic kind of a tree-sitter text object.

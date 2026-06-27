@@ -15,7 +15,6 @@ impl UI {
         mode: Mode,
         area: Rect,
         diagnostics: &[Diagnostic],
-        ghost_text: Option<(&str, usize, usize)>,
         highlighted_lines: Option<&[Vec<Span<'static>>]>,
         preview_lines: Option<&[Line<'static>]>,
         show_cursor: bool,
@@ -92,15 +91,6 @@ impl UI {
                 let has_diagnostic =
                     diagnostics.iter().any(|d| d.range.start.line as usize == buf_row);
 
-                // Ghost text is only shown on the exact row/col it was requested for.
-                let row_ghost = ghost_text.and_then(|(text, ghost_row, ghost_col)| {
-                    if buf_row == ghost_row && cursor.col == ghost_col {
-                        Some(text.lines().next().unwrap_or(text))
-                    } else {
-                        None
-                    }
-                });
-
                 if soft_wrap && text_width > 0 {
                     // ── Soft-wrap path: emit one visual row per segment ───────
                     let char_len = raw_line_text.chars().count();
@@ -114,7 +104,6 @@ impl UI {
                         // Diagnostic marker only on the first segment; continuation
                         // lines get a plain blank gutter so the dot isn't repeated.
                         let seg_diag = has_diagnostic && seg == 0;
-                        let seg_ghost = if seg == 0 { row_ghost } else { None };
 
                         let mut line =
                             if let Some(spans) = highlighted_lines.and_then(|h| h.get(line_idx)) {
@@ -123,7 +112,6 @@ impl UI {
                                     seg_start_col,
                                     viewport_width,
                                     seg_diag,
-                                    seg_ghost,
                                     selection,
                                     buf_row,
                                 )
@@ -136,7 +124,6 @@ impl UI {
                                     selection,
                                     *scroll_row,
                                     seg_diag,
-                                    seg_ghost,
                                 )
                             };
 
@@ -168,7 +155,6 @@ impl UI {
                                 *scroll_col,
                                 viewport_width,
                                 has_diagnostic,
-                                row_ghost,
                                 selection,
                                 buf_row,
                             )
@@ -181,7 +167,6 @@ impl UI {
                                 selection,
                                 *scroll_row,
                                 has_diagnostic,
-                                row_ghost,
                             )
                         };
 
@@ -283,8 +268,8 @@ impl UI {
             "██║     ╚██████╔╝██║  ██║╚██████╔╝██║ ╚████╔╝ ███████╗██║ ╚████║",
             "╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝",
         ];
-        const TAGLINE: &str = "an AI-first terminal code editor  ·  MIT License";
-        const HINTS: &str = "SPC f f  open file    SPC e e  explorer    SPC a a  agent";
+        const TAGLINE: &str = "a terminal code editor  ·  MIT License";
+        const HINTS: &str = "SPC f f  open file    SPC e e  explorer    SPC g g  lazygit";
         const LOGO_W: usize = 64;
 
         let area_w = area.width as usize;
@@ -350,15 +335,13 @@ impl UI {
         frame.render_widget(Paragraph::new(lines), logo_area);
     }
 
-    /// Render a pre-highlighted line (from syntect) with gutter marker, optional selection
-    /// highlight, and ghost text.  Selection is overlaid on top of syntax colours so both
-    /// are visible simultaneously.
+    /// Render a pre-highlighted line (from syntect) with gutter marker and optional selection
+    /// highlight.  Selection is overlaid on top of syntax colours so both are visible.
     pub(super) fn render_highlighted_line(
         spans: &[Span<'static>],
         scroll_col: usize,
         viewport_width: usize,
         has_diagnostic: bool,
-        ghost: Option<&str>,
         selection: &Option<Selection>,
         row: usize,
     ) -> Line<'static> {
@@ -466,14 +449,10 @@ impl UI {
             }
         }
 
-        if let Some(g) = ghost {
-            out_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
-        }
-
         Line::from(out_spans)
     }
 
-    /// Render a single line with optional selection highlighting and ghost text.
+    /// Render a single line with optional selection highlighting.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_line(
         line_text: &str,
@@ -483,8 +462,6 @@ impl UI {
         selection: &Option<Selection>,
         _scroll_row: usize,
         has_diagnostic: bool,
-        // First line of inline completion ghost text, shown dimmed after cursor.
-        ghost: Option<&str>,
     ) -> Line<'static> {
         let chars: Vec<char> = line_text.chars().collect();
 
@@ -535,9 +512,6 @@ impl UI {
 
             let mut line_spans = diag_marker;
             line_spans.extend(spans);
-            if let Some(g) = ghost {
-                line_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
-            }
             Line::from(line_spans)
         } else {
             // No selection, just render normally
@@ -549,9 +523,6 @@ impl UI {
 
             let mut line_spans = diag_marker;
             line_spans.push(Span::raw(visible_text));
-            if let Some(g) = ghost {
-                line_spans.push(Span::styled(g.to_string(), Style::default().fg(Color::DarkGray)));
-            }
             Line::from(line_spans)
         }
     }

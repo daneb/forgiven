@@ -140,8 +140,6 @@ pub struct RenderContext<'a> {
     /// Sticky scroll context header text (ADR 0107).
     /// First line of the innermost enclosing scope that started above `scroll_row`.
     pub sticky_header: Option<&'a str>,
-    /// Review changes overlay data (Mode::ReviewChanges, ADR 0113).
-    pub review_changes: Option<&'a crate::editor::ReviewChangesState>,
     /// When `true`, long lines are visually wrapped at the viewport edge.
     pub soft_wrap: bool,
     /// Syntax highlighter — used for code blocks inside markdown rendering.
@@ -320,7 +318,6 @@ impl UI {
                 mode,
                 split_chunks[0],
                 diagnostics,
-                None,
                 left_hl,
                 left_preview,
                 !split_right_focused,
@@ -344,7 +341,6 @@ impl UI {
                 mode,
                 split_chunks[2],
                 diagnostics,
-                None,
                 right_hl,
                 None,
                 split_right_focused,
@@ -362,7 +358,6 @@ impl UI {
                 mode,
                 main_area,
                 diagnostics,
-                None,
                 highlighted_lines,
                 preview_lines,
                 true,
@@ -442,11 +437,6 @@ impl UI {
         if let Some(info) = file_info {
             let explorer_right_edge = if explorer_visible { 25u16 } else { 0 };
             Self::render_file_info_popup(frame, info, size, explorer_right_edge);
-        }
-
-        // Render review changes overlay (Mode::ReviewChanges, ADR 0113)
-        if let Some(review) = ctx.review_changes {
-            Self::render_review_changes_overlay(frame, review, size);
         }
     }
 }

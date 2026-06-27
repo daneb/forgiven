@@ -545,11 +545,6 @@ impl Editor {
                 },
                 fold_data: fold_data_ref,
                 sticky_header: sticky_header_ref,
-                review_changes: if mode == Mode::ReviewChanges {
-                    self.review_changes.as_ref()
-                } else {
-                    None
-                },
                 soft_wrap: self.config.soft_wrap,
                 highlighter: &self.highlighter,
             };

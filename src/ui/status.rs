@@ -36,7 +36,6 @@ impl UI {
             Mode::LocationList => "LSP",
             Mode::LspHover => "HOVER",
             Mode::LspRename => "RENAME",
-            Mode::ReviewChanges => "REVIEW",
         };
 
         let mode_color = match mode {
@@ -59,7 +58,6 @@ impl UI {
             Mode::LocationList => Color::LightCyan,
             Mode::LspHover => Color::LightYellow,
             Mode::LspRename => Color::LightGreen,
-            Mode::ReviewChanges => Color::LightGreen,
         };
 
         let mut spans = vec![

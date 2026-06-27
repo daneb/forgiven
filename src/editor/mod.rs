@@ -12,12 +12,10 @@ mod state;
 mod surround;
 mod text_objects;
 pub(crate) use state::{
-    apply_hunk_verdicts, ClipboardType, FoldCache, HighlightCache, LspState, MarkdownCache,
-    SplitState, StickyScrollCache,
+    ClipboardType, FoldCache, HighlightCache, LspState, MarkdownCache, SplitState,
+    StickyScrollCache,
 };
-pub use state::{
-    DiffLine, HoverPopupState, LocationEntry, LocationListState, ReviewChangesState, Verdict,
-};
+pub use state::{HoverPopupState, LocationEntry, LocationListState};
 
 use anyhow::Result;
 use crossterm::{
@@ -110,10 +108,6 @@ pub struct Editor {
     // ── Surround operations (ADR 0110) ────────────────────────────────────────
     /// The `from` char stored between `cs{from}` and `{to}` keypresses.
     surround_change_from: Option<char>,
-
-    // ── Multi-file review / change set view (ADR 0113) ───────────────────────
-    /// Active only while `mode == Mode::ReviewChanges`.
-    pub review_changes: Option<ReviewChangesState>,
 
     // ── Tree-sitter AST cache ─────────────────────────────────────────────────
     /// Wraps the Tree-sitter `Parser`; shared across all buffers (language is
@@ -242,7 +236,6 @@ impl Editor {
             highlight_cache: None,
             visual_text_obj_prefix: None,
             surround_change_from: None,
-            review_changes: None,
             ts_engine: crate::treesitter::TsEngine::new(),
             ts_cache: std::collections::HashMap::new(),
             ts_versions: std::collections::HashMap::new(),

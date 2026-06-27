@@ -106,7 +106,6 @@ impl Editor {
             Mode::LocationList => self.handle_location_list_mode(key)?,
             Mode::LspHover => self.handle_lsp_hover_mode(key)?,
             Mode::LspRename => self.handle_lsp_rename_mode(key)?,
-            Mode::ReviewChanges => self.handle_review_changes_mode(key)?,
         }
 
         Ok(())
@@ -129,10 +128,9 @@ impl Editor {
     }
 
     pub(super) fn handle_visual_mode(&mut self, key: KeyEvent) -> Result<()> {
-        // ── Leader key sequences (e.g. SPC a i) from Visual mode ─────────────
+        // ── Leader key sequences from Visual mode ─────────────────────────────
         // Forward Space and any in-progress leader sequence to the normal-mode
-        // handler so the visual selection is preserved when triggering actions
-        // like InlineAssistStart.
+        // handler so the visual selection is preserved when triggering actions.
         if key.code == KeyCode::Char(' ') || self.key_handler.leader_active() {
             let action = self.key_handler.handle_normal(key);
             if !matches!(action, Action::Noop) {
